@@ -1,0 +1,1510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-Camera VLM Monitor</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@300;400;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        :root {
+            --nvidia-green: #0078b9;
+            --nvidia-green-dark: #00758f;
+            --nvidia-green-glow: rgba(0, 114, 185, 0.3);
+            --bg-dark: #0a0a0a;
+            --bg-card: #1a1a1a;
+            --bg-elevated: #252525;
+            --text-primary: #ffffff;
+            --text-secondary: #a0a0a0;
+            --border-color: #333;
+            --alert-red: #ff3333;
+            --alert-yellow: #ffaa00;
+        }
+        
+        body {
+            font-family: 'Rajdhani', sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            overflow-x: hidden;
+        }
+        
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-image: 
+                linear-gradient(rgba(118, 185, 0, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(118, 185, 0, 0.03) 1px, transparent 1px);
+            background-size: 50px 50px;
+            pointer-events: none;
+            z-index: 0;
+        }
+        
+        .app-container {
+            position: relative;
+            z-index: 1;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        header {
+            background: linear-gradient(135deg, var(--bg-card) 0%, rgba(118, 185, 0, 0.05) 100%);
+            border-bottom: 2px solid var(--nvidia-green);
+            padding: 1.5rem 2rem;
+            box-shadow: 0 4px 20px rgba(118, 185, 0, 0.1);
+        }
+        
+        .header-content {
+            max-width: 1800px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        h1 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            background: linear-gradient(135deg, var(--nvidia-green) 0%, #683fd9 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            background: rgba(118, 185, 0, 0.1);
+            border: 1px solid var(--nvidia-green);
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+        
+
+        
+        main {
+            flex: 1;
+            padding: 2rem;
+            max-width: 1800px;
+            margin: 0 auto;
+            width: 100%;
+        }
+        
+        .controls-bar {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 2rem;
+            flex-wrap: wrap;
+        }
+
+        .camera-form {
+            display: grid;
+            grid-template-columns: minmax(160px, 0.7fr) minmax(180px, 0.8fr) minmax(300px, 2fr) auto;
+            align-items: end;
+            gap: 1rem;
+            margin-bottom: 2rem;
+            padding: 1.25rem;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+        }
+
+        .camera-form label,
+        .camera-settings label {
+            display: block;
+            margin-bottom: 0.4rem;
+        }
+
+        .camera-form input,
+        .camera-form select,
+        .camera-settings input,
+        .camera-settings textarea {
+            width: 100%;
+        }
+
+        .camera-form-help,
+        .camera-form-status {
+            grid-column: 1 / -1;
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+
+        .camera-form-status {
+            min-height: 1.25rem;
+        }
+
+        .camera-form-status[data-state="error"] {
+            color: var(--alert-red);
+        }
+
+        .camera-form-status[data-state="success"] {
+            color: var(--nvidia-green);
+        }
+
+        .pairing-panel {
+            max-width: 520px;
+            margin-bottom: 1.5rem;
+            padding: 1rem;
+            border: 1px solid var(--border-color);
+            border-left: 4px solid var(--nvidia-green);
+            background: var(--bg-card);
+        }
+
+        .pairing-panel h2 {
+            margin: 0 0 0.5rem;
+            font-size: 1rem;
+        }
+
+        .pairing-panel form,
+        .browser-device-row {
+            display: flex;
+            align-items: end;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+        }
+
+        .pairing-panel label {
+            flex: 1 1 180px;
+        }
+
+        .browser-source-fields[hidden],
+        .rtsp-source-fields[hidden],
+        .pairing-panel[hidden] {
+            display: none;
+        }
+
+        .camera-source-meta {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
+            padding: 0.5rem 1rem;
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+        }
+        
+        .control-group {
+            background: var(--bg-card);
+            padding: 1rem 1.5rem;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+        
+        label {
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            font-size: 0.85rem;
+            letter-spacing: 1px;
+        }
+        
+        input, select, textarea {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+        }
+        
+        input:focus, select:focus, textarea:focus {
+            outline: none;
+            border-color: var(--nvidia-green);
+            box-shadow: 0 0 0 3px var(--nvidia-green-glow);
+        }
+        
+        button {
+            background: linear-gradient(135deg, var(--nvidia-green) 0%, var(--nvidia-green-dark) 100%);
+            color: white;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 4px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            font-size: 0.9rem;
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px var(--nvidia-green-glow);
+        }
+        
+        button:active {
+            transform: translateY(0);
+        }
+        
+        /* Camera Grid */
+        .camera-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+        
+        @media (max-width: 1400px) {
+            .camera-grid {
+                grid-template-columns: repeat(3, 1fr);
+            }
+        }
+        
+        @media (max-width: 1000px) {
+            .camera-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+        
+        @media (max-width: 600px) {
+            .camera-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 700px) {
+            main {
+                padding: 1rem;
+            }
+
+            .controls-bar,
+            .camera-form {
+                width: 100%;
+                grid-template-columns: 1fr;
+            }
+
+            .control-group {
+                width: 100%;
+                flex-wrap: wrap;
+                padding: 0.75rem;
+            }
+
+            #global-prompt {
+                width: 100% !important;
+            }
+
+            .alert-header {
+                align-items: stretch;
+                flex-direction: column;
+                gap: 0.75rem;
+            }
+
+            .alert-header > div:last-child {
+                width: 100%;
+                flex-wrap: wrap;
+                gap: 0.5rem !important;
+            }
+
+            #alert-filter {
+                flex: 1;
+                min-width: 0 !important;
+            }
+        }
+        
+        .camera-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            overflow: hidden;
+            transition: all 0.3s ease;
+        }
+        
+        .camera-card:hover {
+            border-color: var(--nvidia-green);
+            box-shadow: 0 4px 20px var(--nvidia-green-glow);
+        }
+        
+        .camera-card.alert {
+            border-color: var(--alert-red);
+            box-shadow: 0 0 20px rgba(255, 51, 51, 0.3);
+            animation: alertPulse 2s infinite;
+        }
+        
+        @keyframes alertPulse {
+            0%, 100% { box-shadow: 0 0 20px rgba(255, 51, 51, 0.3); }
+            50% { box-shadow: 0 0 30px rgba(255, 51, 51, 0.6); }
+        }
+        
+        .camera-header {
+            background: linear-gradient(135deg, rgba(118, 185, 0, 0.1) 0%, transparent 100%);
+            padding: 1rem;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .camera-title {
+            font-size: 1.2rem;
+            font-weight: 700;
+            letter-spacing: 1px;
+        }
+        
+        .camera-id {
+            background: var(--nvidia-green);
+            color: white;
+            padding: 0.25rem 0.75rem;
+            border-radius: 12px;
+            font-size: 0.85rem;
+            font-weight: 700;
+        }
+        
+        .camera-toggles {
+            display: flex;
+            gap: 0.75rem;
+            padding: 0.75rem 1rem;
+            background: var(--bg-elevated);
+            border-bottom: 1px solid var(--border-color);
+            font-size: 0.85rem;
+        }
+        
+        .toggle-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .toggle-item label {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            cursor: pointer;
+        }
+        
+        .camera-video {
+            position: relative;
+            width: 100%;
+            height: 200px;
+            background: var(--bg-dark);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .camera-video img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+
+        .video-state {
+            position: absolute;
+            inset: auto 0 0;
+            padding: 0.45rem 0.65rem;
+            background: rgba(0, 0, 0, 0.78);
+            color: var(--text-secondary);
+            font: 0.75rem 'JetBrains Mono', monospace;
+        }
+
+        .camera-settings {
+            border-top: 1px solid var(--border-color);
+            padding: 0.75rem 1rem;
+            background: var(--bg-elevated);
+        }
+
+        .camera-settings summary {
+            cursor: pointer;
+            font-weight: 600;
+            color: var(--text-secondary);
+        }
+
+        .camera-settings form {
+            display: grid;
+            gap: 0.75rem;
+            padding-top: 0.75rem;
+        }
+
+        .camera-settings textarea {
+            min-height: 5rem;
+            resize: vertical;
+        }
+
+        .camera-settings-actions {
+            display: flex;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+        }
+
+        .button-danger {
+            background: #8f2828;
+        }
+
+        .camera-detections {
+            color: var(--nvidia-green);
+            font-size: 0.8rem;
+            margin-top: 0.4rem;
+        }
+
+        .empty-state {
+            grid-column: 1 / -1;
+            padding: 2rem;
+            border: 1px dashed var(--border-color);
+            color: var(--text-secondary);
+            text-align: center;
+        }
+        
+
+        
+        .camera-analysis {
+            padding: 1rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            line-height: 1.6;
+            color: var(--text-secondary);
+            min-height: 80px;
+            max-height: 120px;
+            overflow-y: auto;
+        }
+        
+        .camera-analysis.alert-text {
+            color: var(--alert-red);
+            font-weight: 600;
+        }
+        
+        .camera-timestamp {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            opacity: 0.7;
+            margin-top: 0.5rem;
+        }
+        
+        /* NEW: YOLO summary badge in camera card */
+        .yolo-summary {
+            display: inline-block;
+            background: rgba(0, 123, 185, 0.15);
+            border: 1px solid var(--nvidia-green);
+            color: var(--nvidia-green);
+            padding: 0.25rem 0.75rem;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            margin-top: 0.5rem;
+            font-family: 'JetBrains Mono', monospace;
+        }
+        
+        /* Alert Panel */
+        .alert-panel {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        
+        .alert-header {
+            padding: 1rem 1.5rem;
+            background: linear-gradient(135deg, rgba(255, 51, 51, 0.1) 0%, transparent 100%);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .alert-title {
+            font-size: 1.5rem;
+            font-weight: 700;
+            letter-spacing: 1px;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .alert-count {
+            background: var(--alert-red);
+            color: white;
+            padding: 0.25rem 0.75rem;
+            border-radius: 12px;
+            font-size: 0.9rem;
+        }
+        
+        .alert-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        .alert-item {
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid var(--border-color);
+            transition: background 0.2s ease;
+        }
+        
+        .alert-item:hover {
+            background: rgba(255, 51, 51, 0.05);
+        }
+        
+        .alert-item-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.5rem;
+        }
+        
+        .alert-camera {
+            font-weight: 700;
+            color: var(--nvidia-green);
+        }
+        
+        .alert-time {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            font-family: 'JetBrains Mono', monospace;
+        }
+        
+        .alert-text {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+            line-height: 1.6;
+            color: var(--text-primary);
+        }
+        
+        /* NEW: YOLO badge in alerts */
+        .alert-yolo-badge {
+            display: inline-block;
+            background: rgba(0, 129, 185, 0.2);
+            border: 1px solid var(--nvidia-green);
+            color: var(--nvidia-green);
+            padding: 0.25rem 0.75rem;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            margin-top: 0.5rem;
+            font-family: 'JetBrains Mono', monospace;
+        }
+        
+        /* Modal for viewing alert images */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 10000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.9);
+            animation: fadeIn 0.2s ease;
+        }
+        
+        .modal.active {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        
+        .modal-content {
+            position: relative;
+            max-width: 90%;
+            max-height: 90%;
+            background: var(--bg-card);
+            border-radius: 8px;
+            border: 2px solid var(--nvidia-green);
+            box-shadow: 0 0 50px rgba(0, 120, 185, 0.3);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        
+        .modal-header {
+            background: linear-gradient(135deg, var(--bg-card) 0%, rgba(118, 185, 0, 0.1) 100%);
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid var(--nvidia-green);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .modal-title {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: var(--nvidia-green);
+        }
+        
+        .modal-close {
+            background: none;
+            border: 2px solid var(--nvidia-green);
+            color: var(--nvidia-green);
+            font-size: 1.5rem;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+            padding: 0;
+        }
+        
+        .modal-close:hover {
+            background: var(--nvidia-green);
+            color: var(--bg-dark);
+            transform: rotate(90deg);
+        }
+        
+        .modal-body {
+            padding: 1rem;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: auto;
+            max-height: calc(90vh - 100px);
+        }
+        
+        .modal-image {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+            border-radius: 4px;
+        }
+        
+        .modal-info {
+            padding: 1rem 1.5rem;
+            border-top: 1px solid var(--border-color);
+            background: var(--bg-elevated);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+        }
+        
+        .alert-item {
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        
+        .alert-item:hover {
+            background: rgba(118, 185, 0, 0.05);
+            border-color: var(--nvidia-green);
+            transform: translateX(4px);
+        }
+        
+        .alert-item-clickable::after {
+            content: '🖼️ Click to view image';
+            display: block;
+            font-size: 0.75rem;
+            color: var(--nvidia-green);
+            margin-top: 0.5rem;
+            opacity: 0.7;
+        }
+
+        
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        
+        ::-webkit-scrollbar-track {
+            background: var(--bg-dark);
+        }
+        
+        ::-webkit-scrollbar-thumb {
+            background: var(--nvidia-green);
+            border-radius: 4px;
+        }
+        
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--nvidia-green-dark);
+        }
+        
+
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        <header>
+            <div class="header-content">
+                <h1>ACTA AI Enabled CCTV Monitor</h1>
+                <div class="status-badge">
+                    
+                    <span id="status-text">ACTIVE</span>
+                </div>
+            </div>
+        </header>
+        
+        <main>
+            <div class="controls-bar">
+                <div class="control-group">
+                    <label>Global Prompt:</label>
+                    <input type="text" id="global-prompt" 
+                           placeholder="Describe any suspicious activity..." 
+                           style="width: 400px;">
+                    <button onclick="applyGlobalPrompt()">Apply to All</button>
+                </div>
+                
+                <div class="control-group">
+                    <label>Frame Interval:</label>
+                    <input type="number" id="global-interval" 
+                           value="60" min="10" max="600" 
+                           style="width: 100px;">
+                    <button onclick="applyGlobalInterval()">Apply to All</button>
+                </div>
+                
+                <div class="control-group">
+                    <button onclick="refreshAll()">🔄 Refresh All</button>
+                    <button onclick="clearAlerts()">🗑️ Clear Alerts</button>
+                </div>
+            </div>
+
+            <section class="pairing-panel" id="pairing-panel" aria-labelledby="pairing-title" hidden>
+                <h2 id="pairing-title">Pair this device</h2>
+                <p>Enter the one-time pairing code shown in the camera server terminal.</p>
+                <form id="pairing-form" onsubmit="pairDevice(event)">
+                    <label for="pairing-code">Pairing code
+                        <input id="pairing-code" type="password" autocomplete="one-time-code" required>
+                    </label>
+                    <button type="submit">Pair device</button>
+                </form>
+                <p class="camera-form-status" id="pairing-status" role="status" aria-live="polite"></p>
+            </section>
+
+            <form class="camera-form" id="camera-form" onsubmit="addCamera(event)">
+                <div>
+                    <label for="camera-name">Camera name</label>
+                    <input id="camera-name" name="name" type="text" maxlength="80" autocomplete="off" required>
+                </div>
+                <div>
+                    <label for="camera-source-type">Source</label>
+                    <select id="camera-source-type" name="source_type" onchange="syncCameraSourceFields()">
+                        <option value="rtsp">Network RTSP</option>
+                        <option value="browser">This device camera</option>
+                    </select>
+                </div>
+                <div class="rtsp-source-fields" id="rtsp-source-fields">
+                    <label for="camera-rtsp-url">RTSP URL</label>
+                    <input id="camera-rtsp-url" name="rtsp_url" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+                </div>
+                <div class="browser-source-fields" id="browser-source-fields" hidden>
+                    <label for="browser-camera-device">Camera device</label>
+                    <div class="browser-device-row">
+                        <select id="browser-camera-device" aria-describedby="browser-camera-help">
+                            <option value="">Default camera</option>
+                        </select>
+                        <button type="button" onclick="refreshBrowserDevices()">Find cameras</button>
+                    </div>
+                </div>
+                <button id="add-camera-button" type="submit">Add camera</button>
+                <p class="camera-form-help" id="browser-camera-help">RTSP sources accept rtsp:// or rtsps:// URLs. Browser cameras require camera permission and an open page; iPhone access requires HTTPS and pairing.</p>
+                <p class="camera-form-status" id="camera-form-status" role="status" aria-live="polite"></p>
+            </form>
+            
+            <div class="camera-grid" id="camera-grid">
+                <!-- Cameras will be inserted here -->
+            </div>
+            
+            <div class="alert-panel">
+                <div class="alert-header">
+                    <div class="alert-title">
+                        🚨 ALERT LOG
+                        <span class="alert-count" id="alert-count">0</span>
+                    </div>
+                    <div style="display: flex; gap: 1rem; align-items: center;">
+                        <label style="font-size: 0.85rem;">Filter by Camera:</label>
+                        <select id="alert-filter" onchange="filterAlerts()" style="min-width: 150px;">
+                            <option value="all">All Cameras</option>
+                        </select>
+                        <button onclick="refreshAlerts()">Refresh</button>
+                    </div>
+                </div>
+                <div class="alert-list" id="alert-list">
+                    <div style="padding: 2rem; text-align: center; color: var(--text-secondary);">
+                        No alerts detected
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    
+    <script>
+        const API_BASE = window.location.origin;
+        let cameras = {};
+        let allAlerts = []; // Store all fetched alerts for filtering
+        const browserSessions = new Map();
+
+        function escapeHtml(value) {
+            return String(value ?? '').replace(/[&<>"']/g, character => ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;'
+            })[character]);
+        }
+
+        async function apiRequest(path, options = {}) {
+            const response = await fetch(`${API_BASE}${path}`, options);
+            let result = {};
+            try {
+                result = await response.json();
+            } catch (error) {
+                result = {};
+            }
+            if (!response.ok) {
+                if (response.status === 401) document.getElementById('pairing-panel').hidden = false;
+                const error = new Error(result.error || `Request failed (${response.status})`);
+                error.status = response.status;
+                throw error;
+            }
+            return result;
+        }
+
+        function showFormStatus(message, state = '') {
+            const status = document.getElementById('camera-form-status');
+            status.textContent = message;
+            status.dataset.state = state;
+        }
+        
+        async function init() {
+            await updateStatus();
+            startAlertPolling();
+        }
+
+        async function pairDevice(event) {
+            event.preventDefault();
+            const status = document.getElementById('pairing-status');
+            status.textContent = 'Pairing…';
+            try {
+                await apiRequest('/api/pair', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({code: document.getElementById('pairing-code').value})
+                });
+                document.getElementById('pairing-panel').hidden = true;
+                document.getElementById('pairing-form').reset();
+                await updateStatus();
+            } catch (error) {
+                status.textContent = error.message;
+                status.dataset.state = 'error';
+            }
+        }
+
+        function syncCameraSourceFields() {
+            const isBrowser = document.getElementById('camera-source-type').value === 'browser';
+            document.getElementById('rtsp-source-fields').hidden = isBrowser;
+            document.getElementById('browser-source-fields').hidden = !isBrowser;
+            document.getElementById('camera-rtsp-url').required = !isBrowser;
+        }
+
+        async function refreshBrowserDevices() {
+            const status = document.getElementById('camera-form-status');
+            if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+                showFormStatus('Camera access requires HTTPS or localhost in a supported browser.', 'error');
+                return;
+            }
+            let permissionStream;
+            try {
+                permissionStream = await navigator.mediaDevices.getUserMedia({video: true, audio: false});
+                permissionStream.getTracks().forEach(track => track.stop());
+                const devices = (await navigator.mediaDevices.enumerateDevices()).filter(device => device.kind === 'videoinput');
+                const select = document.getElementById('browser-camera-device');
+                const previousValue = select.value;
+                select.innerHTML = '<option value="">Default camera</option>';
+                devices.forEach((device, index) => {
+                    const option = document.createElement('option');
+                    option.value = device.deviceId;
+                    option.textContent = device.label || `Camera ${index + 1}`;
+                    select.appendChild(option);
+                });
+                if (devices.some(device => device.deviceId === previousValue)) select.value = previousValue;
+                showFormStatus(devices.length ? `${devices.length} camera device(s) found.` : 'No camera devices found.', devices.length ? 'success' : 'error');
+            } catch (error) {
+                permissionStream?.getTracks().forEach(track => track.stop());
+                showFormStatus(`Camera permission failed: ${error.message}`, 'error');
+            }
+        }
+
+        function getBrowserVideoConstraints() {
+            const deviceId = document.getElementById('browser-camera-device').value;
+            const video = {
+                width: {ideal: 640},
+                height: {ideal: 480},
+                frameRate: {ideal: 5, max: 10}
+            };
+            if (deviceId) video.deviceId = {exact: deviceId};
+            else video.facingMode = {ideal: 'environment'};
+            return {video, audio: false};
+        }
+
+        async function startBrowserCapture(cameraId, existingStream = null) {
+            if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+                throw new Error('Camera access requires HTTPS or localhost in a supported browser.');
+            }
+            const mediaStream = existingStream || await navigator.mediaDevices.getUserMedia(getBrowserVideoConstraints());
+            const video = document.createElement('video');
+            video.autoplay = true;
+            video.muted = true;
+            video.playsInline = true;
+            video.srcObject = mediaStream;
+            await video.play();
+
+            const socketUrl = new URL(`/api/camera/${cameraId}/input`, window.location.href);
+            socketUrl.protocol = socketUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+            const socket = new WebSocket(socketUrl);
+            socket.binaryType = 'arraybuffer';
+            try {
+                await new Promise((resolve, reject) => {
+                    const timeout = setTimeout(() => reject(new Error('Camera server connection timed out.')), 10000);
+                    socket.addEventListener('open', () => { clearTimeout(timeout); resolve(); }, {once: true});
+                    socket.addEventListener('error', () => { clearTimeout(timeout); reject(new Error('Could not connect to camera server.')); }, {once: true});
+                });
+            } catch (error) {
+                socket.close();
+                mediaStream.getTracks().forEach(track => track.stop());
+                throw error;
+            }
+
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            let sending = false;
+            const sendFrame = () => {
+                if (sending || socket.readyState !== WebSocket.OPEN || socket.bufferedAmount > 500000 || !video.videoWidth) return;
+                const scale = Math.min(1, 640 / video.videoWidth, 480 / video.videoHeight);
+                canvas.width = Math.round(video.videoWidth * scale);
+                canvas.height = Math.round(video.videoHeight * scale);
+                context.drawImage(video, 0, 0, canvas.width, canvas.height);
+                sending = true;
+                canvas.toBlob(blob => {
+                    if (blob && socket.readyState === WebSocket.OPEN) socket.send(blob);
+                    sending = false;
+                }, 'image/jpeg', 0.72);
+            };
+            const timer = setInterval(sendFrame, 500);
+            const session = {mediaStream, socket, timer};
+            browserSessions.set(cameraId, session);
+            socket.addEventListener('close', () => {
+                if (browserSessions.get(cameraId) !== session) return;
+                clearInterval(timer);
+                mediaStream.getTracks().forEach(track => track.stop());
+                browserSessions.delete(cameraId);
+                showFormStatus(`Camera ${cameraId} disconnected. Reconnect while this page is open.`, 'error');
+                updateStatus();
+            }, {once: true});
+        }
+
+        async function toggleBrowserCapture(cameraId) {
+            const currentSession = browserSessions.get(cameraId);
+            if (currentSession) {
+                clearInterval(currentSession.timer);
+                currentSession.mediaStream.getTracks().forEach(track => track.stop());
+                browserSessions.delete(cameraId);
+                currentSession.socket.close();
+                showFormStatus(`Camera ${cameraId} stopped.`, 'success');
+                return;
+            }
+            document.getElementById('camera-source-type').value = 'browser';
+            syncCameraSourceFields();
+            try {
+                await startBrowserCapture(cameraId);
+                showFormStatus(`Camera ${cameraId} is sharing this device. Keep this page open.`, 'success');
+                await updateStatus();
+            } catch (error) {
+                showFormStatus(error.message, 'error');
+            }
+        }
+        
+        async function updateStatus() {
+            try {
+                const data = await apiRequest('/api/status');
+                cameras = data.cameras || {};
+                document.getElementById('status-text').textContent = data.running ? 'RUNNING' : 'STOPPED';
+                const grid = document.getElementById('camera-grid');
+                grid.innerHTML = '';
+
+                const cameraList = Object.values(cameras).sort((left, right) => left.id - right.id);
+                if (cameraList.length === 0) {
+                    grid.innerHTML = '<div class="empty-state">No cameras added</div>';
+                    return data;
+                }
+
+                cameraList.forEach(camera => {
+                    const cameraName = escapeHtml(camera.name);
+                    const cameraPrompt = escapeHtml(camera.prompt || '');
+                    const sourceLabel = escapeHtml(camera.source_label || (camera.source_type === 'browser' ? 'Browser camera' : 'RTSP'));
+                    const card = document.createElement('div');
+                    card.className = 'camera-card';
+                    card.id = `camera-${camera.id}`;
+
+                    card.innerHTML = `
+                        <div class="camera-header">
+                            <div class="camera-title">${cameraName}</div>
+                            <div class="camera-id">CAM ${camera.id}</div>
+                        </div>
+                        <div class="camera-toggles">
+                            <div class="toggle-item">
+                                <label for="stream-toggle-${camera.id}">Stream</label>
+                                <input type="checkbox"
+                                       id="stream-toggle-${camera.id}"
+                                       ${camera.streaming_enabled ? 'checked' : ''}
+                                       onchange="toggleStream(${camera.id}, this.checked)">
+                            </div>
+                            <div class="toggle-item">
+                                <label for="analysis-toggle-${camera.id}">Analysis</label>
+                                <input type="checkbox"
+                                       id="analysis-toggle-${camera.id}"
+                                       ${camera.analysis_enabled ? 'checked' : ''}
+                                       onchange="toggleAnalysis(${camera.id}, this.checked)">
+                            </div>
+                            <div class="toggle-item">
+                                <label for="yolo-toggle-${camera.id}">YOLO</label>
+                                <input type="checkbox"
+                                       id="yolo-toggle-${camera.id}"
+                                       ${camera.yolo_enabled ? 'checked' : ''}
+                                       ${!data.yolo_available && !camera.yolo_enabled ? 'disabled title="YOLO model unavailable"' : ''}
+                                       onchange="toggleYOLO(${camera.id}, this.checked)">
+                            </div>
+                        </div>
+
+                        <div class="camera-source-meta">
+                            <span>${sourceLabel}</span>
+                            ${camera.source_type === 'browser' ? `<button type="button" onclick="toggleBrowserCapture(${camera.id})">${browserSessions.has(camera.id) ? 'Stop camera' : 'Connect browser camera'}</button>` : ''}
+                        </div>
+
+                        <div class="camera-video">
+                            <img id="feed-${camera.id}"
+                                 src="${camera.streaming_enabled ? `${API_BASE}/api/camera/${camera.id}/stream` : ''}"
+                                 alt="Live video from ${cameraName}">
+                            <div class="video-state" id="feed-state-${camera.id}">${camera.streaming_enabled ? (camera.source_type === 'browser' ? 'Waiting for browser camera' : 'Waiting for RTSP video') : 'Stream disabled'}</div>
+                        </div>
+                        <div class="camera-analysis" id="analysis-${camera.id}">
+                            Waiting for analysis...
+                        </div>
+                        <div class="camera-detections" id="detections-${camera.id}" aria-live="polite"></div>
+                        <details class="camera-settings">
+                            <summary>Camera settings</summary>
+                            <form id="settings-${camera.id}" onsubmit="saveCameraSettings(event, ${camera.id})">
+                                <div>
+                                    <label for="name-${camera.id}">Camera name</label>
+                                    <input id="name-${camera.id}" name="name" type="text" maxlength="80" value="${cameraName}" required>
+                                </div>
+                                ${camera.source_type === 'rtsp' ? `<div>
+                                    <label for="url-${camera.id}">Replace RTSP URL</label>
+                                    <input id="url-${camera.id}" name="rtsp_url" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false">
+                                </div>` : ''}
+                                <div>
+                                    <label for="prompt-${camera.id}">Analysis prompt</label>
+                                    <textarea id="prompt-${camera.id}" name="prompt" maxlength="2000">${cameraPrompt}</textarea>
+                                </div>
+                                <div>
+                                    <label for="interval-${camera.id}">Frame interval (seconds)</label>
+                                    <input id="interval-${camera.id}" name="frame_interval" type="number" min="1" max="3600" value="${camera.frame_interval}" required>
+                                </div>
+                                <div class="camera-settings-actions">
+                                    <button type="submit">Save settings</button>
+                                    <button class="button-danger" type="button" onclick="deleteCamera(${camera.id})">Remove camera</button>
+                                </div>
+                            </form>
+                        </details>
+                    `;
+                    grid.appendChild(card);
+                });
+                return data;
+            } catch (error) {
+                console.error('Failed to fetch status:', error);
+                document.getElementById('status-text').textContent = error.status === 401
+                    ? 'PAIRING REQUIRED'
+                    : error.status === 426 ? 'HTTPS REQUIRED' : 'OFFLINE';
+                if (error.status === 426) showFormStatus('Open this page over HTTPS to connect a camera from another device.', 'error');
+            }
+        }
+
+        async function addCamera(event) {
+            event.preventDefault();
+            const form = event.currentTarget;
+            const button = document.getElementById('add-camera-button');
+            const formData = new FormData(form);
+            const sourceType = formData.get('source_type');
+            button.disabled = true;
+            showFormStatus(sourceType === 'browser' ? 'Requesting camera access…' : 'Connecting camera…');
+            let mediaStream = null;
+            try {
+                if (sourceType === 'browser') mediaStream = await navigator.mediaDevices.getUserMedia(getBrowserVideoConstraints());
+                const result = await apiRequest('/api/cameras', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        name: formData.get('name'),
+                        source_type: sourceType,
+                        source_label: sourceType === 'browser' ? document.getElementById('browser-camera-device').selectedOptions[0].textContent : '',
+                        ...(sourceType === 'rtsp' ? {rtsp_url: formData.get('rtsp_url')} : {}),
+                        streaming_enabled: true,
+                        analysis_enabled: false,
+                        yolo_enabled: false
+                    })
+                });
+                form.reset();
+                syncCameraSourceFields();
+                if (sourceType === 'browser') await startBrowserCapture(result.camera_id, mediaStream);
+                showFormStatus(sourceType === 'browser' ? 'Camera added. Keep this page open while sharing.' : 'Camera added. Video will appear when the RTSP stream connects.', 'success');
+                await updateStatus();
+                document.getElementById('camera-name').focus();
+            } catch (error) {
+                mediaStream?.getTracks().forEach(track => track.stop());
+                showFormStatus(error.message, 'error');
+            } finally {
+                button.disabled = false;
+            }
+        }
+
+        async function saveCameraSettings(event, cameraId) {
+            event.preventDefault();
+            const formData = new FormData(event.currentTarget);
+            const updates = {
+                name: formData.get('name'),
+                prompt: formData.get('prompt'),
+                frame_interval: Number(formData.get('frame_interval'))
+            };
+            const newUrl = String(formData.get('rtsp_url') || '').trim();
+            if (newUrl) updates.rtsp_url = newUrl;
+            try {
+                await apiRequest(`/api/camera/${cameraId}/update`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(updates)
+                });
+                showFormStatus(`Settings saved for camera ${cameraId}.`, 'success');
+                await updateStatus();
+            } catch (error) {
+                showFormStatus(error.message, 'error');
+            }
+        }
+
+        async function deleteCamera(cameraId) {
+            if (!confirm(`Remove camera ${cameraId}?`)) return;
+            try {
+                await apiRequest(`/api/camera/${cameraId}`, {method: 'DELETE'});
+                showFormStatus(`Camera ${cameraId} removed.`, 'success');
+                await updateStatus();
+            } catch (error) {
+                showFormStatus(error.message, 'error');
+            }
+        }
+        
+        async function updateCameraToggle(cameraId, setting, enabled) {
+            try {
+                await apiRequest(`/api/camera/${cameraId}/update`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({[setting]: enabled})
+                });
+                await updateStatus();
+            } catch (error) {
+                showFormStatus(error.message, 'error');
+                await updateStatus();
+            }
+        }
+
+        function toggleStream(cameraId, enabled) {
+            return updateCameraToggle(cameraId, 'streaming_enabled', enabled);
+        }
+
+        function toggleAnalysis(cameraId, enabled) {
+            return updateCameraToggle(cameraId, 'analysis_enabled', enabled);
+        }
+
+        function toggleYOLO(cameraId, enabled) {
+            return updateCameraToggle(cameraId, 'yolo_enabled', enabled);
+        }
+        
+        function startAlertPolling() {
+            setInterval(async () => {
+                try {
+                    const data = await apiRequest('/api/status');
+
+                    const currentIds = Object.keys(cameras).sort().join(',');
+                    const nextIds = Object.keys(data.cameras || {}).sort().join(',');
+                    if (currentIds !== nextIds) await updateStatus();
+
+                    Object.values(data.cameras || {}).forEach(camera => {
+                        const state = document.getElementById(`feed-state-${camera.id}`);
+                        if (!state) return;
+                        if (!camera.streaming_enabled) {
+                            state.textContent = 'Stream disabled';
+                        } else if (camera.source_type === 'browser' && !camera.connected) {
+                            state.textContent = 'Browser camera disconnected';
+                        } else if (camera.frame_count > 0) {
+                            state.textContent = `Live · ${camera.frame_count} frames`;
+                        } else if (camera.connected) {
+                            state.textContent = camera.source_type === 'browser' ? 'Browser connected · waiting for frame' : 'RTSP connected · waiting for frame';
+                        } else {
+                            state.textContent = camera.source_type === 'browser' ? 'Waiting for browser camera' : (camera.running ? 'Connecting to RTSP…' : 'Starting stream…');
+                        }
+                    });
+                    
+                    // Update analyses with YOLO summaries
+                    Object.entries(data.latest_analyses || {}).forEach(([camId, analysis]) => {
+                        const elem = document.getElementById(`analysis-${camId}`);
+                        if (elem) {
+                            let content = escapeHtml(analysis.response);
+                            
+                            if (analysis.yolo_summary) {
+                                content += `<div class="yolo-summary">${escapeHtml(analysis.yolo_summary)}</div>`;
+                            }
+                            
+                            content += `<div class="camera-timestamp">${new Date(analysis.timestamp).toLocaleTimeString()}</div>`;
+                            elem.innerHTML = content;
+                            
+                            const isAlert = checkAlertKeywords(analysis.response);
+                            const card = document.getElementById(`camera-${camId}`);
+                            if (card && isAlert) {
+                                card.classList.add('alert');
+                                elem.classList.add('alert-text');
+                            } else if (card) {
+                                card.classList.remove('alert');
+                                elem.classList.remove('alert-text');
+                            }
+                        }
+                    });
+
+                    Object.entries(data.latest_detections || {}).forEach(([cameraId, result]) => {
+                        const detections = document.getElementById(`detections-${cameraId}`);
+                        if (detections) {
+                            detections.textContent = result.detections
+                                .map(item => `${item.class} ${(item.confidence * 100).toFixed(0)}%`)
+                                .join(' · ');
+                        }
+                    });
+                    
+                    await refreshAlerts();
+                    
+                } catch (error) {
+                    console.error('Failed to update:', error);
+                }
+            }, 2000);
+        }
+        
+        function checkAlertKeywords(text) {
+            const keywords = ['suspicious', 'unusual', 'person', 'breaking', 'entering', 'fire', 'smoke'];
+            const lower = text.toLowerCase();
+            return keywords.some(keyword => lower.includes(keyword));
+        }
+        
+        async function refreshAlerts() {
+            try {
+                allAlerts = await apiRequest('/api/alerts?limit=1000');
+                updateCameraFilter();
+                filterAlerts();
+            } catch (error) {
+                console.error('Failed to fetch alerts:', error);
+            }
+        }
+        
+        function updateCameraFilter() {
+            const filterSelect = document.getElementById('alert-filter');
+            const currentValue = filterSelect.value;
+            
+            // Get unique camera IDs and names from alerts
+            const cameraSet = new Set();
+            allAlerts.forEach(alert => {
+                if (alert.camera_name) {
+                    cameraSet.add(alert.camera_name);
+                }
+            });
+            
+            // Rebuild dropdown options
+            filterSelect.innerHTML = '<option value="all">All Cameras</option>';
+            Array.from(cameraSet).sort().forEach(cameraName => {
+                const option = document.createElement('option');
+                option.value = cameraName;
+                option.textContent = cameraName;
+                filterSelect.appendChild(option);
+            });
+            
+            // Restore previous selection if it still exists
+            if (Array.from(filterSelect.options).some(opt => opt.value === currentValue)) {
+                filterSelect.value = currentValue;
+            }
+        }
+        
+        function filterAlerts() {
+            const filterValue = document.getElementById('alert-filter').value;
+            
+            // Filter alerts based on selected camera
+            const filteredAlerts = filterValue === 'all' 
+                ? allAlerts 
+                : allAlerts.filter(alert => alert.camera_name === filterValue);
+            
+            document.getElementById('alert-count').textContent = filteredAlerts.length;
+            
+            const listElem = document.getElementById('alert-list');
+            
+            if (filteredAlerts.length === 0) {
+                listElem.innerHTML = `
+                    <div style="padding: 2rem; text-align: center; color: var(--text-secondary);">
+                        No alerts detected
+                    </div>
+                `;
+                return;
+            }
+            
+            listElem.innerHTML = filteredAlerts.map((alert, index) => {
+                let yoloBadge = '';
+                if (alert.yolo_summary) {
+                    yoloBadge = `<div class="alert-yolo-badge">${escapeHtml(alert.yolo_summary)}</div>`;
+                }
+                
+                const hasImage = alert.image_base64 && alert.image_base64.length > 0;
+                const clickableClass = hasImage ? 'alert-item-clickable' : '';
+                const onclickAttr = hasImage ? `onclick="openImageModal(${index})"` : '';
+                
+                return `
+                    <div class="alert-item ${clickableClass}" ${onclickAttr} data-alert-index="${index}">
+                        <div class="alert-item-header">
+                            <div class="alert-camera">${escapeHtml(alert.camera_name)}</div>
+                            <div class="alert-time">${new Date(alert.timestamp).toLocaleString()}</div>
+                        </div>
+                        <div class="alert-text">${escapeHtml(alert.response)}</div>
+                        ${yoloBadge}
+                    </div>
+                `;
+            }).join('');
+        }
+        
+        async function applyGlobalPrompt() {
+            const prompt = document.getElementById('global-prompt').value;
+            if (!prompt) {
+                showFormStatus('Enter a prompt first.', 'error');
+                return;
+            }
+
+            for (const cameraId of Object.keys(cameras)) {
+                try {
+                    await apiRequest(`/api/camera/${cameraId}/update`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({prompt})
+                    });
+                } catch (error) {
+                    showFormStatus(error.message, 'error');
+                    return;
+                }
+            }
+            showFormStatus('Prompt applied to all cameras.', 'success');
+            await updateStatus();
+        }
+        
+        async function applyGlobalInterval() {
+            const interval = parseInt(document.getElementById('global-interval').value);
+            if (!interval || interval < 10) {
+                showFormStatus('Enter a frame interval of at least 10 seconds.', 'error');
+                return;
+            }
+
+            for (const cameraId of Object.keys(cameras)) {
+                try {
+                    await apiRequest(`/api/camera/${cameraId}/update`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({frame_interval: interval})
+                    });
+                } catch (error) {
+                    showFormStatus(error.message, 'error');
+                    return;
+                }
+            }
+            showFormStatus('Frame interval applied to all cameras.', 'success');
+            await updateStatus();
+        }
+        
+        async function refreshAll() {
+            await updateStatus();
+            await refreshAlerts();
+        }
+        
+        async function clearAlerts() {
+            if (confirm('Clear all alerts from display?')) {
+                try {
+                    await apiRequest('/api/alerts', {method: 'DELETE'});
+                    allAlerts = [];
+                    filterAlerts();
+                    updateCameraFilter();
+                } catch (error) {
+                    showFormStatus(error.message, 'error');
+                }
+            }
+        }
+        
+        function openImageModal(alertIndex) {
+            // Get the current filtered alerts
+            const filterValue = document.getElementById('alert-filter').value;
+            const filteredAlerts = filterValue === 'all' 
+                ? allAlerts 
+                : allAlerts.filter(alert => alert.camera_name === filterValue);
+            
+            const alert = filteredAlerts[alertIndex];
+            
+            if (!alert || !alert.image_base64) {
+                console.error('No image available for this alert');
+                return;
+            }
+            
+            // Set modal content
+            document.getElementById('modalTitle').textContent = `${alert.camera_name} - Alert Image`;
+            document.getElementById('modalImage').src = `data:image/jpeg;base64,${alert.image_base64}`;
+            document.getElementById('modalInfo').innerHTML = `
+                <div><strong>Time:</strong> ${new Date(alert.timestamp).toLocaleString()}</div>
+                <div><strong>Alert:</strong> ${escapeHtml(alert.response)}</div>
+                ${alert.yolo_summary ? `<div><strong>Detections:</strong> ${escapeHtml(alert.yolo_summary)}</div>` : ''}
+            `;
+            
+            // Show modal
+            document.getElementById('imageModal').classList.add('active');
+        }
+        
+        function closeImageModal() {
+            document.getElementById('imageModal').classList.remove('active');
+        }
+        
+        // Close modal when clicking outside the content
+        document.addEventListener('DOMContentLoaded', () => {
+            const modal = document.getElementById('imageModal');
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) {
+                    closeImageModal();
+                }
+            });
+            
+            // Close modal with Escape key
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') {
+                    closeImageModal();
+                }
+            });
+        });
+        
+        init();
+    </script>
+    
+    <!-- Image Modal -->
+    <div id="imageModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title" id="modalTitle">Alert Image</div>
+                <button class="modal-close" onclick="closeImageModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <img id="modalImage" class="modal-image" src="" alt="Alert Image">
+            </div>
+            <div class="modal-info" id="modalInfo"></div>
+        </div>
+    </div>
+</body>
+</html>

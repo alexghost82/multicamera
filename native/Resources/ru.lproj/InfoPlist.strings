@@ -1,0 +1,4 @@
+"NSCameraUsageDescription" = "CameraWall показывает видео с добавленных вами камер Mac и iPhone.";
+"NSMicrophoneUsageDescription" = "CameraWall использует микрофон только при запуске локальной голосовой диктовки.";
+"NSSpeechRecognitionUsageDescription" = "CameraWall локально преобразует речь в текст при запуске диктовки.";
+"NSLocalNetworkUsageDescription" = "CameraWall подключается к указанным вами IP-камерам в локальной сети.";

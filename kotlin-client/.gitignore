@@ -1,0 +1,6 @@
+.gradle/
+.kotlin/
+build/
+.tools/
+*.dSYM/
+hs_err_pid*

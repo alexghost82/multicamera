@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key><string>CameraWall</string>
+    <key>CFBundleIdentifier</key><string>local.camerawall.desktop</string>
+    <key>CFBundleName</key><string>CameraWall</string>
+    <key>CFBundleDisplayName</key><string>CameraWall</string>
+    <key>CFBundleIconFile</key><string>CameraWall.icns</string>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleLocalizations</key>
+    <array><string>en</string><string>ru</string></array>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>LSMinimumSystemVersion</key><string>27.0</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSCameraUsageDescription</key>
+    <string>CameraWall displays video from the Mac and iPhone cameras you add to your wall.</string>
+    <key>NSCameraUseContinuityCameraDeviceType</key><true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>CameraWall uses the microphone only when you start local voice dictation.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>CameraWall transcribes your voice locally when you start dictation.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>CameraWall connects to the IP cameras you configure on your local network.</string>
+    <key>NSAppTransportSecurity</key>
+    <dict><key>NSAllowsLocalNetworking</key><true/></dict>
+</dict>
+</plist>

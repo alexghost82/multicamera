@@ -339,6 +339,18 @@ public final class LocalTrackingStore: @unchecked Sendable {
             try ensureColumn("description_json", declaration: "TEXT")
             try ensureColumn("described_at", declaration: "REAL")
             try ensureColumn("vehicle_text_json", declaration: "TEXT")
+            try ensureColumn("crop_quality", declaration: "REAL")
+            try ensureColumn("chroma_blob", declaration: "BLOB")
+            try ensureColumn("chroma_code", declaration: "TEXT")
+            try ensureColumn("chroma_bucket", declaration: "INTEGER")
+            try ensureColumn("hsv_blob", declaration: "BLOB")
+            try ensureColumn("upper_color", declaration: "TEXT")
+            try ensureColumn("lower_color", declaration: "TEXT")
+            try ensureColumn("vehicle_color", declaration: "TEXT")
+            try ensureColumn("resolved_sex", declaration: "TEXT")
+            try ensureColumn("identity_state", declaration: "TEXT")
+            try ensureColumn("identity_score", declaration: "REAL")
+            try ensureGhostTables()
             try execute("""
                 CREATE TABLE IF NOT EXISTS operator_identity_groups (
                     track_id TEXT PRIMARY KEY,
@@ -1253,5 +1265,316 @@ public final class LocalTrackingStore: @unchecked Sendable {
 
     private func databaseError(_ handle: OpaquePointer? = nil) -> LocalTrackingStoreError {
         LocalTrackingStoreError.query(String(cString: sqlite3_errmsg(handle ?? database)))
+    }
+
+    // MARK: - Ghost Analytics SQLite Persistence
+
+    private func ensureGhostTables() throws {
+        try execute("""
+            CREATE TABLE IF NOT EXISTS ghost_identities (
+                identity_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                display_code TEXT NOT NULL,
+                profile_json TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """)
+        try execute("""
+            CREATE TABLE IF NOT EXISTS ghost_camera_links (
+                link_key TEXT PRIMARY KEY,
+                from_camera_id TEXT NOT NULL,
+                to_camera_id TEXT NOT NULL,
+                transition_count INTEGER NOT NULL,
+                mean_transit_sec REAL NOT NULL,
+                min_transit_sec REAL NOT NULL,
+                max_transit_sec REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """)
+        try execute("""
+            CREATE TABLE IF NOT EXISTS ghost_dedup_decisions (
+                pair_key TEXT PRIMARY KEY,
+                id_a TEXT NOT NULL,
+                id_b TEXT NOT NULL,
+                layer TEXT NOT NULL,
+                should_merge INTEGER NOT NULL,
+                record_cannot_link INTEGER NOT NULL,
+                confidence REAL NOT NULL,
+                reason TEXT NOT NULL,
+                decided_at REAL NOT NULL
+            )
+            """)
+        try execute("""
+            CREATE TABLE IF NOT EXISTS ghost_narrative_chapters (
+                chapter_id TEXT PRIMARY KEY,
+                camera_id TEXT NOT NULL,
+                camera_name TEXT NOT NULL,
+                started_at REAL NOT NULL,
+                ended_at REAL NOT NULL,
+                chapter_json TEXT NOT NULL
+            )
+            """)
+        try execute("CREATE INDEX IF NOT EXISTS ghost_narrative_chapters_time ON ghost_narrative_chapters(ended_at DESC)")
+        try execute("""
+            CREATE TABLE IF NOT EXISTS ghost_vehicle_registry_cache (
+                plate_number TEXT PRIMARY KEY,
+                record_json TEXT NOT NULL,
+                fetched_at REAL NOT NULL
+            )
+            """)
+        try execute("""
+            CREATE TABLE IF NOT EXISTS ghost_alert_mentor_briefs (
+                alert_id TEXT PRIMARY KEY,
+                camera_id TEXT NOT NULL,
+                brief_json TEXT NOT NULL,
+                created_at REAL NOT NULL
+            )
+            """)
+        try execute("""
+            CREATE TABLE IF NOT EXISTS ghost_camera_roles (
+                camera_id TEXT PRIMARY KEY,
+                role_json TEXT NOT NULL,
+                intel_json TEXT,
+                updated_at REAL NOT NULL
+            )
+            """)
+        try execute("""
+            CREATE TABLE IF NOT EXISTS ghost_chat_threads (
+                thread_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                focus_json TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """)
+        try execute("""
+            CREATE TABLE IF NOT EXISTS ghost_chat_messages (
+                message_id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                structured_json TEXT,
+                created_at REAL NOT NULL
+            )
+            """)
+        try execute("CREATE INDEX IF NOT EXISTS ghost_chat_messages_thread ON ghost_chat_messages(thread_id, created_at ASC)")
+    }
+
+    public func saveGhostTrackVisualMetadata(
+        trackID: UUID,
+        cropQuality: Double,
+        chromaPrint: GhostChromaSignature?,
+        hsvHistogram: [Float] = [],
+        resolvedSex: GhostResolvedSex = .unknown,
+        identityState: GhostIdentityMatchState? = nil,
+        identityScore: Double? = nil
+    ) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        let sql = """
+            UPDATE tracked_objects
+            SET crop_quality = ?,
+                chroma_blob = ?,
+                chroma_code = ?,
+                chroma_bucket = ?,
+                hsv_blob = ?,
+                upper_color = ?,
+                lower_color = ?,
+                vehicle_color = ?,
+                resolved_sex = ?,
+                identity_state = COALESCE(?, identity_state),
+                identity_score = COALESCE(?, identity_score)
+            WHERE track_id = ?
+            """
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_double(statement, 1, cropQuality)
+        if let chromaPrint {
+            _ = chromaPrint.blob.withUnsafeBytes { rawBuffer in
+                sqlite3_bind_blob(statement, 2, rawBuffer.baseAddress, Int32(chromaPrint.blob.count), unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            }
+            bind(chromaPrint.code, at: 3, to: statement)
+            sqlite3_bind_int(statement, 4, Int32(chromaPrint.bucket))
+            if let upper = chromaPrint.upperColorHex { bind(upper, at: 6, to: statement) } else { sqlite3_bind_null(statement, 6) }
+            if let lower = chromaPrint.lowerColorHex { bind(lower, at: 7, to: statement) } else { sqlite3_bind_null(statement, 7) }
+            if let veh = chromaPrint.vehicleColorHex { bind(veh, at: 8, to: statement) } else { sqlite3_bind_null(statement, 8) }
+        } else {
+            sqlite3_bind_null(statement, 2)
+            sqlite3_bind_null(statement, 3)
+            sqlite3_bind_null(statement, 4)
+            sqlite3_bind_null(statement, 6)
+            sqlite3_bind_null(statement, 7)
+            sqlite3_bind_null(statement, 8)
+        }
+        if !hsvHistogram.isEmpty {
+            let data = hsvHistogram.withUnsafeBufferPointer { Data(buffer: $0) }
+            _ = data.withUnsafeBytes { rawBuffer in
+                sqlite3_bind_blob(statement, 5, rawBuffer.baseAddress, Int32(data.count), unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            }
+        } else {
+            sqlite3_bind_null(statement, 5)
+        }
+        bind(resolvedSex.rawValue, at: 9, to: statement)
+        if let identityState { bind(identityState.rawValue, at: 10, to: statement) } else { sqlite3_bind_null(statement, 10) }
+        if let identityScore { sqlite3_bind_double(statement, 11, identityScore) } else { sqlite3_bind_null(statement, 11) }
+        bind(trackID.uuidString, at: 12, to: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseError() }
+    }
+
+    public func upsertGhostIdentityProfile(_ profile: GhostIdentityGalleryProfile) throws {
+        let data = try JSONEncoder().encode(profile)
+        guard let json = String(data: data, encoding: .utf8) else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        let statement = try prepare("""
+            INSERT INTO ghost_identities(identity_id, kind, display_code, profile_json, updated_at)
+            VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(identity_id) DO UPDATE SET
+                kind = excluded.kind,
+                display_code = excluded.display_code,
+                profile_json = excluded.profile_json,
+                updated_at = excluded.updated_at
+            """)
+        defer { sqlite3_finalize(statement) }
+        bind(profile.identityID, at: 1, to: statement)
+        bind(profile.kind, at: 2, to: statement)
+        bind(profile.displayCode, at: 3, to: statement)
+        bind(json, at: 4, to: statement)
+        sqlite3_bind_double(statement, 5, profile.lastSeenAt.timeIntervalSince1970)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseError() }
+    }
+
+    public func loadGhostIdentityProfiles(limit: Int = 500) throws -> [GhostIdentityGalleryProfile] {
+        lock.lock()
+        defer { lock.unlock() }
+        let statement = try prepare("SELECT profile_json FROM ghost_identities ORDER BY updated_at DESC LIMIT ?")
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int(statement, 1, Int32(max(1, min(5000, limit))))
+        var profiles: [GhostIdentityGalleryProfile] = []
+        let decoder = JSONDecoder()
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let json = text(statement, 0)
+            if let data = json.data(using: .utf8),
+               let profile = try? decoder.decode(GhostIdentityGalleryProfile.self, from: data) {
+                profiles.append(profile)
+            }
+        }
+        return profiles
+    }
+
+    public func saveGhostNarrativeChapter(
+        id: UUID = UUID(),
+        cameraID: UUID,
+        cameraName: String,
+        startedAt: Date,
+        endedAt: Date,
+        chapter: GhostTemporalNarrativeResult
+    ) throws {
+        let data = try JSONEncoder().encode(chapter)
+        guard let json = String(data: data, encoding: .utf8) else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        let statement = try prepare("""
+            INSERT OR REPLACE INTO ghost_narrative_chapters(chapter_id, camera_id, camera_name, started_at, ended_at, chapter_json)
+            VALUES(?, ?, ?, ?, ?, ?)
+            """)
+        defer { sqlite3_finalize(statement) }
+        bind(id.uuidString, at: 1, to: statement)
+        bind(cameraID.uuidString, at: 2, to: statement)
+        bind(cameraName, at: 3, to: statement)
+        sqlite3_bind_double(statement, 4, startedAt.timeIntervalSince1970)
+        sqlite3_bind_double(statement, 5, endedAt.timeIntervalSince1970)
+        bind(json, at: 6, to: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseError() }
+    }
+
+    public func loadGhostNarrativeChapters(cameraID: UUID? = nil, limit: Int = 50) throws -> [(id: String, cameraID: String, cameraName: String, startedAt: Date, endedAt: Date, chapter: GhostTemporalNarrativeResult)] {
+        lock.lock()
+        defer { lock.unlock() }
+        let sql: String
+        if cameraID != nil {
+            sql = "SELECT chapter_id, camera_id, camera_name, started_at, ended_at, chapter_json FROM ghost_narrative_chapters WHERE camera_id = ? ORDER BY ended_at DESC LIMIT ?"
+        } else {
+            sql = "SELECT chapter_id, camera_id, camera_name, started_at, ended_at, chapter_json FROM ghost_narrative_chapters ORDER BY ended_at DESC LIMIT ?"
+        }
+        let statement = try prepare(sql)
+        defer { sqlite3_finalize(statement) }
+        if let cameraID {
+            bind(cameraID.uuidString, at: 1, to: statement)
+            sqlite3_bind_int(statement, 2, Int32(max(1, min(500, limit))))
+        } else {
+            sqlite3_bind_int(statement, 1, Int32(max(1, min(500, limit))))
+        }
+        var results: [(String, String, String, Date, Date, GhostTemporalNarrativeResult)] = []
+        let decoder = JSONDecoder()
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let cid = text(statement, 0)
+            let camID = text(statement, 1)
+            let camName = text(statement, 2)
+            let sAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 3))
+            let eAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 4))
+            let json = text(statement, 5)
+            if let data = json.data(using: .utf8),
+               let chapter = try? decoder.decode(GhostTemporalNarrativeResult.self, from: data) {
+                results.append((cid, camID, camName, sAt, eAt, chapter))
+            }
+        }
+        return results
+    }
+
+    public func cacheVehicleRegistryRecord(_ record: GhostVehicleRegistryRecord) throws {
+        let data = try JSONEncoder().encode(record)
+        guard let json = String(data: data, encoding: .utf8) else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        let statement = try prepare("""
+            INSERT OR REPLACE INTO ghost_vehicle_registry_cache(plate_number, record_json, fetched_at)
+            VALUES(?, ?, ?)
+            """)
+        defer { sqlite3_finalize(statement) }
+        bind(record.plateNumber, at: 1, to: statement)
+        bind(json, at: 2, to: statement)
+        sqlite3_bind_double(statement, 3, record.fetchedAt.timeIntervalSince1970)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseError() }
+    }
+
+    public func cachedVehicleRegistryRecord(plateNumber: String) throws -> GhostVehicleRegistryRecord? {
+        lock.lock()
+        defer { lock.unlock() }
+        let statement = try prepare("SELECT record_json FROM ghost_vehicle_registry_cache WHERE plate_number = ? LIMIT 1")
+        defer { sqlite3_finalize(statement) }
+        bind(plateNumber, at: 1, to: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        let json = text(statement, 0)
+        guard let data = json.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(GhostVehicleRegistryRecord.self, from: data)
+    }
+
+    public func saveGhostAlertMentorBrief(cameraID: UUID, brief: GhostAlertMentorBrief, createdAt: Date = Date()) throws {
+        let data = try JSONEncoder().encode(brief)
+        guard let json = String(data: data, encoding: .utf8) else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        let statement = try prepare("""
+            INSERT OR REPLACE INTO ghost_alert_mentor_briefs(alert_id, camera_id, brief_json, created_at)
+            VALUES(?, ?, ?, ?)
+            """)
+        defer { sqlite3_finalize(statement) }
+        bind(brief.alertID, at: 1, to: statement)
+        bind(cameraID.uuidString, at: 2, to: statement)
+        bind(json, at: 3, to: statement)
+        sqlite3_bind_double(statement, 4, createdAt.timeIntervalSince1970)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseError() }
+    }
+
+    public func loadGhostAlertMentorBrief(alertID: String) throws -> GhostAlertMentorBrief? {
+        lock.lock()
+        defer { lock.unlock() }
+        let statement = try prepare("SELECT brief_json FROM ghost_alert_mentor_briefs WHERE alert_id = ? LIMIT 1")
+        defer { sqlite3_finalize(statement) }
+        bind(alertID, at: 1, to: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        guard let data = text(statement, 0).data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(GhostAlertMentorBrief.self, from: data)
     }
 }

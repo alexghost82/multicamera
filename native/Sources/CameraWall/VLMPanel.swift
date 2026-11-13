@@ -276,15 +276,47 @@ struct VLMPanel: View {
     }
 
     private var scheduleTab: some View {
-        VLMScheduleForm(draft: $draft, operations: $operationsDraft, cameras: enabledCameras,
-            descriptionsEnabled: Binding(
-                get: { model.featurePreferences.enabledFeatures.contains(.visionDescriptions) },
-                set: { enabled in
-                    do { try model.setFeatureEnabled(.visionDescriptions, enabled: enabled) }
-                    catch { saveError = error.localizedDescription }
+        VStack(alignment: .leading, spacing: 12) {
+            GroupBox("GHOST ONWAY Hybrid AI & Analytics") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Picker("AI Backend", selection: $draft.ghostBackendMode) {
+                        ForEach(GhostAIBackendMode.allCases, id: \.self) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    Picker("Analytics Language", selection: $draft.ghostPreferredLanguage) {
+                        ForEach(GhostPromptLanguage.allCases, id: \.self) { lang in
+                            Text(lang.displayName).tag(lang)
+                        }
+                    }
+                    TextField("Local vLLM URL", text: $draft.ghostVLLMBaseURL)
+                        .textFieldStyle(.roundedBorder)
+                    TextField("Local vLLM Model", text: $draft.ghostVLLMModelName)
+                        .textFieldStyle(.roundedBorder)
+                    Toggle("Spoken Tactical Briefing (18s)", isOn: $draft.ghostSpokenBriefingEnabled)
+                    HStack {
+                        Label(
+                            model.ghostHealthStatus.isHealthy ? "Engine Healthy" : "Circuit Open",
+                            systemImage: model.ghostHealthStatus.isHealthy ? "checkmark.shield" : "exclamationmark.triangle"
+                        )
+                        Spacer()
+                        Text(String(format: "Latency: %.0f ms · Spend: $%.2f", model.ghostHealthStatus.ewmaLatencyMs, model.ghostBudgetSnapshot.dailySpendUSD))
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.caption)
                 }
-            ), descriptionQueue: descriptionQueue,
-            errorMessage: languageSettings.localizedMessage(saveError), save: saveSettings)
+                .padding(6)
+            }
+            VLMScheduleForm(draft: $draft, operations: $operationsDraft, cameras: enabledCameras,
+                descriptionsEnabled: Binding(
+                    get: { model.featurePreferences.enabledFeatures.contains(.visionDescriptions) },
+                    set: { enabled in
+                        do { try model.setFeatureEnabled(.visionDescriptions, enabled: enabled) }
+                        catch { saveError = error.localizedDescription }
+                    }
+                ), descriptionQueue: descriptionQueue,
+                errorMessage: languageSettings.localizedMessage(saveError), save: saveSettings)
+        }
         .padding(.top, 8)
     }
 

@@ -363,6 +363,11 @@ final class WallModel: ObservableObject {
     private var vehicleTextPersistenceGeneration = UUID()
     @Published var localShowcaseURL: URL?
     @Published var localShowcaseStatus = "Stopped"
+    @Published var ghostSpokenCards: [GhostHCCard] = []
+    @Published var ghostHealthStatus = GhostHealthStatus()
+    @Published var ghostBudgetSnapshot = GhostBudgetSnapshot()
+    private(set) var ghostAnalytics: GhostAnalyticsCoordinator!
+    private var lastGhostMaintenanceCheck: TimeInterval = -.infinity
     @Published var vlmStatus = "Local VLM not connected"
     @Published var vlmBusy = false {
         didSet {
@@ -521,6 +526,21 @@ final class WallModel: ObservableObject {
         } catch {
             notice = "VLM settings could not be loaded; defaults are active"
         }
+        let ghostConfig = GhostAIConfiguration(
+            mode: vlmPreferences.ghostBackendMode,
+            vllmBaseURL: vlmPreferences.ghostVLLMBaseURL,
+            vllmModelName: vlmPreferences.ghostVLLMModelName,
+            openAIBaseURL: vlmPreferences.ghostOpenAIBaseURL,
+            preferredLanguage: vlmPreferences.ghostPreferredLanguage
+        )
+        let ghostClient = GhostAIClient(
+            config: ghostConfig,
+            localVLM: LocalVLMClient(model: vlmPreferences.model)
+        )
+        self.ghostAnalytics = GhostAnalyticsCoordinator(
+            aiClient: ghostClient,
+            trackingStore: trackingStore
+        )
         if workerMode {
             workerProvisionedCameras = config.cameras.filter {
                 $0.enabled && $0.localDeviceID == nil && $0.screenDisplayID == nil && $0.fileURL == nil
@@ -1120,6 +1140,15 @@ final class WallModel: ObservableObject {
         preferences.alertRules.removeAll { $0.condition.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         try VLMStore.save(preferences, to: vlmPreferencesURL)
         vlmPreferences = preferences
+        ghostAnalytics?.aiClient.updateConfiguration(
+            GhostAIConfiguration(
+                mode: preferences.ghostBackendMode,
+                vllmBaseURL: preferences.ghostVLLMBaseURL,
+                vllmModelName: preferences.ghostVLLMModelName,
+                openAIBaseURL: preferences.ghostOpenAIBaseURL,
+                preferredLanguage: preferences.ghostPreferredLanguage
+            )
+        )
         if applicationServicesStarted { prepareModels() }
         vlmSchedule.reset()
         notice = "VLM settings saved"
@@ -2894,10 +2923,27 @@ final class WallModel: ObservableObject {
         evaluateCrowdAlerts(now: now)
         evaluateOperationsWatches(now: now)
         scheduleChronologicalMemory(now: now)
+        scheduleGhostAnalyticsTick(now: now)
         if now - lastDiagnosticsWrite >= 1 {
             lastDiagnosticsWrite = now
             do { try writeDiagnostics(to: diagnosticsURL) }
             catch { notice = "Cannot write local diagnostics" }
+        }
+    }
+
+    private func scheduleGhostAnalyticsTick(now: TimeInterval) {
+        guard now - lastGhostMaintenanceCheck >= 4.0, let ghost = ghostAnalytics else { return }
+        lastGhostMaintenanceCheck = now
+        let spokenEnabled = vlmPreferences.ghostSpokenBriefingEnabled
+        Task { @MainActor [weak self] in
+            await ghost.runPeriodicMaintenanceTick()
+            if spokenEnabled {
+                _ = await ghost.generateSpokenBriefingIfDue()
+            }
+            guard let self else { return }
+            self.ghostSpokenCards = ghost.recentSpokenCards
+            self.ghostHealthStatus = ghost.aiClient.circuitBreaker.status()
+            self.ghostBudgetSnapshot = ghost.aiClient.budgetTracker.snapshot()
         }
     }
 
@@ -3142,6 +3188,7 @@ final class WallModel: ObservableObject {
                             let observedAt = Date()
                             let historyQueue = self.trackingQueue
                             let featureCoordinator = self.featureCoordinator
+                            let ghost = self.ghostAnalytics
                             let shouldQueueDescriptions = self.featurePreferences.enabledFeatures.contains(.visionDescriptions)
                             let historyObjects = trackedObjects.filter { $0.confidence >= self.detectionThreshold }
                             historyQueue.async { [weak self] in
@@ -3168,6 +3215,42 @@ final class WallModel: ObservableObject {
                                         let isNewTrack = try store.record(object, cameraID: cameraID, cameraName: cameraName,
                                                                           cropJPEG: crop, cutoutPNG: cutout,
                                                                           reidEmbedding: reidEmbedding, at: observedAt)
+                                        if let ghost {
+                                            let cgCrop: CGImage?
+                                            if let crop, let src = CGImageSourceCreateWithData(crop as CFData, nil) {
+                                                cgCrop = CGImageSourceCreateImageAtIndex(src, 0, nil)
+                                            } else {
+                                                cgCrop = nil
+                                            }
+                                            let normRect = NormalizedRect(
+                                                x: Double(object.box.minX),
+                                                y: Double(object.box.minY),
+                                                width: Double(object.box.width),
+                                                height: Double(object.box.height)
+                                            )
+                                            let neighborRects = historyObjects.compactMap { other -> NormalizedRect? in
+                                                guard other.trackID != trackID else { return nil }
+                                                return NormalizedRect(
+                                                    x: Double(other.box.minX),
+                                                    y: Double(other.box.minY),
+                                                    width: Double(other.box.width),
+                                                    height: Double(other.box.height)
+                                                )
+                                            }
+                                            _ = ghost.processTrackObservation(
+                                                trackID: trackID,
+                                                cameraID: cameraID,
+                                                cameraName: cameraName,
+                                                label: object.label,
+                                                confidence: object.confidence,
+                                                normalizedRect: normRect,
+                                                cropImage: cgCrop,
+                                                alphaMask: nil,
+                                                embedding: reidEmbedding,
+                                                neighborBoxes: neighborRects,
+                                                now: observedAt
+                                            )
+                                        }
                                         if isNewTrack && shouldQueueDescriptions {
                                             do {
                                                 let payload = try JSONSerialization.data(

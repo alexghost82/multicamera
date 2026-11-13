@@ -600,6 +600,25 @@ GOP/FPS. Start with H.264 640x360 at 10-15 FPS, then tune to actual cameras.
 Connection establishment and waiting for the first IDR can take longer
 than 200 ms; steady-state playback is measured separately.
 
+## YOLO26 Pose worker model
+
+Provision the official `yolo26s-pose.pt` release checkpoint and export it to
+the FP16 Core ML package consumed by the worker:
+
+```sh
+make -C native pose-model
+make -C native test-pose
+```
+
+The checkpoint's SHA-256 is verified before use. Export dependencies are
+isolated in `.build/pose-exporter-py313-torch27/` (Python 3.13 is required).
+The checkpoint and generated `native/.build/models/yolo26s-pose.mlpackage` are
+build artifacts and are not bundled into the app. Set the worker's absolute
+`poseModelPath` to that package when creating `worker.json`. The model uses
+Ultralytics AGPL-3.0 licensing; review the applicable terms before
+redistribution or proprietary deployment:
+[Ultralytics licensing](https://www.ultralytics.com/license).
+
 ## Multi-worker Pose mode (Phase 2)
 
 The same executable has a headless `--worker` mode. A node config selects
@@ -676,8 +695,22 @@ UUIDs/leases and aggregate inference rate) crosses the channel; frames, crops
 and keypoints do not. The durable worker event spool is local, capped at
 10,000 records / 16 MiB
 with a 64 KiB payload ceiling, mode 0600, and refuses new events at capacity
-instead of evicting older records. Safety-event production and forwarding are
-not enabled in Phase 2.
+instead of evicting older records.
+
+Fall detection runs on every worker Pose result (`CameraCore/FallDetector.swift`,
+rules from `human-fall-detection-guide.md`). Per camera it keeps lightweight
+person tracks (IoU matching plus proximity re-linking across gaps of up to
+3 s and 2 box diagonals), and a debounced STANDING/WALKING/SITTING/FALLING/FALLEN
+state machine driven by torso angle (>= 55 degrees), box aspect ratio in frame
+pixels (>= 1.15) and height collapse (<= 0.55) against an EMA standing-height
+baseline (alpha 0.05, learned only while upright). FALLEN needs at least two
+samples and 0.8 s of fall posture, extended to 2 s when the Pose cadence is at
+or below 1.5 FPS; walking/velocity cues are ignored below 5 FPS. Pose runs with a
+0.15 floor, but detections under 0.4 can only keep FALLING/FALLEN tracks alive.
+Each confirmed fall is appended to the worker event spool as `fall.detected`
+(with the current camera lease) and, when Operational Alerts is enabled,
+raised as a critical local alert subject to the operations cooldown.
+Forwarding spooled events to the coordinator is not enabled in Phase 2.
 
 Save the node file as
 `~/Library/Application Support/CameraWall/worker.json` with mode 0600. The

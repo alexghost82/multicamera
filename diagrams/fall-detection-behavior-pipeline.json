@@ -1,0 +1,98 @@
+{
+  "type": "flowchart",
+  "title": "Пайплайн детекции падений и анализа поведения",
+  "subtitle": "Каскад YOLO26-Pose, геометрических инвариантов, EMA-фильтра роста и дебаунсинга состояний",
+  "caption": "По материалам human-fall-detection-guide.md и cctv-behavior-analysis-architecture.md (реализовано в FallDetector.swift).",
+  "lang": "ru",
+  "skin": "light",
+  "motion": "trace",
+  "fonts": "system",
+  "dir": "TB",
+  "nodes": [
+    {
+      "id": "frame",
+      "label": "Кадр RTSP + YOLO26-Pose",
+      "sub": "Бокс + 17 точек COCO",
+      "shape": "terminal",
+      "kind": "input",
+      "row": 0,
+      "col": 1
+    },
+    {
+      "id": "assoc",
+      "label": "Трекинг и сшивка",
+      "sub": "IoU + Re-Link (Δt ≤ 3с, D ≤ 2.0, low-conf 0.15)",
+      "shape": "box",
+      "row": 1,
+      "col": 1
+    },
+    {
+      "id": "geom",
+      "label": "Геометрия позы и EMA",
+      "sub": "θ_torso, AR = W/H, R_height = h / H_EMA",
+      "shape": "box",
+      "focal": true,
+      "row": 2,
+      "col": 1
+    },
+    {
+      "id": "is_fall",
+      "label": "Признак падения?",
+      "sub": "θ ≥ 55° или AR ≥ 1.15 или R_h ≤ 0.55",
+      "shape": "decision",
+      "row": 3,
+      "col": 1
+    },
+    {
+      "id": "upright",
+      "label": "STANDING / WALKING / SITTING",
+      "sub": "Обновление H_EMA (α=0.05) только стоя",
+      "shape": "box",
+      "kind": "muted",
+      "row": 3,
+      "col": 0
+    },
+    {
+      "id": "falling",
+      "label": "Статус FALLING",
+      "sub": "Блокировка H_EMA, старт таймера",
+      "shape": "box",
+      "row": 4,
+      "col": 1
+    },
+    {
+      "id": "persist",
+      "label": "Удержание ≥ T_fall?",
+      "sub": "0.8с (2.0с при Low-FPS) и ≥ 2 кадров",
+      "shape": "decision",
+      "row": 5,
+      "col": 1
+    },
+    {
+      "id": "fallen",
+      "label": "FALLEN: Тревога и клип",
+      "sub": "FallEvent + 4-кадровое кольцо VLM + Запись",
+      "shape": "terminal",
+      "kind": "security",
+      "focal": true,
+      "row": 6,
+      "col": 1
+    }
+  ],
+  "edges": [
+    ["frame", "assoc", "кандидаты", "primary"],
+    ["assoc", "geom", "трек", "primary"],
+    ["geom", "is_fall", "метрики", "primary"],
+    ["is_fall", "upright", "нет"],
+    ["is_fall", "falling", "да", "primary"],
+    ["falling", "persist", "проверка", "primary"],
+    ["persist", "upright", "встал"],
+    ["persist", "fallen", "да", "primary"]
+  ],
+  "evidence": [
+    { "id": "frame", "file": "native/Sources/CameraWall/YOLO26PoseDetector.swift", "line": 1 },
+    { "id": "geom", "file": "human-fall-detection-guide.md", "line": 48 },
+    { "id": "persist", "file": "native/Sources/CameraCore/FallDetector.swift", "line": 64 },
+    { "id": "fallen", "file": "cctv-behavior-analysis-architecture.md", "line": 66 }
+  ]
+}

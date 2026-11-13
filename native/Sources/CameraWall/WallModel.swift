@@ -80,13 +80,22 @@ enum VLMResponseLanguage {
         return language
     }
 
-    static func instruction(for question: String) -> String {
+    static func instruction(for question: String, allowingCameraNames: Bool = false) -> String {
         switch questionCode(for: question) {
         case "ru":
+            if allowingCameraNames {
+                return "Пиши ответ на русском языке; точные названия камер из записей можно сохранить на исходном языке. Верни один JSON-объект без текста до или после него. Не используй другие иностранные слова, эмодзи или служебные символы. Если данных недостаточно, скажи об этом по-русски внутри JSON."
+            }
             return "Значения JSON пиши только на русском языке. Верни один JSON-объект без текста до или после него. Не используй другие языки, латинские буквы, эмодзи или служебные символы. Если данных недостаточно, скажи об этом по-русски внутри JSON."
         case "he":
+            if allowingCameraNames {
+                return "ענה בעברית בלבד, ואפשר להעתיק במדויק שמות מצלמות מתוך הרשומות בשפת המקור. החזר אובייקט JSON יחיד ללא טקסט נוסף, מילים זרות אחרות, אימוג'י או סימני מערכת. אם אין מספיק מידע, יש לציין זאת בעברית בתוך JSON."
+            }
             return "ענה בעברית בלבד בתוך ערכי הטקסט של JSON. החזר אובייקט JSON יחיד ללא טקסט נוסף לפניו או אחריו. אין להשתמש בשפות אחרות, באותיות לטיניות, באימוג'י או בסימני מערכת. אם אין מספיק מידע, יש לציין זאת בעברית בתוך JSON."
         case "en":
+            if allowingCameraNames {
+                return "Write the answer in English; exact camera names may be copied from the supplied records in their original language. Return one JSON object with no text before or after it. Do not use other foreign words, emoji or system tokens. If evidence is insufficient, say so in English inside JSON."
+            }
             return "Write the natural-language JSON values in English only. Return one JSON object with no text before or after it. Do not use other languages, non-English letters, emoji or system tokens. If evidence is insufficient, say so in English inside JSON."
         default:
             return "Only Russian, Hebrew and English questions are supported. Do not guess the requested language."
@@ -224,6 +233,17 @@ enum VLMResponseValidator {
         requiresAlertMatches: Bool = false,
         operation: (String) async throws -> String
     ) async throws -> VLMAnalysisReply {
+        try await generateValidated(expectedLanguage: expectedLanguage, operation: operation) {
+            try parse($0, expectedLanguage: expectedLanguage, requiresAlertMatches: requiresAlertMatches)
+        }
+    }
+
+    static func generateValidated<Reply>(
+        expectedLanguage: String,
+        allowingCameraNames: Bool = false,
+        operation: (String) async throws -> String,
+        validate: (String) throws -> Reply
+    ) async throws -> Reply {
         _ = try VLMResponseLanguage.requiredCode(for: expectedLanguage)
         var correction = ""
         for attempt in 0..<2 {
@@ -231,13 +251,14 @@ enum VLMResponseValidator {
             do {
                 let raw = try await operation(correction)
                 try Task.checkCancellation()
-                return try parse(raw, expectedLanguage: expectedLanguage, requiresAlertMatches: requiresAlertMatches)
+                return try validate(raw)
             } catch let error as LocalVLMError {
                 switch error {
                 case .emptyResponse, .invalidStructuredResponse, .unexpectedResponseLanguage, .invalidResponseCharacters:
                     guard attempt == 0 else { throw error }
-                    correction = "\n" + VLMResponseLanguage.instruction(for: expectedLanguage)
-                        + "\nThe previous generation failed validation. Generate a new answer from the original evidence. Return exactly one complete JSON object, starting with { and ending with }. No preface, Markdown, mixed languages, emoji or service tokens. Do not speculate."
+                    let languageRule = allowingCameraNames ? "foreign words except exact camera names" : "mixed languages"
+                    correction = "\n" + VLMResponseLanguage.instruction(for: expectedLanguage, allowingCameraNames: allowingCameraNames)
+                        + "\nThe previous generation failed validation. Generate a new answer from the original evidence. Return exactly one complete JSON object, starting with { and ending with }. No preface, Markdown, \(languageRule), emoji or service tokens. Do not speculate."
                 default:
                     throw error
                 }
@@ -250,7 +271,7 @@ enum VLMResponseValidator {
         try? parse(value, expectedLanguage: expectedLanguage)
     }
 
-    static func parse(_ value: String, expectedLanguage: String, requiresAlertMatches: Bool = false) throws -> VLMAnalysisReply {
+    static func unwrapJSON(_ value: String) throws -> String {
         var text = value.trimmingCharacters(in: .whitespacesAndNewlines)
         if text.hasPrefix("<think>") {
             guard let end = text.range(of: "</think>") else { throw LocalVLMError.invalidStructuredResponse }
@@ -258,11 +279,18 @@ enum VLMResponseValidator {
         } else if text.hasPrefix("</think>") {
             text = String(text.dropFirst("</think>".count)).trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        if text.hasPrefix("```"), let start = text.firstIndex(of: "\n"),
-           text.hasSuffix("```"),
-           let end = text.range(of: "```", options: .backwards)?.lowerBound, start < end {
+        if text.hasPrefix("```") {
+            guard text.hasSuffix("```"), let start = text.firstIndex(of: "\n"),
+                  let end = text.range(of: "```", options: .backwards)?.lowerBound, start < end else {
+                throw LocalVLMError.invalidStructuredResponse
+            }
             text = String(text[text.index(after: start)..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
         }
+        return text
+    }
+
+    static func parse(_ value: String, expectedLanguage: String, requiresAlertMatches: Bool = false) throws -> VLMAnalysisReply {
+        let text = try unwrapJSON(value)
         guard let reply = try? JSONDecoder().decode(VLMAnalysisReply.self, from: Data(text.utf8)),
               !requiresAlertMatches || reply.hasExplicitAlertMatches,
               !reply.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -396,9 +424,12 @@ final class WallModel: ObservableObject {
     private(set) var workerDetectionCount: UInt64 = 0
     private(set) var workerDetectedPersonCount: UInt64 = 0
     private(set) var workerDetectionErrorCount: UInt64 = 0
+    private var fallDetectors: [UUID: FallDetector] = [:]
+    private var workerLeases: [UUID: WorkerCameraLease] = [:]
+    private let workerEventSpool: WorkerEventSpool?
     private var applicationServicesStarted = false
     private let trackingQueue = DispatchQueue(label: "CameraWall.IdentityHistory", qos: .utility)
-    private let featureCoordinator = CameraFeatureCoordinator()
+    private let featureCoordinator: CameraFeatureCoordinator
     private let cameraMemoryStore = CameraMemoryStore()
     private var crowdAlertEvaluator = CrowdAlertEvaluator()
     private var trackingStore: LocalTrackingStore?
@@ -443,9 +474,13 @@ final class WallModel: ObservableObject {
     private var lastOperationsWatchCheck: TimeInterval = -.infinity
 
     init(configURL: URL = ConfigurationStore.defaultURL, workerMode: Bool = false, poseModelURL: URL? = nil,
-         relayFactory: @escaping @MainActor () -> Go2RTC = { Go2RTC() }) {
+         relayFactory: @escaping @MainActor () -> Go2RTC = { Go2RTC() },
+         trackingStoreURL: URL = LocalTrackingStore.defaultURL,
+         featureCoordinator: CameraFeatureCoordinator = CameraFeatureCoordinator()) {
         self.workerMode = workerMode
         self.poseDetector = workerMode ? poseModelURL.map(YOLO26PoseDetector.init(modelURL:)) : nil
+        self.workerEventSpool = workerMode ? try? WorkerEventSpool() : nil
+        self.featureCoordinator = featureCoordinator
         let detector = YOLO26Detector()
         self.detector = detector
         self.modelRuntime = LocalModelRuntime { service, modelPath in
@@ -467,7 +502,7 @@ final class WallModel: ObservableObject {
         self.relayFactory = relayFactory
         self.relay = relayFactory()
         do {
-            trackingStore = try LocalTrackingStore()
+            trackingStore = try LocalTrackingStore(url: trackingStoreURL)
             recentTracks = try trackingStore?.recentTracks() ?? []
         }
         catch { notice = "Local track history is unavailable" }
@@ -608,8 +643,12 @@ final class WallModel: ObservableObject {
 
     func applyWorkerLeases(_ leases: [WorkerCameraLease], at time: Date = Date()) {
         guard workerMode else { return }
-        let requestedIDs = Set(leases.filter { $0.expiresAt > time }.map(\.cameraID))
+        let activeLeases = leases.filter { $0.expiresAt > time }
+        let requestedIDs = Set(activeLeases.map(\.cameraID))
         let enabledIDs = Set(workerProvisionedCameras.map(\.id)).intersection(requestedIDs)
+        workerLeases = Dictionary(activeLeases.filter { enabledIDs.contains($0.cameraID) }.map { ($0.cameraID, $0) },
+                                  uniquingKeysWith: { $0.generation >= $1.generation ? $0 : $1 })
+        fallDetectors = fallDetectors.filter { enabledIDs.contains($0.key) }
         let currentIDs = Set(config.cameras.filter(\.enabled).map(\.id))
         guard currentIDs != enabledIDs else { return }
 
@@ -733,6 +772,7 @@ final class WallModel: ObservableObject {
 
     private func connect(_ camera: Camera, expanded: Bool) async throws {
         trackAssigners.removeValue(forKey: camera.id)
+        fallDetectors.removeValue(forKey: camera.id)
         if let fileURL = camera.fileURL {
             try Task.checkCancellation()
             guard running, let tile = tiles[camera.id] else { return }
@@ -1199,7 +1239,15 @@ final class WallModel: ObservableObject {
             reloadVehicleTextEvidence()
         }
         if enabled, featureID == .historyResearch {
-            do { trackResearchMessages = try TrackResearchStore.load(from: trackResearchURL) }
+            do {
+                let saved = try TrackResearchStore.load(from: trackResearchURL)
+                let savedIDs = Set(saved.map(\.id))
+                let combined = Array((saved + trackResearchMessages.filter { !savedIDs.contains($0.id) })
+                    .suffix(TrackResearchStore.maximumMessages))
+                trackResearchMessages = combined
+                do { try TrackResearchStore.save(combined, to: trackResearchURL) }
+                catch { notice = "Local research response was not saved" }
+            }
             catch { notice = "Saved local research history could not be loaded" }
         }
         if enabled, featureID == .operationalAlerts {
@@ -1573,6 +1621,9 @@ final class WallModel: ObservableObject {
         let generation = vlmGeneration
         let allowActions = featurePreferences.enabledFeatures.contains(.operatorActions)
         let expandSearchTerms = featurePreferences.enabledFeatures.contains(.knowledgeSearch)
+        let priorMessages = trackResearchMessages
+        let researchNow = Date()
+        let researchCalendar = Calendar.current
         appendTrackResearchMessage(TrackResearchMessage(role: .operatorMessage, text: text, citedTrackIDs: []))
         vlmBusy = true
         vlmStatus = "Searching local track history…"
@@ -1598,67 +1649,67 @@ final class WallModel: ObservableObject {
                 guard self.vlmGeneration == generation else { return }
                 self.vlmStatus = "Searching local track history…"
                 let scanTask = Task.detached(priority: .utility) {
-                    var bestScans: [CameraScanRecord] = []
-                    try trackingStore.forEachAutomaticScanPage { page in
-                        try Task.checkCancellation()
-                        bestScans = TrackResearchSearch.selectScans(question: text, records: bestScans + page,
-                            limit: TrackResearchPrompt.maximumRecords, queryPlan: queryPlan)
+                    let selection = try TrackResearchSearch.load(
+                        from: trackingStore, question: text, priorMessages: priorMessages,
+                        queryPlan: queryPlan, now: researchNow, calendar: researchCalendar
+                    )
+                    var imageEvidence: (UUID, Data)?
+                    var imageUnavailable = false
+                    if let record = selection.tracks.first(where: { $0.cropPath != nil }) {
+                        do {
+                            guard let url = trackingStore.imageURL(for: record) else {
+                                throw LocalVLMError.invalidImage
+                            }
+                            let data = try Data(contentsOf: url)
+                            guard !data.isEmpty, data.count <= LocalVLMClient.maximumEvidenceImageBytes else {
+                                throw LocalVLMError.invalidImage
+                            }
+                            imageEvidence = (record.trackID, data)
+                        } catch {
+                            imageUnavailable = true
+                        }
                     }
-                    var bestMatches: [TrackedObjectRecord] = []
-                    try trackingStore.forEachRecentTrackPage { page in
-                        try Task.checkCancellation()
-                        bestMatches = TrackResearchSearch.select(
-                            question: text,
-                            records: bestMatches + page,
-                            limit: bestScans.isEmpty ? TrackResearchPrompt.maximumRecords : TrackResearchPrompt.maximumRecords / 2,
-                            queryPlan: queryPlan
-                        )
-                    }
-                    bestScans = TrackResearchSearch.selectScans(question: text, records: bestScans,
-                        limit: TrackResearchPrompt.maximumRecords - bestMatches.count, queryPlan: queryPlan)
-                    let imageEvidence = bestMatches.first(where: { $0.cropPath != nil }).flatMap { record -> (UUID, Data)? in
-                        guard let url = trackingStore.imageURL(for: record),
-                              let data = try? Data(contentsOf: url),
-                              data.count <= LocalVLMClient.maximumEvidenceImageBytes else { return nil }
-                        return (record.trackID, data)
-                    }
-                    return (bestMatches, imageEvidence, bestScans)
+                    return (selection, imageEvidence, imageUnavailable)
                 }
                 let research = try await withTaskCancellationHandler {
                     try await scanTask.value
                 } onCancel: {
                     scanTask.cancel()
                 }
+                try Task.checkCancellation()
                 guard self.vlmGeneration == generation else { return }
                 let selected = research.0
-                guard !selected.isEmpty || !research.2.isEmpty else {
-                    self.vlmStatus = "No saved camera history is available"
+                if research.2 { self.notice = "A saved track image could not be loaded; using text evidence" }
+                guard !selected.tracks.isEmpty || !selected.scans.isEmpty else {
+                    self.vlmStatus = selected.scopedToDay
+                        ? "No saved camera history is available for the requested day"
+                        : "No saved camera history is available"
                     self.appendTrackResearchMessage(TrackResearchMessage(
-                        role: .assistant, text: self.vlmStatus, citedTrackIDs: []
+                        role: .assistant, text: AppLanguage.current.localizedMessage(self.vlmStatus), citedTrackIDs: []
                     ))
                     return
                 }
                 let prompt = try TrackResearchPrompt.make(
                     question: text,
-                    records: selected,
+                    records: selected.tracks,
                     imageTrackID: research.1?.0,
                     allowActions: allowActions,
                     queryPlan: queryPlan,
-                    scans: research.2
-                ) + "\n" + VLMResponseLanguage.instruction(for: text)
-                let allowedIDs = Set(selected.map(\.trackID))
-                let response: String
-                if let imageData = research.1?.1 {
-                    response = try await client.analyze(images: [imageData], prompt: prompt)
-                } else {
-                    response = try await client.analyze(text: prompt)
+                    scans: selected.scans,
+                    priorMessages: priorMessages,
+                    calendar: researchCalendar
+                ) + "\n" + VLMResponseLanguage.instruction(for: text, allowingCameraNames: true)
+                let reply = try await TrackResearchReply.generate(
+                    question: text, records: selected.tracks, scans: selected.scans
+                ) { correction in
+                    guard self.vlmGeneration == generation else { throw CancellationError() }
+                    if let imageData = research.1?.1 {
+                        return try await client.analyze(images: [imageData], prompt: prompt + correction)
+                    }
+                    return try await client.analyze(text: prompt + correction)
                 }
+                try Task.checkCancellation()
                 guard self.vlmGeneration == generation else { return }
-                guard let reply = TrackResearchReply.parse(response, allowedTrackIDs: allowedIDs,
-                    allowedScanIDs: Set(research.2.map(\.id))) else {
-                    throw LocalTrackingStoreError.invalidDescription
-                }
-                try VLMResponseLanguage.validate(reply.answer, expectedLanguage: text)
                 self.appendTrackResearchMessage(TrackResearchMessage(
                     role: .assistant, text: reply.answer, citedTrackIDs: reply.citations, citedScanIDs: reply.scanCitations ?? []
                 ))
@@ -2725,6 +2776,68 @@ final class WallModel: ObservableObject {
         }
     }
 
+    private func processFallDetection(_ people: [PosePerson], camera: Camera, frameWidth: Int, frameHeight: Int,
+                                      timestamp: TimeInterval) {
+        let observations = people.map { person in
+            FallPoseObservation(
+                confidence: person.confidence,
+                box: FallBoundingBox(x: person.box.x, y: person.box.y, width: person.box.width, height: person.box.height),
+                keypoints: person.keypoints.map { FallKeypoint(x: $0.x, y: $0.y, confidence: $0.confidence) }
+            )
+        }
+        var detector = fallDetectors[camera.id] ?? FallDetector()
+        let update = detector.update(observations, frameWidth: frameWidth, frameHeight: frameHeight, timestamp: timestamp)
+        fallDetectors[camera.id] = detector
+        for event in update.events { handleFallEvent(event, camera: camera) }
+    }
+
+    private func handleFallEvent(_ event: FallEvent, camera: Camera) {
+        let occurredAt = Date(timeIntervalSinceNow: event.occurredAt - ProcessInfo.processInfo.systemUptime)
+        if workerMode, workerEventSpool == nil { notice = "Worker event spool is unavailable; fall event was not queued" }
+        if let spool = workerEventSpool, let lease = workerLeases[camera.id], lease.expiresAt > Date() {
+            do {
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+                let payload = String(decoding: try encoder.encode(event), as: UTF8.self)
+                let envelope = try WorkerEventEnvelope(
+                    id: event.id, workerID: lease.workerID, cameraID: camera.id, leaseID: lease.leaseID,
+                    leaseGeneration: lease.generation, eventType: FallEvent.eventType, occurredAt: occurredAt,
+                    payloadJSON: payload
+                )
+                Task { @MainActor [weak self] in
+                    do { try await spool.append(envelope) }
+                    catch { self?.notice = "Fall event could not be queued for the coordinator" }
+                }
+            } catch {
+                notice = "Fall event could not be encoded for the coordinator"
+            }
+        }
+
+        guard featurePreferences.enabledFeatures.contains(.operationalAlerts) else { return }
+        let condition = "Person fall detected"
+        let cooldown = TimeInterval(operationsPreferences.cooldownSeconds)
+        guard !vlmAlerts.contains(where: {
+            $0.cameraID == camera.id && $0.condition == condition && occurredAt.timeIntervalSince($0.createdAt) < cooldown
+        }) else { return }
+        let cameraName = config.cameras.first(where: { $0.id == camera.id })?.name ?? camera.name
+        var details = [String(format: "aspect ratio %.2f", event.metrics.aspectRatio)]
+        if let torso = event.metrics.torsoAngleDegrees { details.insert(String(format: "torso %.0f°", torso), at: 0) }
+        if let ratio = event.metrics.heightRatio { details.append(String(format: "height %.0f%% of standing", ratio * 100)) }
+        let previous = OperationsAlertQueue.pendingCriticalIDs(
+            alerts: vlmAlerts, reviews: operationsAlertReviews, acknowledgements: operationsAlertAcknowledgements
+        )
+        vlmAlerts.insert(VLMAlert(
+            id: event.id, createdAt: occurredAt, cameraID: camera.id, cameraName: cameraName, condition: condition,
+            evidence: String(format: "YOLO26 Pose kept a person in a fall posture for %.1f s (", event.occurredAt - event.fallStartedAt)
+                + details.joined(separator: ", ") + ").",
+            priority: .critical
+        ), at: 0)
+        if vlmAlerts.count > 100 { vlmAlerts.removeLast(vlmAlerts.count - 100) }
+        do { try VLMStore.save(vlmAlerts, to: vlmAlertsURL) }
+        catch { notice = "Local fall alerts could not be saved" }
+        soundForNewCriticalAlerts(previous: previous)
+    }
+
     private func evaluateCrowdAlerts(now: TimeInterval) {
         guard featurePreferences.enabledFeatures.contains(.operationalAlerts), running,
               operationsPreferences.personCountAlertsEnabled else { return }
@@ -3124,7 +3237,9 @@ final class WallModel: ObservableObject {
             let generation = detectionGeneration
             if workerMode {
                 guard let poseDetector else { continue }
-                let accepted = poseDetector.submit(pixel: pixel, threshold: 0.25) { [weak self] result in
+                // Low floor so occluded FALLING/FALLEN people stay tracked; FallDetector gates new tracks.
+                let poseThreshold = FallDetectorConfiguration().lowConfidenceFloor
+                let accepted = poseDetector.submit(pixel: pixel, threshold: poseThreshold) { [weak self] result in
                     Task { @MainActor [weak self] in
                         guard let self, self.detectionGeneration == generation,
                               self.config.cameras.contains(where: { $0.id == camera.id && $0.enabled && $0.yoloEnabled }),
@@ -3139,7 +3254,9 @@ final class WallModel: ObservableObject {
                             tile.inferenceMilliseconds = pose.inferenceMilliseconds
                             tile.inferenceCount += 1
                             self.workerDetectionCount &+= 1
-                            self.workerDetectedPersonCount &+= UInt64(pose.people.count)
+                            self.workerDetectedPersonCount &+= UInt64(pose.people.filter { $0.confidence >= 0.25 }.count)
+                            self.processFallDetection(pose.people, camera: camera, frameWidth: frame.width,
+                                                      frameHeight: frame.height, timestamp: frame.receivedAt)
                         case .failure:
                             self.workerDetectionErrorCount &+= 1
                         }

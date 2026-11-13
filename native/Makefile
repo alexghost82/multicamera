@@ -8,12 +8,17 @@ SEG_MODEL_ONNX := $(CURDIR)/.build/models/yolo26n-seg.onnx
 SEG_EXPORTER_DIR := $(CURDIR)/.build/seg-exporter
 SEG_EXPORTER_PYTHON := $(SEG_EXPORTER_DIR)/bin/python
 SEG_EXPORTER_READY := $(SEG_EXPORTER_DIR)/.ready
+POSE_MODEL_PT := $(CURDIR)/.build/models/yolo26s-pose.pt
+POSE_MODEL_PACKAGE := $(CURDIR)/.build/models/yolo26s-pose.mlpackage
+POSE_EXPORTER_DIR := $(CURDIR)/.build/pose-exporter-py313-torch27
+POSE_EXPORTER_PYTHON := $(POSE_EXPORTER_DIR)/bin/python
+POSE_EXPORTER_READY := $(POSE_EXPORTER_DIR)/.ready
 ICON_SOURCE ?= $(CURDIR)/../icon.png
 APP_ICON := $(CURDIR)/Resources/CameraWall.icns
 ICONSET := $(CURDIR)/.build/CameraWall.iconset
 SWIFT_HOST := $(dir $(shell xcrun --find swift))../lib/swift/host
 
-.PHONY: setup model icon localization-audit reid-models test-reid seg-models test-seg build test stress app run
+.PHONY: setup model icon localization-audit reid-models test-reid seg-models test-seg pose-model test-pose build test stress app run
 
 model: .build/models/yolo26n.mlmodelc/coremldata.bin
 
@@ -66,6 +71,27 @@ $(SEG_MODEL_ONNX): $(SEG_MODEL_PT) $(SEG_EXPORTER_READY)
 
 test-seg: seg-models
 	swift test --filter ONNXSegmentationTests
+
+$(POSE_MODEL_PT):
+	mkdir -p "$(dir $@)"
+	curl --fail --location --show-error --retry 3 https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26s-pose.pt --output "$@.part"
+	printf '%s  %s\n' 'a083adb42303728ae14c4bd6bd56d80da46f82fb2564dbd6f31dcc92ea321646' "$@.part" | shasum -a 256 -c -
+	mv "$@.part" "$@"
+
+$(POSE_EXPORTER_READY): requirements-pose-export.txt
+	python3.13 -m venv "$(POSE_EXPORTER_DIR)"
+	"$(POSE_EXPORTER_PYTHON)" -m pip install --upgrade pip
+	"$(POSE_EXPORTER_PYTHON)" -m pip install -r requirements-pose-export.txt
+	touch "$@"
+
+$(POSE_MODEL_PACKAGE): $(POSE_MODEL_PT) $(POSE_EXPORTER_READY)
+	"$(POSE_EXPORTER_PYTHON)" -c 'from ultralytics import YOLO; YOLO("$(POSE_MODEL_PT)").export(format="coreml", imgsz=640, quantize=16, batch=1, dynamic=False, device="cpu")'
+	test -d "$@"
+
+pose-model: $(POSE_MODEL_PACKAGE)
+
+test-pose: pose-model .build/models/bus.jpg
+	swift test --filter YOLO26PoseDetectorTests
 
 .build/models/yolo26n.mlmodelc/coremldata.bin:
 	mkdir -p .build/models

@@ -1,9 +1,51 @@
 import Foundation
 import CoreVideo
 import XCTest
+import CameraCore
 @testable import CameraWall
 
 final class LocalVLMClientTests: XCTestCase {
+    @MainActor
+    func testInstalledQwenAnswersSyntheticSavedHistory() async throws {
+        guard let model = ProcessInfo.processInfo.environment["CAMERAWALL_TEST_VLM_MODEL"] else {
+            throw XCTSkip("Set CAMERAWALL_TEST_VLM_MODEL to run the local history smoke test.")
+        }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let trackingURL = directory.appendingPathComponent("tracking.sqlite3")
+        let store = try LocalTrackingStore(url: trackingURL)
+        let scan = CameraScanRecord(cameraID: UUID(), cameraName: "Вход",
+            observedAt: Date().addingTimeInterval(-3600), answer: "A red car was visible.")
+        try store.saveAutomaticScan(scan)
+        let coordinator = CameraFeatureCoordinator(preferencesURL: directory.appendingPathComponent("features.json"),
+            databaseURL: directory.appendingPathComponent("features.sqlite3"))
+        let wall = WallModel(configURL: directory.appendingPathComponent("cameras.json"),
+            trackingStoreURL: trackingURL, featureCoordinator: coordinator)
+        defer { wall.shutdown() }
+        wall.vlmPreferences.model = model
+        let question = "Какого цвета автомобиль был замечен?"
+        XCTAssertFalse(wall.running)
+        XCTAssertTrue(wall.askTrackResearch(question: question))
+        let deadline = Date().addingTimeInterval(60)
+        while wall.vlmBusy && Date() < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertFalse(wall.vlmBusy, "History request timed out")
+        XCTAssertEqual(wall.vlmStatus, "Local history answer received")
+        let reply = try XCTUnwrap(wall.trackResearchMessages.last)
+        XCTAssertTrue(reply.text.lowercased().contains("крас"), reply.text)
+        XCTAssertEqual(reply.citedScanIDs, [scan.id])
+
+        XCTAssertTrue(wall.askTrackResearch(question: "Когда это было?"))
+        let followUpDeadline = Date().addingTimeInterval(60)
+        while wall.vlmBusy && Date() < followUpDeadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertFalse(wall.vlmBusy, "History follow-up timed out")
+        XCTAssertEqual(wall.vlmStatus, "Local history answer received")
+        XCTAssertEqual(wall.trackResearchMessages.last?.citedScanIDs, [scan.id])
+    }
+
     func testInstalledQwenRepeatedSceneAssessmentsOnLocalFixture() async throws {
         guard let model = ProcessInfo.processInfo.environment["CAMERAWALL_TEST_VLM_MODEL"] else {
             throw XCTSkip("Set CAMERAWALL_TEST_VLM_MODEL to run the local scene smoke test.")

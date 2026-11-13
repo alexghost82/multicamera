@@ -76,19 +76,22 @@ struct AnalysisPanelEmptyState: View {
 struct AnalysisQuestionComposer: View {
     @Binding var question: String
     let sendDisabled: Bool
+    var promptLabel = "Ask about the selected camera scene…"
+    var inputIdentifier = "vlm-question-input"
+    var sendIdentifier = "vlm-send-question"
     let submit: () -> Void
     @Environment(\.locale) private var locale
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(locale.appLanguage.localized("Ask about the selected camera scene…"))
+            Text(locale.appLanguage.localized(promptLabel))
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             TextField("", text: $question, axis: .vertical)
                 .lineLimit(2...5).textFieldStyle(.roundedBorder)
                 .frame(minWidth: 0, maxWidth: .infinity)
-                .accessibilityLabel("Ask about the selected camera scene…")
-                .accessibilityIdentifier("vlm-question-input")
+                .accessibilityLabel(Text(locale.appLanguage.localized(promptLabel)))
+                .accessibilityIdentifier(inputIdentifier)
                 .onSubmit { if !sendDisabled { submit() } }
             HStack {
                 Spacer(minLength: 0)
@@ -103,7 +106,7 @@ struct AnalysisQuestionComposer: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityIdentifier("vlm-send-question")
+                .accessibilityIdentifier(sendIdentifier)
                 .keyboardShortcut(.return, modifiers: [.command])
                 .disabled(sendDisabled)
             }
@@ -120,6 +123,8 @@ struct AnalysisHistoryPage<Messages: View>: View {
     @Binding var expandTerms: Bool
     @Binding var question: String
     let sendDisabled: Bool
+    var errorMessage = ""
+    var lastMessageID: UUID? = nil
     let clear: () -> Void
     let submit: () -> Void
     @ViewBuilder let messages: () -> Messages
@@ -127,40 +132,47 @@ struct AnalysisHistoryPage<Messages: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 8) {
-                Label(status, systemImage: busy ? "hourglass" : "lock.doc")
-                    .lineLimit(2).fixedSize(horizontal: false, vertical: true)
-                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-                Button(action: clear) { Text(locale.appLanguage.localized("Clear")) }.disabled(busy)
-            }
-            Toggle(isOn: $persistHistory) {
-                Text(locale.appLanguage.localized("Persist local research history")).fixedSize(horizontal: false, vertical: true)
-            }
-            Toggle(isOn: $allowActions) {
-                Text(locale.appLanguage.localized("Allow action proposals")).fixedSize(horizontal: false, vertical: true)
-            }
-            Toggle(isOn: $expandTerms) {
-                Text(locale.appLanguage.localized("Expand search terms locally")).fixedSize(horizontal: false, vertical: true)
-            }
-            ScrollView(.vertical) {
-                LazyVStack(alignment: .leading, spacing: 8, content: messages)
+            ScrollViewReader { proxy in
+                ScrollView(.vertical) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(alignment: .top, spacing: 8) {
+                            Label(status, systemImage: busy ? "hourglass" : "lock.doc")
+                                .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                            Button(action: clear) { Text(locale.appLanguage.localized("Clear")) }.disabled(busy)
+                        }
+                        Toggle(isOn: $persistHistory) {
+                            Text(locale.appLanguage.localized("Persist local research history")).fixedSize(horizontal: false, vertical: true)
+                        }
+                        Toggle(isOn: $allowActions) {
+                            Text(locale.appLanguage.localized("Allow action proposals")).fixedSize(horizontal: false, vertical: true)
+                        }
+                        Toggle(isOn: $expandTerms) {
+                            Text(locale.appLanguage.localized("Expand search terms locally")).fixedSize(horizontal: false, vertical: true)
+                        }
+                        if !errorMessage.isEmpty {
+                            Text(errorMessage).font(.caption).foregroundStyle(.red)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        LazyVStack(alignment: .leading, spacing: 8, content: messages)
+                            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                        Color.clear.frame(height: 1).id("history-messages-bottom")
+                    }
                     .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 4)
+                }
+                .onAppear {
+                    if lastMessageID != nil { proxy.scrollTo("history-messages-bottom", anchor: .bottom) }
+                }
+                .onChange(of: lastMessageID) { _, id in
+                    if id != nil { proxy.scrollTo("history-messages-bottom", anchor: .bottom) }
+                }
             }
-            Text(locale.appLanguage.localized("Ask about saved camera history…"))
-                .font(.caption).foregroundStyle(.secondary)
+            AnalysisQuestionComposer(question: $question, sendDisabled: sendDisabled,
+                promptLabel: "Ask about saved camera history…",
+                inputIdentifier: "history-question-input", sendIdentifier: "history-send-question", submit: submit)
                 .fixedSize(horizontal: false, vertical: true)
-            HStack(alignment: .bottom, spacing: 8) {
-                TextField("", text: $question, axis: .vertical)
-                    .lineLimit(2...5).textFieldStyle(.roundedBorder)
-                    .frame(minWidth: 0, maxWidth: .infinity)
-                    .accessibilityLabel("Ask about saved camera history…")
-                    .onSubmit(submit)
-                Button(action: submit) { Image(systemName: "arrow.up.circle.fill").font(.title2) }
-                    .help("Ask read-only question about local track history")
-                    .accessibilityLabel("Ask about local track history")
-                    .disabled(sendDisabled)
-            }
+                .layoutPriority(1)
         }
         .toggleStyle(.checkbox)
         .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

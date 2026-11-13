@@ -1,0 +1,136 @@
+{
+  "type": "architecture",
+  "title": "Архитектура CameraWall и GhostAnalytics",
+  "subtitle": "Поток видеокадров от RTSP/go2rtc через YOLO26, трекинг, ReID и VLM/GhostAI",
+  "caption": "CameraWall управляет потоками и нейросетевым инференсом, а CameraCore хранит состояние треков, идентичностей и правил.",
+  "lang": "ru",
+  "skin": "light",
+  "motion": "trace",
+  "fonts": "system",
+  "dir": "LR",
+  "groups": [
+    { "id": "wall", "label": "CameraWall (Потоки, ML и UI)" },
+    { "id": "core", "label": "CameraCore (Домен и аналитика)" }
+  ],
+  "nodes": [
+    {
+      "id": "ingest",
+      "label": "RTSP / go2rtc",
+      "sub": "CameraSession",
+      "tag": "INGEST",
+      "kind": "input",
+      "icon": "server",
+      "group": "wall",
+      "row": 1,
+      "col": 0
+    },
+    {
+      "id": "yolo",
+      "label": "YOLO26 + Pose",
+      "sub": "CoreML / ONNX Seg",
+      "tag": "ML",
+      "kind": "backend",
+      "focal": true,
+      "group": "wall",
+      "row": 1,
+      "col": 1
+    },
+    {
+      "id": "tracks",
+      "label": "Трекинг и позы",
+      "sub": "IdentityTracker + FallDetector",
+      "tag": "CORE",
+      "kind": "backend",
+      "group": "core",
+      "row": 2,
+      "col": 1
+    },
+    {
+      "id": "reid",
+      "label": "ONNX ReID",
+      "sub": "OSNet / YOLO26m-ReID",
+      "tag": "EMBED",
+      "kind": "backend",
+      "group": "wall",
+      "row": 1,
+      "col": 2
+    },
+    {
+      "id": "ghost_id",
+      "label": "GhostIdentityEngine",
+      "sub": "Центроиды, кросс-камеры, HNSW",
+      "tag": "REID",
+      "kind": "store",
+      "icon": "database",
+      "group": "core",
+      "row": 2,
+      "col": 2
+    },
+    {
+      "id": "coord",
+      "label": "GhostAnalytics",
+      "sub": "Очереди кропов и 4-кадровое кольцо",
+      "tag": "COORD",
+      "kind": "backend",
+      "focal": true,
+      "group": "wall",
+      "row": 1,
+      "col": 3
+    },
+    {
+      "id": "vlm",
+      "label": "GhostAI / Qwen3.5",
+      "sub": "MLX VLM / OpenAI API",
+      "tag": "VLM",
+      "kind": "optional",
+      "icon": "cloud",
+      "group": "wall",
+      "row": 0,
+      "col": 3
+    },
+    {
+      "id": "ui",
+      "label": "Видеостена и алерты",
+      "sub": "WallView + SecurityCenter",
+      "tag": "UI",
+      "kind": "external",
+      "group": "wall",
+      "row": 1,
+      "col": 4
+    },
+    {
+      "id": "store",
+      "label": "CameraFeatureStore",
+      "sub": "SQLite, визиты и клипы тревог",
+      "tag": "DB",
+      "kind": "store",
+      "icon": "database",
+      "group": "core",
+      "row": 2,
+      "col": 4
+    }
+  ],
+  "edges": [
+    ["ingest", "yolo", "CVPixelBuffer", "primary"],
+    ["yolo", "tracks", "бокс + COCO-17", "primary"],
+    ["tracks", "reid", "лучший кроп", "primary"],
+    ["reid", "ghost_id", "эмбеддинг", "primary"],
+    ["ghost_id", "coord", "ID + триггеры", "primary"],
+    ["coord", "vlm", "кропы / 4 кадра", "link"],
+    ["vlm", "coord", "JSON-вердикт", "return"],
+    ["coord", "ui", "оверлеи и тревоги", "primary"],
+    ["coord", "store", "события и атрибуты"],
+    ["ghost_id", "store", "история визитов"]
+  ],
+  "evidence": [
+    { "id": "ingest", "file": "native/Sources/CameraWall/Go2RTC.swift", "line": 1 },
+    { "id": "yolo", "file": "native/Sources/CameraWall/YOLO26Detector.swift", "line": 1 },
+    { "id": "tracks", "file": "native/Sources/CameraCore/FallDetector.swift", "line": 1 },
+    { "id": "reid", "file": "native/Sources/CameraWall/ONNXReIDEncoder.swift", "line": 1 },
+    { "id": "ghost_id", "file": "native/Sources/CameraCore/GhostIdentityEngine.swift", "line": 1 },
+    { "id": "coord", "file": "native/Sources/CameraWall/GhostAnalyticsCoordinator.swift", "line": 1 },
+    { "id": "vlm", "file": "native/Sources/CameraWall/GhostAIClient.swift", "line": 1 },
+    { "id": "ui", "file": "native/Sources/CameraWall/WallModel.swift", "line": 1 },
+    { "id": "store", "file": "native/Sources/CameraCore/CameraFeatureStore.swift", "line": 1 }
+  ]
+}

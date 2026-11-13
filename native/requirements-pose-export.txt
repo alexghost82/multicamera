@@ -1,0 +1,5 @@
+ultralytics==8.4.112
+torch==2.7.0
+torchvision==0.22.0
+coremltools==9.0
+numpy==2.3.5

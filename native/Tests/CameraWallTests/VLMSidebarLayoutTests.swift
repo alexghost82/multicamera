@@ -245,6 +245,86 @@ final class VLMSidebarLayoutTests: XCTestCase {
         }
     }
 
+    func testHistoryQuestionRemainsVisibleAndSubmitsInCompactPanel() async throws {
+        _ = NSApplication.shared
+        let policy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(policy) }
+        for (width, height) in [(280, 420), (420, 540)] {
+            var submissions = 0
+            let content = AnalysisPanelViewport {
+                AnalysisPanelTabs(selection: .constant(.history), alertCount: 2)
+                AnalysisHistoryPage(status: AppLanguage.russian.localized("Local VLM not connected"), busy: false,
+                    persistHistory: .constant(false), allowActions: .constant(false), expandTerms: .constant(false),
+                    question: .constant("Что было вчера?"), sendDisabled: false, clear: {}, submit: { submissions += 1 }) {
+                    ForEach(0..<30, id: \.self) { index in
+                        Text("Saved history message \(index)").frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            .modifier(AnalysisSidebarSurface())
+            .frame(width: CGFloat(width), height: CGFloat(height))
+            .environment(\.locale, Locale(identifier: "ru"))
+            .preferredColorScheme(.dark)
+            let host = NSHostingView(rootView: content)
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+                styleMask: [.titled], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = host
+            defer { window.close() }
+            window.center()
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            try await Task.sleep(for: .milliseconds(200))
+            host.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+
+            let field = try XCTUnwrap(editableFields(in: host).first)
+            let frame = field.convert(field.bounds, to: host)
+            XCTAssertTrue(host.bounds.contains(frame), "History input must remain inside a \(width)x\(height) panel: \(frame)")
+
+            let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            let image = try XCTUnwrap(bitmap.cgImage)
+            let enlarged = try XCTUnwrap(CGContext(data: nil, width: image.width * 3, height: image.height * 3,
+                bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            enlarged.interpolationQuality = .high
+            enlarged.draw(image, in: CGRect(x: 0, y: 0, width: image.width * 3, height: image.height * 3))
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            request.recognitionLanguages = ["ru-RU", "en-US"]
+            request.usesLanguageCorrection = false
+            try VNImageRequestHandler(cgImage: XCTUnwrap(enlarged.makeImage()), options: [:]).perform([request])
+            let button = try XCTUnwrap(request.results?.first {
+                $0.topCandidates(1).first?.string.lowercased().contains("отправить") == true
+            }, "History must have a visible Send question button at \(width)x\(height)")
+            let bounds = button.boundingBox
+            let point = NSPoint(x: bounds.midX * host.bounds.width,
+                y: (host.isFlipped ? 1 - bounds.midY : bounds.midY) * host.bounds.height)
+            let location = host.convert(point, to: nil)
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                    context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1))
+                NSApp.postEvent(event, atStart: false)
+            }
+            let deadline = Date().addingTimeInterval(0.2)
+            while Date() < deadline,
+                  let event = NSApp.nextEvent(matching: .any, until: deadline, inMode: .default, dequeue: true) {
+                NSApp.sendEvent(event)
+                NSApp.updateWindows()
+            }
+            XCTAssertEqual(submissions, 1, "The visible history send button must accept a click")
+            let key = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+                characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36))
+            XCTAssertTrue(window.performKeyEquivalent(with: key))
+            XCTAssertEqual(submissions, 2, "Command-Return must submit the history question")
+            window.close()
+        }
+    }
+
     func testSharedBoundaryClipsOversizedContentAtEveryProposedPanelSize() throws {
         for size in [CGSize(width: 20, height: 12), CGSize(width: 80, height: 60),
                      CGSize(width: 160, height: 100), CGSize(width: 296, height: 500),

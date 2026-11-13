@@ -19,6 +19,7 @@ struct VLMPanel: View {
     @State private var question = ""
     @State private var questionBeforeVoice = ""
     @State private var historyQuestion = ""
+    @State private var historyError = ""
     @State private var saveError = ""
     @State private var descriptionJobs: [CameraFeatureJob] = []
     @StateObject private var voiceInput = LocalVoiceInput()
@@ -164,23 +165,25 @@ struct VLMPanel: View {
             persistHistory: Binding(
                 get: { model.featurePreferences.enabledFeatures.contains(.historyResearch) },
                 set: { enabled in
-                    do { try model.setFeatureEnabled(.historyResearch, enabled: enabled) }
-                    catch { saveError = error.localizedDescription }
+                    do { try model.setFeatureEnabled(.historyResearch, enabled: enabled); historyError = "" }
+                    catch { historyError = error.localizedDescription }
                 }
             ), allowActions: Binding(
                 get: { model.featurePreferences.enabledFeatures.contains(.operatorActions) },
                 set: { enabled in
-                    do { try model.setFeatureEnabled(.operatorActions, enabled: enabled) }
-                    catch { saveError = error.localizedDescription }
+                    do { try model.setFeatureEnabled(.operatorActions, enabled: enabled); historyError = "" }
+                    catch { historyError = error.localizedDescription }
                 }
             ), expandTerms: Binding(
                 get: { model.featurePreferences.enabledFeatures.contains(.knowledgeSearch) },
                 set: { enabled in
-                    do { try model.setFeatureEnabled(.knowledgeSearch, enabled: enabled) }
-                    catch { saveError = error.localizedDescription }
+                    do { try model.setFeatureEnabled(.knowledgeSearch, enabled: enabled); historyError = "" }
+                    catch { historyError = error.localizedDescription }
                 }
             ), question: $historyQuestion,
             sendDisabled: model.vlmBusy || model.manualQuestionQueue.pending != nil || historyQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            errorMessage: languageSettings.localizedMessage(historyError),
+            lastMessageID: model.trackResearchMessages.last?.id,
             clear: model.clearTrackResearchHistory, submit: submitHistoryQuestion) {
             if model.trackResearchMessages.isEmpty {
                 AnalysisPanelEmptyState(title: "Ask about local track history", icon: "text.magnifyingglass",
@@ -251,6 +254,10 @@ struct VLMPanel: View {
                         if let record = model.recentTracks.first(where: { $0.trackID == trackID }) {
                             Label("\(record.cameraName) · \(record.label) · \(trackID.uuidString.prefix(8))",
                                   systemImage: "quote.opening")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Label("Saved track: \(trackID.uuidString.prefix(8))", systemImage: "quote.opening")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }

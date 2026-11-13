@@ -233,9 +233,13 @@
 "A question is already queued" = "Один вопрос уже ожидает в очереди";
 "Queued question canceled because cameras disconnected" = "Вопрос в очереди отменён из-за отключения камер";
 "No saved camera history is available" = "Сохранённая история камер отсутствует";
+"No saved camera history is available for the requested day" = "За указанный день сохранённая история камер отсутствует";
+"A saved track image could not be loaded; using text evidence" = "Не удалось загрузить сохранённое изображение объекта; используются текстовые данные";
+"The requested history date is invalid." = "Указана неверная дата истории.";
 "Ask about saved camera history…" = "Спросить о сохранённой истории камер…";
 "Answers use saved tracks and automatic camera scans." = "Ответы используют сохранённые объекты и автоматические сводки камер.";
 "Saved scan: %@" = "Сохранённый скан: %@";
+"Saved track: %@" = "Сохранённый объект: %@";
 "Ask about a camera frame" = "Задать вопрос о кадре с камеры";
 "Ask about the selected camera scene…" = "Задать вопрос о сцене выбранной камеры…";
 "Read-only · last 30 tracks · metadata only · no images sent" = "Только чтение · последние 30 объектов · только метаданные · изображения не отправляются";

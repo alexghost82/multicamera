@@ -245,7 +245,7 @@ struct IdentityHistoryView: View {
                                 .frame(width: 30, height: 30)
                         }
                         .buttonStyle(.borderless)
-                        .disabled(model.vlmBusy)
+                        .disabled(model.describingTrackIDs.contains(record.trackID))
                         .help("Describe this saved crop using the local VLM")
                         .accessibilityLabel(appLanguage.localized("Describe %@ crop locally", arguments: [record.label]))
                         Button {

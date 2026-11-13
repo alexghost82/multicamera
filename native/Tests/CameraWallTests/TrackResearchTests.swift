@@ -34,6 +34,8 @@ final class TrackResearchTests: XCTestCase {
             [older.trackID])
         XCTAssertEqual(TrackResearchSearch.selectScans(question: question, records: [newScan, oldScan], limit: 1),
             [oldScan])
+        XCTAssertEqual(TrackResearchSearch.select(question: "Когда это было?", records: [newer, older],
+            limit: 2, preferredIDs: [older.trackID]).map(\.trackID), [older.trackID, newer.trackID])
     }
 
     func testResearchReplyAcceptsCompletedModelThinkingWrapper() throws {
@@ -180,13 +182,16 @@ final class TrackResearchTests: XCTestCase {
         defer { wall.shutdown() }
 
         XCTAssertFalse(wall.running)
-        XCTAssertTrue(wall.askTrackResearch(question: "Что было вчера?"))
+        wall.vlmBusy = true
+        XCTAssertTrue(wall.askTrackResearch(question: "Что было вчера?"), "Background VLM work must not block history")
+        XCTAssertTrue(wall.trackResearchBusy)
         let deadline = Date().addingTimeInterval(5)
-        while wall.vlmBusy && Date() < deadline {
+        while wall.trackResearchBusy && Date() < deadline {
             try await Task.sleep(for: .milliseconds(20))
         }
-        XCTAssertFalse(wall.vlmBusy)
-        XCTAssertEqual(wall.vlmStatus, "No saved camera history is available for the requested day")
+        XCTAssertFalse(wall.trackResearchBusy)
+        XCTAssertTrue(wall.vlmBusy)
+        XCTAssertEqual(wall.trackResearchStatus, "No saved camera history is available for the requested day")
         XCTAssertEqual(wall.trackResearchMessages.count, 2)
         let current = wall.trackResearchMessages
 

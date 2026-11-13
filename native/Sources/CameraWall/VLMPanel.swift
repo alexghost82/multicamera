@@ -54,7 +54,7 @@ struct VLMPanel: View {
     private var askTab: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Label(languageSettings.localizedMessage(model.vlmStatus), systemImage: model.vlmBusy ? "hourglass" : "cpu")
+                Label(languageSettings.localizedMessage(model.vlmStatus), systemImage: model.vlmBusy || model.manualVLMBusy ? "hourglass" : "cpu")
                     .lineLimit(1)
                 Spacer()
                 Button("Clear conversation") { model.vlmMessages = [] }
@@ -161,7 +161,7 @@ struct VLMPanel: View {
     }
 
     private var historyTab: some View {
-        AnalysisHistoryPage(status: languageSettings.localizedMessage(model.vlmStatus), busy: model.vlmBusy,
+        AnalysisHistoryPage(status: languageSettings.localizedMessage(model.trackResearchStatus), busy: model.trackResearchBusy,
             persistHistory: Binding(
                 get: { model.featurePreferences.enabledFeatures.contains(.historyResearch) },
                 set: { enabled in
@@ -181,7 +181,7 @@ struct VLMPanel: View {
                     catch { historyError = error.localizedDescription }
                 }
             ), question: $historyQuestion,
-            sendDisabled: model.vlmBusy || model.manualQuestionQueue.pending != nil || historyQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            sendDisabled: model.trackResearchBusy || historyQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
             errorMessage: languageSettings.localizedMessage(historyError),
             lastMessageID: model.trackResearchMessages.last?.id,
             clear: model.clearTrackResearchHistory, submit: submitHistoryQuestion) {
@@ -277,7 +277,7 @@ struct VLMPanel: View {
     }
 
     private func submitHistoryQuestion() {
-        guard !model.vlmBusy, model.manualQuestionQueue.pending == nil,
+        guard !model.trackResearchBusy,
               !historyQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         if model.askTrackResearch(question: historyQuestion) { historyQuestion = "" }
     }

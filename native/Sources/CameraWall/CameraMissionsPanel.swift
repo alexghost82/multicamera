@@ -322,20 +322,20 @@ struct CameraMissionsPanel: View {
                         }
                         Spacer()
                         Button("Clear thread", role: .destructive) { clearMissionConsult(mission.id) }
-                            .disabled(missionConsults(for: mission.id).isEmpty || model.vlmBusy)
+                            .disabled(missionConsults(for: mission.id).isEmpty || model.missionConsultBusy)
                         Button {
                             askMissionConsult(mission.id)
                         } label: {
                             Label("Ask", systemImage: "paperplane")
                         }
-                        .disabled(model.vlmBusy || consultDrafts[mission.id, default: ""].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(model.missionConsultBusy || consultDrafts[mission.id, default: ""].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         .help("Ask the local assistant about this mission’s saved run summaries")
                     }
-                    if model.vlmBusy {
-                        Label(locale.appLanguage.localizedMessage(model.vlmStatus), systemImage: "hourglass")
+                    if model.missionConsultBusy {
+                        Label(locale.appLanguage.localizedMessage(model.missionConsultStatus), systemImage: "hourglass")
                             .font(.system(size: 11))
                             .foregroundStyle(ACTATheme.textSecondary)
-                            .accessibilityLabel("Mission consult in progress: \(model.vlmStatus)")
+                            .accessibilityLabel("Mission consult in progress: \(model.missionConsultStatus)")
                     }
                 }
                 .padding(.vertical, 8)

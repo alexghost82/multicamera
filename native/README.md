@@ -368,15 +368,45 @@ them. A failed database write fails the scheduled request rather than reporting
 successful storage; already saved results from earlier cameras remain available.
 The History tab searches the full retained track and scan history, selecting at
 most 30 evidence records for a model request. It also works without tracked
-objects. Scan citations are separate from track citations and cannot authorize
-track-description actions. Search selection and model answers remain advisory,
-not an exhaustive temporal report or proof of factual accuracy.
+objects or a live camera connection. Enter a question and use **Send question**
+or Command-Return. Follow-up questions use the recent conversation and, when
+available, previously cited records. The persistence switch saves the research
+conversation locally; asking questions does not require that switch.
+
+Single-day queries such as “today”, “yesterday”, “сегодня”, “вчера”,
+“позавчера”, `YYYY-MM-DD` and `DD.MM.YYYY` use the computer's local calendar
+and time zone. Multiple-day comparisons are not automatically filtered.
+Common Russian/English object and color terms are matched locally; the optional
+query-expansion switch uses Qwen for additional equivalent terms. Tracks require
+YOLO detection, and scan summaries require scheduled analysis to have been
+enabled. History does not search the separate alerts, camera-event, mission or
+sampled-frame stores and is not a continuous video archive. Scan citations are
+separate from track citations and cannot authorize track-description actions.
+Search selection and model answers remain advisory, not an exhaustive temporal
+report or proof of factual accuracy.
+
+To smoke-test the History tab's model path with synthetic local data:
+
+```sh
+CAMERAWALL_TEST_VLM_MODEL=/path/to/qwen3.5-9b swift test --package-path native --disable-automatic-resolution --filter LocalVLMClientTests/testInstalledQwenAnswersSyntheticSavedHistory
+```
 
 The Ask tab has a visible Send question command and Command-Return shortcut.
-While Qwen is busy, one manual question can wait; it starts before new background
-jobs once the active work finishes. A second pending question cannot overwrite
-it. Rejected submissions keep the draft. Disconnect explicitly cancels a queued
-question and retains its text in the conversation with a cancellation message.
+Operator requests (Ask, History, mission consults, manual crop descriptions and
+local showcase questions) do not wait for background work such as scheduled
+scans, missions, memory samples or queued crop descriptions. The app loads
+independent Qwen instances: one per roughly 7 GB of RAM above a 10 GB reserve,
+at most three (two on a 24 GB Mac). Background work never occupies every
+instance, so an operator request starts immediately on a free instance and runs
+in parallel with it. Extra instances load on first use, which adds a few
+seconds, and are released after three idle minutes. On Macs with room for only
+one instance, requests share it and operator requests are served first.
+
+While an Ask question is still being answered, one more Ask question can wait;
+a second pending question cannot overwrite it. Rejected submissions keep the
+draft. Disconnect explicitly cancels a queued question and retains its text in
+the conversation with a cancellation message. History questions do not depend
+on camera connections and are not cancelled by a disconnect.
 
 The selected checkpoint is `mlx-community/Qwen3.5-9B-4bit`, a base vision model
 in MLX format. Its weights occupy about 5.95 GB. The model is not

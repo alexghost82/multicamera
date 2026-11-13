@@ -397,15 +397,21 @@ final class WallModel: ObservableObject {
     private(set) var ghostAnalytics: GhostAnalyticsCoordinator!
     private var lastGhostMaintenanceCheck: TimeInterval = -.infinity
     @Published var vlmStatus = "Local VLM not connected"
-    @Published var vlmBusy = false {
+    /// Background VLM work (scheduled scans, missions, memory samples, queued descriptions).
+    /// Operator requests use their own state below and run concurrently on a separate model instance.
+    @Published var vlmBusy = false
+    @Published private(set) var manualVLMBusy = false {
         didSet {
-            if !vlmBusy, manualQuestionQueue.pending != nil {
+            if !manualVLMBusy, manualQuestionQueue.pending != nil {
                 Task { @MainActor [weak self] in self?.startPendingVLMQuestion() }
             }
         }
     }
     @Published private(set) var manualQuestionQueue = VLMManualQuestionQueue()
-    private var vlmUnavailable: Bool { vlmBusy || manualQuestionQueue.pending != nil }
+    @Published private(set) var trackResearchBusy = false
+    @Published private(set) var trackResearchStatus = "Ask about local track history"
+    @Published private(set) var missionConsultBusy = false
+    @Published private(set) var missionConsultStatus = ""
     let modelRuntime: LocalModelRuntime
     let configURL: URL
     private var relay: Go2RTC
@@ -445,6 +451,11 @@ final class WallModel: ObservableObject {
     private var lastDetectionSubmission: TimeInterval = 0
     private var vlmGeneration = UUID()
     private var vlmTask: Task<Void, Never>?
+    private var manualVLMTask: Task<Void, Never>?
+    private var trackResearchTask: Task<Void, Never>?
+    private var trackResearchGeneration = UUID()
+    private var missionConsultTask: Task<Void, Never>?
+    private var missionConsultGeneration = UUID()
     private var vlmSchedule = VLMAnalysisSchedule()
     private var vlmCursor = 0
     private var lastFeatureQueueCheck: TimeInterval = 0
@@ -728,6 +739,9 @@ final class WallModel: ObservableObject {
         vlmTask?.cancel()
         vlmTask = nil
         vlmBusy = false
+        manualVLMTask?.cancel()
+        manualVLMTask = nil
+        manualVLMBusy = false
         activeMissionID = nil
         forcedMissionID = nil
         describingTrackIDs.removeAll()
@@ -1290,7 +1304,7 @@ final class WallModel: ObservableObject {
             vlmTask?.cancel()
         }
         if !enabled, featureID == .scheduledMissions {
-            if activeMissionConsultID != nil { vlmTask?.cancel() }
+            missionConsultTask?.cancel()
             cameraMissionConsultMessages = []
         }
         notice = enabled ? "Feature enabled" : "Feature disabled; queued data remains local"
@@ -1407,7 +1421,7 @@ final class WallModel: ObservableObject {
     }
 
     private func localShowcaseQuestion(cameraID: UUID, question: String) async throws -> String {
-        guard !vlmUnavailable, featurePreferences.enabledFeatures.contains(.publicShowcase),
+        guard featurePreferences.enabledFeatures.contains(.publicShowcase),
               !featurePreferences.allowPublicAccess,
               let camera = config.cameras.first(where: { $0.id == cameraID && $0.enabled && $0.aiChatEnabled }),
               let tile = tiles[camera.id], !tile.stale,
@@ -1419,11 +1433,10 @@ final class WallModel: ObservableObject {
         }
         let showcaseGeneration = localShowcaseGeneration
         let inferenceGeneration = vlmGeneration
-        vlmBusy = true
-        defer { if self.vlmGeneration == inferenceGeneration { vlmBusy = false } }
         let image = try await VLMFrameEncoder.jpegData(from: pixel, maxDimension: 1024, quality: 0.6)
         let prompt = Self.vlmPrompt(question: question, rules: [])
-        let raw = try await LocalVLMClient(model: vlmPreferences.model).analyze(image: image, prompt: prompt)
+        let raw = try await LocalVLMClient(model: vlmPreferences.model, workload: .interactive)
+            .analyze(image: image, prompt: prompt)
           guard localShowcaseGeneration == showcaseGeneration,
               vlmGeneration == inferenceGeneration,
               featurePreferences.enabledFeatures.contains(.publicShowcase),
@@ -1472,7 +1485,7 @@ final class WallModel: ObservableObject {
                 forcedMissionID = nil
                 vlmTask?.cancel()
             }
-            if activeMissionConsultID == missionID { vlmTask?.cancel() }
+            if activeMissionConsultID == missionID { missionConsultTask?.cancel() }
         } catch {
             notice = "Local mission could not be deleted"
         }
@@ -1493,7 +1506,7 @@ final class WallModel: ObservableObject {
         guard featurePreferences.enabledFeatures.contains(.scheduledMissions) else {
             throw CameraFeatureStoreError.featureDisabled(.scheduledMissions)
         }
-        guard !vlmUnavailable, let mission = cameraMissions.first(where: { $0.id == missionID }) else {
+        guard !missionConsultBusy, let mission = cameraMissions.first(where: { $0.id == missionID }) else {
             throw ConfigurationError.invalid("Select an idle, available mission before asking a question.")
         }
         let prior = cameraMissionConsultMessages.filter { $0.missionID == missionID }
@@ -1503,18 +1516,19 @@ final class WallModel: ObservableObject {
             existingConsults: cameraMissionConsultMessages
         )
         cameraMissionConsultMessages = updated
-        let generation = vlmGeneration
-        let client = LocalVLMClient(model: vlmPreferences.model)
+        let generation = UUID()
+        missionConsultGeneration = generation
+        let client = LocalVLMClient(model: vlmPreferences.model, workload: .interactive)
         activeMissionConsultID = missionID
-        vlmBusy = true
-        vlmStatus = "Consulting local mission history…"
-        vlmTask = Task { @MainActor [weak self] in
+        missionConsultBusy = true
+        missionConsultStatus = "Consulting local mission history…"
+        missionConsultTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
-                if self.activeMissionConsultID == missionID { self.activeMissionConsultID = nil }
-                if self.vlmGeneration == generation {
-                    self.vlmBusy = false
-                    self.vlmTask = nil
+                if self.missionConsultGeneration == generation {
+                    self.activeMissionConsultID = nil
+                    self.missionConsultBusy = false
+                    self.missionConsultTask = nil
                 }
             }
             do {
@@ -1526,7 +1540,7 @@ final class WallModel: ObservableObject {
                 try Task.checkCancellation()
                 guard CameraMissionConsultLifecycle.canCommit(
                     featureEnabled: self.featurePreferences.enabledFeatures.contains(.scheduledMissions),
-                    generationMatches: self.vlmGeneration == generation,
+                    generationMatches: self.missionConsultGeneration == generation,
                     missionStillExists: self.cameraMissions.contains(where: { $0.id == missionID }),
                     questionStillPresent: self.cameraMissionConsultMessages.contains(where: { $0.id == operatorMessage.id }),
                     taskCancelled: Task.isCancelled
@@ -1542,11 +1556,11 @@ final class WallModel: ObservableObject {
                     assistantMessage, missions: self.cameraMissions, runs: self.cameraMissionRuns,
                     existingConsults: self.cameraMissionConsultMessages
                 )
-                self.vlmStatus = "Local mission history answer received"
+                self.missionConsultStatus = "Local mission history answer received"
             } catch is CancellationError {
             } catch {
-                guard self.vlmGeneration == generation else { return }
-                self.vlmStatus = "Local mission history query failed: \(error.localizedDescription)"
+                guard self.missionConsultGeneration == generation else { return }
+                self.missionConsultStatus = "Local mission history query failed: \(error.localizedDescription)"
             }
         }
     }
@@ -1559,7 +1573,7 @@ final class WallModel: ObservableObject {
         let updated = cameraMissionConsultMessages.filter { $0.missionID != missionID }
         try CameraMissionStore.save(cameraMissions, runs: cameraMissionRuns, consults: updated)
         cameraMissionConsultMessages = updated
-        if activeMissionConsultID == missionID { vlmTask?.cancel() }
+        if activeMissionConsultID == missionID { missionConsultTask?.cancel() }
     }
 
     @discardableResult
@@ -1579,7 +1593,7 @@ final class WallModel: ObservableObject {
             vlmStatus = "Connect cameras before asking about frames"
             return false
         }
-        if vlmUnavailable {
+        if manualVLMBusy {
             let accepted = manualQuestionQueue.enqueue(question: text, cameraIDs: Set(cameras.map(\.id)))
             vlmStatus = accepted ? "Question queued after the current analysis" : "A question is already queued"
             return accepted
@@ -1588,7 +1602,7 @@ final class WallModel: ObservableObject {
     }
 
     private func startPendingVLMQuestion() {
-        guard !vlmBusy, let request = manualQuestionQueue.take() else { return }
+        guard !manualVLMBusy, let request = manualQuestionQueue.take() else { return }
         let cameras = config.cameras.filter { $0.enabled && request.cameraIDs.contains($0.id) }
         guard !cameras.isEmpty else {
             vlmStatus = "Select at least one enabled camera"
@@ -1609,36 +1623,37 @@ final class WallModel: ObservableObject {
         let text = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return false }
         guard text.count <= 2000 else {
-            vlmStatus = "Research questions are limited to 2000 characters"
+            trackResearchStatus = "Research questions are limited to 2000 characters"
             return false
         }
-        guard !vlmUnavailable else { return false }
+        guard !trackResearchBusy else { return false }
         guard let trackingStore else {
-            vlmStatus = "Local tracking store is unavailable"
+            trackResearchStatus = "Local tracking store is unavailable"
             return false
         }
-        let client = LocalVLMClient(model: vlmPreferences.model)
-        let generation = vlmGeneration
+        let client = LocalVLMClient(model: vlmPreferences.model, workload: .interactive)
+        let generation = UUID()
+        trackResearchGeneration = generation
         let allowActions = featurePreferences.enabledFeatures.contains(.operatorActions)
         let expandSearchTerms = featurePreferences.enabledFeatures.contains(.knowledgeSearch)
         let priorMessages = trackResearchMessages
         let researchNow = Date()
         let researchCalendar = Calendar.current
         appendTrackResearchMessage(TrackResearchMessage(role: .operatorMessage, text: text, citedTrackIDs: []))
-        vlmBusy = true
-        vlmStatus = "Searching local track history…"
-        vlmTask = Task { @MainActor [weak self] in
+        trackResearchBusy = true
+        trackResearchStatus = "Searching local track history…"
+        trackResearchTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
-                if self.vlmGeneration == generation {
-                    self.vlmBusy = false
-                    self.vlmTask = nil
+                if self.trackResearchGeneration == generation {
+                    self.trackResearchBusy = false
+                    self.trackResearchTask = nil
                 }
             }
             do {
                 let queryPlan: TrackResearchQueryPlan?
                 if expandSearchTerms {
-                    self.vlmStatus = "Expanding local search terms…"
+                    self.trackResearchStatus = "Expanding local search terms…"
                     queryPlan = try await TrackResearchQueryPlan.prepare(question: text) { prompt in
                         try await client.analyze(text: prompt)
                     }
@@ -1646,8 +1661,8 @@ final class WallModel: ObservableObject {
                     queryPlan = nil
                 }
                 try Task.checkCancellation()
-                guard self.vlmGeneration == generation else { return }
-                self.vlmStatus = "Searching local track history…"
+                guard self.trackResearchGeneration == generation else { return }
+                self.trackResearchStatus = "Searching local track history…"
                 let scanTask = Task.detached(priority: .utility) {
                     let selection = try TrackResearchSearch.load(
                         from: trackingStore, question: text, priorMessages: priorMessages,
@@ -1677,15 +1692,15 @@ final class WallModel: ObservableObject {
                     scanTask.cancel()
                 }
                 try Task.checkCancellation()
-                guard self.vlmGeneration == generation else { return }
+                guard self.trackResearchGeneration == generation else { return }
                 let selected = research.0
                 if research.2 { self.notice = "A saved track image could not be loaded; using text evidence" }
                 guard !selected.tracks.isEmpty || !selected.scans.isEmpty else {
-                    self.vlmStatus = selected.scopedToDay
+                    self.trackResearchStatus = selected.scopedToDay
                         ? "No saved camera history is available for the requested day"
                         : "No saved camera history is available"
                     self.appendTrackResearchMessage(TrackResearchMessage(
-                        role: .assistant, text: AppLanguage.current.localizedMessage(self.vlmStatus), citedTrackIDs: []
+                        role: .assistant, text: AppLanguage.current.localizedMessage(self.trackResearchStatus), citedTrackIDs: []
                     ))
                     return
                 }
@@ -1702,14 +1717,14 @@ final class WallModel: ObservableObject {
                 let reply = try await TrackResearchReply.generate(
                     question: text, records: selected.tracks, scans: selected.scans
                 ) { correction in
-                    guard self.vlmGeneration == generation else { throw CancellationError() }
+                    guard self.trackResearchGeneration == generation else { throw CancellationError() }
                     if let imageData = research.1?.1 {
                         return try await client.analyze(images: [imageData], prompt: prompt + correction)
                     }
                     return try await client.analyze(text: prompt + correction)
                 }
                 try Task.checkCancellation()
-                guard self.vlmGeneration == generation else { return }
+                guard self.trackResearchGeneration == generation else { return }
                 self.appendTrackResearchMessage(TrackResearchMessage(
                     role: .assistant, text: reply.answer, citedTrackIDs: reply.citations, citedScanIDs: reply.scanCitations ?? []
                 ))
@@ -1721,11 +1736,11 @@ final class WallModel: ObservableObject {
                     }
                     self.reloadOperatorActions()
                 }
-                self.vlmStatus = "Local history answer received"
+                self.trackResearchStatus = "Local history answer received"
             } catch is CancellationError {
             } catch {
-                guard self.vlmGeneration == generation else { return }
-                self.vlmStatus = "Local history query failed: \(error.localizedDescription)"
+                guard self.trackResearchGeneration == generation else { return }
+                self.trackResearchStatus = "Local history query failed: \(error.localizedDescription)"
                 self.appendTrackResearchMessage(TrackResearchMessage(
                     role: .assistant, text: VLMResponseLanguage.failureMessage(for: text, error: error), citedTrackIDs: []
                 ))
@@ -2185,25 +2200,22 @@ final class WallModel: ObservableObject {
     }
 
     func describeTrackedObject(_ record: TrackedObjectRecord) {
-        guard !vlmUnavailable else { return }
+        guard !describingTrackIDs.contains(record.trackID) else { return }
         guard let trackingStore,
               let imageURL = trackingStore.imageURL(for: record),
               let image = try? Data(contentsOf: imageURL) else {
             vlmStatus = "Saved crop is unavailable"
             return
         }
-        let client = LocalVLMClient(model: vlmPreferences.model)
+        let client = LocalVLMClient(model: vlmPreferences.model, workload: .interactive)
 
         let generation = vlmGeneration
-        vlmBusy = true
         describingTrackIDs.insert(record.trackID)
         vlmStatus = "Describing saved crop on the local VLM…"
-        vlmTask = Task { @MainActor [weak self] in
+        Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
                 if self.vlmGeneration == generation {
-                    self.vlmBusy = false
-                    self.vlmTask = nil
                     self.describingTrackIDs.remove(record.trackID)
                 }
             }
@@ -2313,7 +2325,7 @@ final class WallModel: ObservableObject {
             vlmStatus = "Connect cameras before asking about frames"
             return false
         }
-        guard !vlmBusy else { return false }
+        guard scheduled ? !vlmBusy : !manualVLMBusy else { return false }
         let hasFreshFrame = cameras.contains { camera in
             guard let tile = tiles[camera.id], !tile.stale,
                   let frame = tile.session?.snapshot(), frame.pixel != nil else { return false }
@@ -2324,22 +2336,27 @@ final class WallModel: ObservableObject {
             return false
         }
 
-        let client = LocalVLMClient(model: vlmPreferences.model)
+        let client = LocalVLMClient(model: vlmPreferences.model, workload: scheduled ? .background : .interactive)
         let rules = scheduled ? vlmPreferences.alertRules.filter(\.enabled) : []
         let generation = vlmGeneration
-        vlmBusy = true
+        if scheduled { vlmBusy = true } else { manualVLMBusy = true }
         vlmStatus = "Analyzing \(cameras.count) camera(s)…"
         if !scheduled {
             vlmMessages.append(VLMChatMessage(role: .operatorMessage, text: question,
                                               cameraNames: cameras.map(\.name)))
         }
 
-        vlmTask = Task { @MainActor [weak self] in
+        let task = Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
                 if self.vlmGeneration == generation {
-                    self.vlmBusy = false
-                    self.vlmTask = nil
+                    if scheduled {
+                        self.vlmBusy = false
+                        self.vlmTask = nil
+                    } else {
+                        self.manualVLMBusy = false
+                        self.manualVLMTask = nil
+                    }
                 }
             }
             var responses: [String] = []
@@ -2437,6 +2454,7 @@ final class WallModel: ObservableObject {
                 }
             }
         }
+        if scheduled { vlmTask = task } else { manualVLMTask = task }
         return true
     }
 
@@ -2474,7 +2492,7 @@ final class WallModel: ObservableObject {
     }
 
     private func scheduleVLM(now: TimeInterval) {
-        guard vlmPreferences.scheduleEnabled, running, !connecting, !vlmUnavailable, !vlmBusy else { return }
+        guard vlmPreferences.scheduleEnabled, running, !connecting, !vlmBusy else { return }
         let cameras = config.cameras.filter { camera in
             guard camera.enabled else { return false }
             return vlmPreferences.analyzeAllEnabledCameras || vlmPreferences.scheduledCameraIDs.contains(camera.id)
@@ -2510,7 +2528,7 @@ final class WallModel: ObservableObject {
                 featureEnabled: featurePreferences.enabledFeatures.contains(.scheduledMissions),
                 wallRunning: running,
                 connecting: connecting,
-                vlmBusy: vlmUnavailable,
+                vlmBusy: vlmBusy,
                 hasActiveMission: activeMissionID != nil,
                 cameraEnabled: camera.enabled,
                 frameFresh: !tile.stale && frameAge >= 0 && frameAge < 1.5
@@ -2645,7 +2663,7 @@ final class WallModel: ObservableObject {
 
     private func scheduleQueuedTrackDescription(now: TimeInterval) {
         guard featurePreferences.enabledFeatures.contains(.visionDescriptions), running,
-              !connecting, !vlmUnavailable, now - lastFeatureQueueCheck >= 1 else { return }
+              !connecting, !vlmBusy, now - lastFeatureQueueCheck >= 1 else { return }
         lastFeatureQueueCheck = now
         do {
             if now - lastFeatureQueueRecovery >= 30 {
@@ -2879,7 +2897,7 @@ final class WallModel: ObservableObject {
     private func scheduleChronologicalMemory(now: TimeInterval) {
         guard now - lastMemoryCheck >= 1 else { return }
         lastMemoryCheck = now
-        guard !vlmUnavailable, memorySampleTask == nil else { return }
+        guard !vlmBusy, memorySampleTask == nil else { return }
         let cameras = config.cameras.filter(\.enabled)
         guard !cameras.isEmpty else { return }
         for offset in 0..<cameras.count {

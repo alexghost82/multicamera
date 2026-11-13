@@ -82,6 +82,8 @@ def normalize_rtsp_url(value: str) -> str:
         raise ValueError("RTSP port must be between 1 and 65535")
     if any(character.isspace() for character in rtsp_url):
         raise ValueError("RTSP URL cannot contain spaces")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("RTSP URL cannot contain credentials; remove the user and password from the URL")
 
     return rtsp_url
 
@@ -904,6 +906,15 @@ def _is_loopback_client(remote: str) -> bool:
         return False
 
 
+def _is_state_changing_request(request) -> bool:
+    return request.method != 'GET' or request.headers.get('Upgrade', '').lower() == 'websocket'
+
+
+def _has_foreign_origin(request) -> bool:
+    origin = request.headers.get('Origin')
+    return origin is not None and origin != f"{request.scheme}://{request.host}"
+
+
 def create_server_ssl_context(host: str) -> Optional[ssl.SSLContext]:
     if _is_loopback_host(host):
         return None
@@ -930,10 +941,12 @@ async def create_app(server: MultiCameraVLMServer) -> web.Application:
             if not _is_lan_client(remote) or not _is_lan_client(requested_host):
                 return web.json_response({'error': 'Only local-network clients and hosts are allowed'}, status=403)
         if not remote or _is_loopback_client(remote):
+            if _is_state_changing_request(request) and _has_foreign_origin(request):
+                return web.json_response({'error': 'Request origin is not allowed'}, status=403)
             return await handler(request)
         if not request.secure:
             return web.json_response({'error': 'HTTPS is required for network access'}, status=426)
-        if request.method != 'GET' or request.headers.get('Upgrade', '').lower() == 'websocket':
+        if _is_state_changing_request(request):
             expected_origin = f"{request.scheme}://{request.host}"
             if request.headers.get('Origin') != expected_origin:
                 return web.json_response({'error': 'Request origin is not allowed'}, status=403)

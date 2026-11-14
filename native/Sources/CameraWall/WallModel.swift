@@ -394,6 +394,11 @@ final class WallModel: ObservableObject {
     @Published var ghostSpokenCards: [GhostHCCard] = []
     @Published var ghostHealthStatus = GhostHealthStatus()
     @Published var ghostBudgetSnapshot = GhostBudgetSnapshot()
+    @Published var ghostNarrativeChapters: [GhostNarrativeChapterRecord] = []
+    @Published var ghostChatThreads: [GhostChatThreadRecord] = []
+    @Published var activeGhostThreadID: String = "default"
+    @Published var ghostThreadFocusEntries: [GhostThreadFocusEntry] = []
+    @Published var ghostChatActions: [GhostChatActionRecord] = []
     private(set) var ghostAnalytics: GhostAnalyticsCoordinator!
     private var lastGhostMaintenanceCheck: TimeInterval = -.infinity
     @Published var vlmStatus = "Local VLM not connected"
@@ -587,6 +592,10 @@ final class WallModel: ObservableObject {
             aiClient: ghostClient,
             trackingStore: trackingStore
         )
+        self.ghostNarrativeChapters = (try? trackingStore?.loadGhostNarrativeChapterRecords(limit: 50)) ?? []
+        self.ghostChatThreads = (try? trackingStore?.listGhostChatThreads(limit: 50)) ?? []
+        self.ghostThreadFocusEntries = (try? trackingStore?.loadGhostThreadFocusEntries(threadID: activeGhostThreadID, limit: 6)) ?? []
+        self.ghostChatActions = (try? trackingStore?.listGhostChatActions(threadID: activeGhostThreadID, status: "proposed")) ?? []
         if workerMode {
             workerProvisionedCameras = config.cameras.filter {
                 $0.enabled && $0.localDeviceID == nil && $0.screenDisplayID == nil && $0.fileURL == nil
@@ -3066,7 +3075,37 @@ final class WallModel: ObservableObject {
         guard now - lastGhostMaintenanceCheck >= 4.0, let ghost = ghostAnalytics else { return }
         lastGhostMaintenanceCheck = now
         let spokenEnabled = vlmPreferences.ghostSpokenBriefingEnabled
+        let memEval = ghost.memoryGuard.evaluate()
+
+        // Capture fresh CGImages for active cameras when RAM watchdog allows context frames
+        var cameraFramePayloads: [(cameraID: UUID, cameraName: String, cgImage: CGImage, labels: [String], trackIDs: [String])] = []
+        if running && !connecting && memEval.allowContextFrames {
+            for camera in config.cameras where camera.enabled {
+                guard let tile = tiles[camera.id], !tile.stale,
+                      let frame = tile.session?.snapshot(),
+                      let pixel = frame.pixel,
+                      now - frame.receivedAt < 1.5 else { continue }
+                let ciImage = CIImage(cvPixelBuffer: pixel)
+                if let cg = imageContext.createCGImage(ciImage, from: ciImage.extent) {
+                    let labels = tile.objects.map(\.label)
+                    let trkIDs = tile.objects.compactMap { $0.trackID?.uuidString }
+                    cameraFramePayloads.append((camera.id, camera.name, cg, labels, trkIDs))
+                }
+            }
+        }
+
+        let currentThreadID = activeGhostThreadID
         Task { @MainActor [weak self] in
+            for item in cameraFramePayloads {
+                await ghost.offerCameraFrame(
+                    cameraID: item.cameraID,
+                    cameraName: item.cameraName,
+                    cgImage: item.cgImage,
+                    hasActiveObjects: !item.labels.isEmpty,
+                    activeLabels: item.labels,
+                    activeTrackIDs: item.trackIDs
+                )
+            }
             await ghost.runPeriodicMaintenanceTick()
             if spokenEnabled {
                 _ = await ghost.generateSpokenBriefingIfDue()
@@ -3075,7 +3114,75 @@ final class WallModel: ObservableObject {
             self.ghostSpokenCards = ghost.recentSpokenCards
             self.ghostHealthStatus = ghost.aiClient.circuitBreaker.status()
             self.ghostBudgetSnapshot = ghost.aiClient.budgetTracker.snapshot()
+            if let store = self.trackingStore {
+                self.ghostNarrativeChapters = (try? store.loadGhostNarrativeChapterRecords(limit: 50)) ?? self.ghostNarrativeChapters
+                self.ghostChatThreads = (try? store.listGhostChatThreads(limit: 50)) ?? self.ghostChatThreads
+                self.ghostThreadFocusEntries = (try? store.loadGhostThreadFocusEntries(threadID: currentThreadID, limit: 6)) ?? self.ghostThreadFocusEntries
+                self.ghostChatActions = (try? store.listGhostChatActions(threadID: currentThreadID, status: "proposed")) ?? self.ghostChatActions
+            }
         }
+    }
+
+    func toggleGhostNarrativePin(_ chapter: GhostNarrativeChapterRecord) {
+        guard let store = trackingStore else { return }
+        try? store.setGhostNarrativePinned(chapterID: chapter.chapterID, pinned: !chapter.pinned)
+        ghostNarrativeChapters = (try? store.loadGhostNarrativeChapterRecords(limit: 50)) ?? ghostNarrativeChapters
+    }
+
+    func saveGhostNarrativeOperatorText(_ chapter: GhostNarrativeChapterRecord, text: String?) {
+        guard let store = trackingStore else { return }
+        try? store.setGhostNarrativeOperatorText(chapterID: chapter.chapterID, operatorText: text)
+        ghostNarrativeChapters = (try? store.loadGhostNarrativeChapterRecords(limit: 50)) ?? ghostNarrativeChapters
+    }
+
+    func forceCloseGhostNarrativeChapter(cameraID: UUID) {
+        guard let ghost = ghostAnalytics else { return }
+        let camName = config.cameras.first(where: { $0.id == cameraID })?.name ?? cameraID.uuidString
+        Task { @MainActor [weak self] in
+            _ = await ghost.forceCloseNarrativeChapter(cameraID: cameraID, cameraName: camName)
+            guard let self, let store = self.trackingStore else { return }
+            self.ghostNarrativeChapters = (try? store.loadGhostNarrativeChapterRecords(limit: 50)) ?? self.ghostNarrativeChapters
+        }
+    }
+
+    func rebuildGhostKnowledgeLayer() {
+        guard let store = trackingStore else { return }
+        trackingQueue.async { [weak self] in
+            try? store.rebuildAllGhostKnowledge()
+            Task { @MainActor [weak self] in
+                self?.notice = "Семантическая база знаний (Knowledge Layer + FTS5) успешно перестроена"
+            }
+        }
+    }
+
+    func selectGhostChatThread(_ threadID: String) {
+        activeGhostThreadID = threadID
+        guard let store = trackingStore else { return }
+        ghostThreadFocusEntries = (try? store.loadGhostThreadFocusEntries(threadID: threadID, limit: 6)) ?? []
+        ghostChatActions = (try? store.listGhostChatActions(threadID: threadID, status: "proposed")) ?? []
+    }
+
+    func mergeGhostChatThread(sourceID: String, intoTargetID targetID: String) {
+        guard let store = trackingStore, sourceID != targetID else { return }
+        try? store.mergeGhostThreads(sourceThreadID: sourceID, intoTargetThreadID: targetID)
+        activeGhostThreadID = targetID
+        ghostChatThreads = (try? store.listGhostChatThreads(limit: 50)) ?? []
+        ghostThreadFocusEntries = (try? store.loadGhostThreadFocusEntries(threadID: targetID, limit: 6)) ?? []
+        ghostChatActions = (try? store.listGhostChatActions(threadID: targetID, status: "proposed")) ?? []
+    }
+
+    func reviewGhostChatAction(_ actionID: String, confirmed: Bool) {
+        guard let ghost = ghostAnalytics else { return }
+        _ = ghost.reviewAndExecuteChatAction(actionID: actionID, confirmed: confirmed)
+        if let store = trackingStore {
+            ghostChatActions = (try? store.listGhostChatActions(threadID: activeGhostThreadID, status: "proposed")) ?? []
+        }
+    }
+
+    func pushGhostFocus(identityID: String, label: String? = nil) {
+        guard let store = trackingStore else { return }
+        try? store.pushGhostThreadFocus(threadID: activeGhostThreadID, kind: "identity", refID: identityID, label: label, pinned: true)
+        ghostThreadFocusEntries = (try? store.loadGhostThreadFocusEntries(threadID: activeGhostThreadID, limit: 6)) ?? []
     }
 
     private func sampleAlertLookbackFrames(now: TimeInterval) {

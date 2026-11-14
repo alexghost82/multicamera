@@ -340,6 +340,7 @@ public struct GhostIdentityGalleryProfile: Codable, Sendable, Equatable {
     public var identityID: String
     public var kind: String // "person" or "vehicle"
     public var displayCode: String
+    public var displayName: String?
     public var centroid: [Float]
     public var exemplars: [GhostExemplar]
     public var chromaPrint: GhostChromaSignature?
@@ -360,6 +361,7 @@ public struct GhostIdentityGalleryProfile: Codable, Sendable, Equatable {
         identityID: String,
         kind: String,
         displayCode: String,
+        displayName: String? = nil,
         centroid: [Float] = [],
         exemplars: [GhostExemplar] = [],
         chromaPrint: GhostChromaSignature? = nil,
@@ -379,6 +381,7 @@ public struct GhostIdentityGalleryProfile: Codable, Sendable, Equatable {
         self.identityID = identityID
         self.kind = kind
         self.displayCode = displayCode
+        self.displayName = displayName
         self.centroid = GhostVectorMath.l2Normalize(centroid)
         self.exemplars = exemplars
         self.chromaPrint = chromaPrint
@@ -857,6 +860,28 @@ public final class GhostIdentityResolver: @unchecked Sendable {
         return topology
     }
 
+    public func replaceTopology(_ newTopology: GhostCameraTopology) {
+        lock.lock()
+        defer { lock.unlock() }
+        topology = newTopology
+    }
+
+    public func removeGallery(identityID: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        galleries.removeValue(forKey: identityID)
+    }
+
+    public func allCannotLinkPairs() -> [(String, String)] {
+        lock.lock()
+        defer { lock.unlock() }
+        return cannotLinkPairs.compactMap { key in
+            let parts = key.split(separator: "|", maxSplits: 1).map(String.init)
+            guard parts.count == 2 else { return nil }
+            return (parts[0], parts[1])
+        }
+    }
+
     public func resolve(
         observation: GhostMultiCueCandidateObservation,
         forbiddenIdentityIDs: Set<String> = []
@@ -1292,6 +1317,8 @@ public enum GhostDedupLayer: String, Codable, Sendable, Equatable {
     case layerCTextLLM = "layer_c_text"
     case layerDCollageVision = "layer_d_collage"
 }
+
+public typealias GhostSweeperPairDecision = GhostDedupDecision
 
 public struct GhostDedupDecision: Codable, Sendable, Equatable {
     public var idA: String

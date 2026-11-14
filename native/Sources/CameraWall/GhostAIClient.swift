@@ -339,6 +339,7 @@ public final class GhostAIClient: @unchecked Sendable {
     private let lock = NSLock()
     private var config: GhostAIConfiguration
     private let localVLM: LocalVLMClient?
+    private var cacheStore: LocalTrackingStore?
     public let budgetTracker = GhostBudgetTracker()
     public let circuitBreaker = GhostCircuitBreaker()
 
@@ -349,14 +350,28 @@ public final class GhostAIClient: @unchecked Sendable {
 
     init(
         config: GhostAIConfiguration = GhostAIConfiguration(),
-        localVLM: LocalVLMClient? = nil
+        localVLM: LocalVLMClient? = nil,
+        cacheStore: LocalTrackingStore? = nil
     ) {
         self.config = config
         self.localVLM = localVLM
+        self.cacheStore = cacheStore
         let sessionConfig = URLSessionConfiguration.ephemeral
         sessionConfig.timeoutIntervalForRequest = 180.0
         sessionConfig.timeoutIntervalForResource = 180.0
         self.urlSession = URLSession(configuration: sessionConfig)
+    }
+
+    public func attachCacheStore(_ store: LocalTrackingStore?) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.cacheStore = store
+    }
+
+    private func currentCacheStore() -> LocalTrackingStore? {
+        lock.lock()
+        defer { lock.unlock() }
+        return cacheStore
     }
 
     public func configuration() -> GhostAIConfiguration {
@@ -379,20 +394,52 @@ public final class GhostAIClient: @unchecked Sendable {
         }
     }
 
-    /// Executes a structured JSON generation task across the configured hybrid backend.
-    public func generateStructured<T: Decodable & Sendable>(
+    /// Executes a structured JSON generation task across the configured hybrid backend with SHA-256 content-hash deduplication.
+    public func generateStructured<T: Codable & Sendable>(
         lane: GhostAILane,
         tier: GhostAITier,
+        taskType: String = "structured",
+        promptVersion: String = "v1",
         prompt: String,
         jpegImages: [Data] = [],
+        previousResponseID: String? = nil,
+        owedOutputs: [GhostPendingOutputDebt] = [],
+        useContentCache: Bool = true,
         responseType: T.Type,
         fallbackFactory: @Sendable () -> T
     ) async -> T {
         let currentConfig = configuration()
+        let store = currentCacheStore()
+        let requestHash = GhostAIRequestHasher.computeHash(
+            taskType: "\(taskType):\(String(describing: T.self))",
+            promptVersion: promptVersion,
+            prompt: prompt,
+            images: jpegImages
+        )
+
+        if useContentCache, previousResponseID == nil,
+           let cachedJSON = try? store?.cachedGhostAIResponse(requestHash: requestHash),
+           let data = cachedJSON.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode(T.self, from: data) {
+            circuitBreaker.recordSuccess(latencyMs: 1.0, backend: "cache")
+            return decoded
+        }
+
         if currentConfig.mode == .dryRun {
             budgetTracker.recordUsage(tier: tier, inputTokens: 120, outputTokens: 60, isLocalFree: true)
             circuitBreaker.recordSuccess(latencyMs: 5.0, backend: "dry_run")
-            return fallbackFactory()
+            let result = fallbackFactory()
+            if useContentCache, previousResponseID == nil,
+               let encoded = try? JSONEncoder().encode(result),
+               let jsonStr = String(data: encoded, encoding: .utf8) {
+                try? store?.saveGhostAICacheResponse(
+                    requestHash: requestHash,
+                    taskType: taskType,
+                    promptVersion: promptVersion,
+                    responseJSON: jsonStr
+                )
+            }
+            return result
         }
 
         let laneLimiter = limiter(for: lane)
@@ -404,13 +451,23 @@ public final class GhostAIClient: @unchecked Sendable {
                     lane: lane,
                     tier: tier,
                     prompt: prompt,
-                    jpegImages: jpegImages
+                    jpegImages: jpegImages,
+                    previousResponseID: previousResponseID,
+                    owedOutputs: owedOutputs
                 )
                 let cleaned = Self.extractJSONObject(from: rawJSON)
                 if let data = cleaned.data(using: .utf8),
                    let decoded = try? JSONDecoder().decode(T.self, from: data) {
                     let elapsedMs = Date().timeIntervalSince(start) * 1000.0
                     circuitBreaker.recordSuccess(latencyMs: elapsedMs, backend: currentConfig.mode.rawValue)
+                    if useContentCache, previousResponseID == nil {
+                        try? store?.saveGhostAICacheResponse(
+                            requestHash: requestHash,
+                            taskType: taskType,
+                            promptVersion: promptVersion,
+                            responseJSON: cleaned
+                        )
+                    }
                     return decoded
                 }
             } catch {
@@ -425,7 +482,9 @@ public final class GhostAIClient: @unchecked Sendable {
         lane: GhostAILane,
         tier: GhostAITier,
         prompt: String,
-        jpegImages: [Data]
+        jpegImages: [Data],
+        previousResponseID: String? = nil,
+        owedOutputs: [GhostPendingOutputDebt] = []
     ) async throws -> String {
         switch config.mode {
         case .dryRun:
@@ -435,14 +494,30 @@ public final class GhostAIClient: @unchecked Sendable {
         case .localVLLM:
             return try await callLocalVLLM(config: config, prompt: prompt, jpegImages: jpegImages, tier: tier)
         case .openAI:
-            return try await callOpenAIWithBackup(config: config, lane: lane, tier: tier, prompt: prompt, jpegImages: jpegImages)
+            return try await callOpenAIWithBackup(
+                config: config,
+                lane: lane,
+                tier: tier,
+                prompt: prompt,
+                jpegImages: jpegImages,
+                previousResponseID: previousResponseID,
+                owedOutputs: owedOutputs
+            )
         case .hybridAuto:
             // Prefer Local vLLM if reachable, else OpenAI if key + budget available, else MLX in-process
             if circuitBreaker.allowRequest(), let vllmText = try? await callLocalVLLM(config: config, prompt: prompt, jpegImages: jpegImages, tier: tier) {
                 return vllmText
             }
             if budgetTracker.isWithinBudget(config: config),
-               let openAIText = try? await callOpenAIWithBackup(config: config, lane: lane, tier: tier, prompt: prompt, jpegImages: jpegImages) {
+               let openAIText = try? await callOpenAIWithBackup(
+                   config: config,
+                   lane: lane,
+                   tier: tier,
+                   prompt: prompt,
+                   jpegImages: jpegImages,
+                   previousResponseID: previousResponseID,
+                   owedOutputs: owedOutputs
+               ) {
                 return openAIText
             }
             return try await callMLX(prompt: prompt, jpegImages: jpegImages, tier: tier)
@@ -521,7 +596,9 @@ public final class GhostAIClient: @unchecked Sendable {
         lane: GhostAILane,
         tier: GhostAITier,
         prompt: String,
-        jpegImages: [Data]
+        jpegImages: [Data],
+        previousResponseID: String? = nil,
+        owedOutputs: [GhostPendingOutputDebt] = []
     ) async throws -> String {
         let preferredAccount = (lane == .alert) ? GhostKeychainStore.alertKeyAccount : GhostKeychainStore.primaryKeyAccount
         let apiKey = GhostKeychainStore.loadKey(account: preferredAccount)
@@ -533,7 +610,9 @@ public final class GhostAIClient: @unchecked Sendable {
                 apiKey: apiKey,
                 tier: tier,
                 prompt: prompt,
-                jpegImages: jpegImages
+                jpegImages: jpegImages,
+                previousResponseID: previousResponseID,
+                owedOutputs: owedOutputs
             ) {
                 return text
             }
@@ -548,17 +627,32 @@ public final class GhostAIClient: @unchecked Sendable {
             apiKey: apiKey ?? "backup-relay",
             tier: tier,
             prompt: prompt,
-            jpegImages: jpegImages
+            jpegImages: jpegImages,
+            previousResponseID: previousResponseID,
+            owedOutputs: owedOutputs
         )
     }
 
-    private func sendResponsesPayload(
-        url: URL,
-        apiKey: String,
+    public static func buildOpenAIResponsesBody(
         tier: GhostAITier,
         prompt: String,
-        jpegImages: [Data]
-    ) async throws -> String {
+        jpegImages: [Data],
+        previousResponseID: String? = nil,
+        owedOutputs: [GhostPendingOutputDebt] = [],
+        store: Bool = true
+    ) -> [String: Any] {
+        var inputItems: [[String: Any]] = []
+        // Settle owed function_call_output items from previous terminal tool call (e.g. present_answer)
+        if previousResponseID != nil {
+            for debt in owedOutputs {
+                inputItems.append([
+                    "type": "function_call_output",
+                    "call_id": debt.callID,
+                    "output": debt.outputJSON
+                ])
+            }
+        }
+
         var contentItems: [[String: Any]] = [
             ["type": "input_text", "text": prompt]
         ]
@@ -569,13 +663,39 @@ public final class GhostAIClient: @unchecked Sendable {
                 "image_url": "data:image/jpeg;base64,\(b64)"
             ])
         }
+        inputItems.append([
+            "role": "user",
+            "content": contentItems
+        ])
 
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": tier.rawValue,
-            "input": [
-                ["role": "user", "content": contentItems]
-            ]
+            "store": store,
+            "input": inputItems
         ]
+        if let previousResponseID, !previousResponseID.isEmpty {
+            body["previous_response_id"] = previousResponseID
+        }
+        return body
+    }
+
+    private func sendResponsesPayload(
+        url: URL,
+        apiKey: String,
+        tier: GhostAITier,
+        prompt: String,
+        jpegImages: [Data],
+        previousResponseID: String? = nil,
+        owedOutputs: [GhostPendingOutputDebt] = []
+    ) async throws -> String {
+        let body = Self.buildOpenAIResponsesBody(
+            tier: tier,
+            prompt: prompt,
+            jpegImages: jpegImages,
+            previousResponseID: previousResponseID,
+            owedOutputs: owedOutputs,
+            store: true
+        )
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"

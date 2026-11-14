@@ -72,7 +72,26 @@ public enum GhostOpSec {
     }
 
     public static func stripPersona(_ text: String) -> String {
-        sanitizeText(text)
+        var result = sanitizeText(text)
+        let injectionPatterns = [
+            "(?i)ignore (all )?previous instructions[.,!]*",
+            "(?i)you are now a [^.,!]+[.,!]*",
+            "(?i)игнорируй(те)? предыдущие инструкции[.,!]*"
+        ]
+        for pat in injectionPatterns {
+            if let regex = try? NSRegularExpression(pattern: pat) {
+                let nsRange = NSRange(result.startIndex..<result.endIndex, in: result)
+                result = regex.stringByReplacingMatches(in: result, range: nsRange, withTemplate: "")
+            }
+        }
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    public static func sanitizeAnswer(_ answer: GhostChatPresentAnswer) -> GhostChatPresentAnswer {
+        var copy = answer
+        copy.answerMarkdown = sanitizeText(answer.answerMarkdown)
+        copy.followUpSuggestions = answer.followUpSuggestions.map { sanitizeText($0) }
+        return copy
     }
 }
 
@@ -247,6 +266,10 @@ public struct GhostCropDescriptionItem: Codable, Sendable, Equatable {
         self.vehicle = vehicle
     }
 }
+
+public typealias GhostPersonFacet = GhostPersonAttributes
+public typealias GhostVehicleFacet = GhostVehicleAttributes
+public typealias GhostCropDescription = GhostCropDescriptionItem
 
 public struct GhostCropDescriptionBatch: Codable, Sendable, Equatable {
     public var items: [GhostCropDescriptionItem]
@@ -654,6 +677,7 @@ public struct GhostHCCard: Codable, Sendable, Equatable {
 // Task 15 & 16: Ghost Chat & Research Agent (`present_answer` & proposed actions)
 public struct GhostProposedAction: Codable, Sendable, Equatable, Identifiable {
     public var id: String
+    public var actionID: String { id }
     public var actionType: String // "merge_identities", "split_identity", "create_watch", "rename_identity", "bookmark_alert"
     public var title: String
     public var parameters: [String: String]
@@ -698,6 +722,8 @@ public struct GhostChatPresentAnswer: Codable, Sendable, Equatable {
         self.proposedActions = proposedActions
     }
 }
+
+public typealias GhostChatFinalAnswer = GhostChatPresentAnswer
 
 // MARK: - 5. Multilingual Prompt Library (RU / EN / HE)
 

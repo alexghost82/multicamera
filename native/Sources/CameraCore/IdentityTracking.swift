@@ -312,6 +312,12 @@ public final class LocalTrackingStore: @unchecked Sendable {
         database = handle
         sqlite3_busy_timeout(database, 3000)
         do {
+            try? execute("PRAGMA journal_mode=WAL")
+            try? execute("PRAGMA synchronous=NORMAL")
+            try? execute("PRAGMA wal_autocheckpoint=1000")
+            try? execute("PRAGMA journal_size_limit=67108864")
+            try? execute("PRAGMA cache_size=-16000")
+            try? execute("PRAGMA temp_store=MEMORY")
             try execute("""
                 CREATE TABLE IF NOT EXISTS tracked_objects (
                     track_id TEXT PRIMARY KEY,
@@ -350,6 +356,8 @@ public final class LocalTrackingStore: @unchecked Sendable {
             try ensureColumn("resolved_sex", declaration: "TEXT")
             try ensureColumn("identity_state", declaration: "TEXT")
             try ensureColumn("identity_score", declaration: "REAL")
+            try ensureColumn("ghost_identity_id", declaration: "TEXT")
+            try ensureColumn("is_best", declaration: "INTEGER DEFAULT 0")
             try ensureGhostTables()
             try execute("""
                 CREATE TABLE IF NOT EXISTS operator_identity_groups (
@@ -1269,6 +1277,15 @@ public final class LocalTrackingStore: @unchecked Sendable {
 
     // MARK: - Ghost Analytics SQLite Persistence
 
+    private func ensureTableColumn(table: String, column: String, declaration: String) throws {
+        let statement = try prepare("PRAGMA table_info(\(table))")
+        defer { sqlite3_finalize(statement) }
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if text(statement, 1) == column { return }
+        }
+        try execute("ALTER TABLE \(table) ADD COLUMN \(column) \(declaration)")
+    }
+
     private func ensureGhostTables() throws {
         try execute("""
             CREATE TABLE IF NOT EXISTS ghost_identities (
@@ -1301,9 +1318,12 @@ public final class LocalTrackingStore: @unchecked Sendable {
                 record_cannot_link INTEGER NOT NULL,
                 confidence REAL NOT NULL,
                 reason TEXT NOT NULL,
-                decided_at REAL NOT NULL
+                decided_at REAL NOT NULL,
+                evidence_hash TEXT
             )
             """)
+        try ensureTableColumn(table: "ghost_dedup_decisions", column: "evidence_hash", declaration: "TEXT")
+
         try execute("""
             CREATE TABLE IF NOT EXISTS ghost_narrative_chapters (
                 chapter_id TEXT PRIMARY KEY,
@@ -1311,10 +1331,27 @@ public final class LocalTrackingStore: @unchecked Sendable {
                 camera_name TEXT NOT NULL,
                 started_at REAL NOT NULL,
                 ended_at REAL NOT NULL,
-                chapter_json TEXT NOT NULL
+                chapter_json TEXT NOT NULL,
+                ai_summary TEXT,
+                operator_text TEXT,
+                operator_marked INTEGER NOT NULL DEFAULT 0,
+                pinned INTEGER NOT NULL DEFAULT 0,
+                frame_count INTEGER NOT NULL DEFAULT 0,
+                sighting_count INTEGER NOT NULL DEFAULT 0,
+                identity_count INTEGER NOT NULL DEFAULT 0,
+                collage_path TEXT
             )
             """)
+        try ensureTableColumn(table: "ghost_narrative_chapters", column: "ai_summary", declaration: "TEXT")
+        try ensureTableColumn(table: "ghost_narrative_chapters", column: "operator_text", declaration: "TEXT")
+        try ensureTableColumn(table: "ghost_narrative_chapters", column: "operator_marked", declaration: "INTEGER NOT NULL DEFAULT 0")
+        try ensureTableColumn(table: "ghost_narrative_chapters", column: "pinned", declaration: "INTEGER NOT NULL DEFAULT 0")
+        try ensureTableColumn(table: "ghost_narrative_chapters", column: "frame_count", declaration: "INTEGER NOT NULL DEFAULT 0")
+        try ensureTableColumn(table: "ghost_narrative_chapters", column: "sighting_count", declaration: "INTEGER NOT NULL DEFAULT 0")
+        try ensureTableColumn(table: "ghost_narrative_chapters", column: "identity_count", declaration: "INTEGER NOT NULL DEFAULT 0")
+        try ensureTableColumn(table: "ghost_narrative_chapters", column: "collage_path", declaration: "TEXT")
         try execute("CREATE INDEX IF NOT EXISTS ghost_narrative_chapters_time ON ghost_narrative_chapters(ended_at DESC)")
+
         try execute("""
             CREATE TABLE IF NOT EXISTS ghost_vehicle_registry_cache (
                 plate_number TEXT PRIMARY KEY,
@@ -1339,14 +1376,87 @@ public final class LocalTrackingStore: @unchecked Sendable {
             )
             """)
         try execute("""
+            CREATE TABLE IF NOT EXISTS ghost_ai_cache (
+                request_hash TEXT PRIMARY KEY,
+                task_type TEXT NOT NULL,
+                prompt_version TEXT NOT NULL,
+                response_json TEXT NOT NULL,
+                created_at REAL NOT NULL
+            )
+            """)
+        try execute("CREATE INDEX IF NOT EXISTS ghost_ai_cache_time ON ghost_ai_cache(created_at DESC)")
+
+        // Semantic Knowledge Layer tables
+        try execute("""
+            CREATE TABLE IF NOT EXISTS ghost_attribute_index (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                track_id TEXT NOT NULL,
+                identity_id TEXT NOT NULL,
+                camera_id TEXT NOT NULL,
+                captured_at REAL NOT NULL,
+                facet TEXT NOT NULL,
+                value TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                crop_quality REAL NOT NULL,
+                source TEXT NOT NULL
+            )
+            """)
+        try execute("CREATE INDEX IF NOT EXISTS ghost_attr_facet_val ON ghost_attribute_index(facet, value)")
+        try execute("CREATE INDEX IF NOT EXISTS ghost_attr_identity ON ghost_attribute_index(identity_id)")
+        try execute("CREATE INDEX IF NOT EXISTS ghost_attr_track ON ghost_attribute_index(track_id)")
+
+        try execute("""
+            CREATE TABLE IF NOT EXISTS ghost_identity_dossiers (
+                identity_id TEXT PRIMARY KEY,
+                display_name TEXT,
+                kind TEXT NOT NULL,
+                facets_json TEXT NOT NULL,
+                alternatives_json TEXT NOT NULL,
+                summary_line TEXT NOT NULL,
+                text_blob TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """)
+        try execute("""
+            CREATE TABLE IF NOT EXISTS ghost_visits (
+                visit_id TEXT PRIMARY KEY,
+                identity_id TEXT NOT NULL,
+                started_at REAL NOT NULL,
+                ended_at REAL NOT NULL,
+                camera_ids_json TEXT NOT NULL,
+                track_ids_json TEXT NOT NULL,
+                sighting_count INTEGER NOT NULL,
+                best_track_id TEXT NOT NULL
+            )
+            """)
+        try execute("CREATE INDEX IF NOT EXISTS ghost_visits_identity_time ON ghost_visits(identity_id, started_at DESC)")
+
+        try? execute("CREATE VIRTUAL TABLE IF NOT EXISTS ghost_identity_fts USING fts5(identity_id UNINDEXED, summary_line, text_blob)")
+        try? execute("CREATE VIRTUAL TABLE IF NOT EXISTS ghost_crop_fts USING fts5(track_id UNINDEXED, identity_id UNINDEXED, description_text)")
+
+        // Agent Conversation History, Focus Memory, Chain Debt & Actions
+        try execute("""
             CREATE TABLE IF NOT EXISTS ghost_chat_threads (
                 thread_id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
                 focus_json TEXT,
                 created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
+                updated_at REAL NOT NULL,
+                operator_name TEXT NOT NULL DEFAULT 'operator',
+                kind TEXT NOT NULL DEFAULT 'general',
+                severity TEXT NOT NULL DEFAULT 'normal',
+                pinned INTEGER NOT NULL DEFAULT 0,
+                last_response_id TEXT,
+                pending_outputs_json TEXT
             )
             """)
+        try ensureTableColumn(table: "ghost_chat_threads", column: "operator_name", declaration: "TEXT NOT NULL DEFAULT 'operator'")
+        try ensureTableColumn(table: "ghost_chat_threads", column: "kind", declaration: "TEXT NOT NULL DEFAULT 'general'")
+        try ensureTableColumn(table: "ghost_chat_threads", column: "severity", declaration: "TEXT NOT NULL DEFAULT 'normal'")
+        try ensureTableColumn(table: "ghost_chat_threads", column: "pinned", declaration: "INTEGER NOT NULL DEFAULT 0")
+        try ensureTableColumn(table: "ghost_chat_threads", column: "last_response_id", declaration: "TEXT")
+        try ensureTableColumn(table: "ghost_chat_threads", column: "pending_outputs_json", declaration: "TEXT")
+
         try execute("""
             CREATE TABLE IF NOT EXISTS ghost_chat_messages (
                 message_id TEXT PRIMARY KEY,
@@ -1354,10 +1464,82 @@ public final class LocalTrackingStore: @unchecked Sendable {
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 structured_json TEXT,
+                created_at REAL NOT NULL,
+                clip_id TEXT,
+                call_id TEXT
+            )
+            """)
+        try ensureTableColumn(table: "ghost_chat_messages", column: "clip_id", declaration: "TEXT")
+        try ensureTableColumn(table: "ghost_chat_messages", column: "call_id", declaration: "TEXT")
+        try execute("CREATE INDEX IF NOT EXISTS ghost_chat_messages_thread ON ghost_chat_messages(thread_id, created_at ASC)")
+
+        try execute("""
+            CREATE TABLE IF NOT EXISTS ghost_thread_focus (
+                thread_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                ref_id TEXT NOT NULL,
+                label TEXT,
+                pinned INTEGER NOT NULL DEFAULT 0,
+                last_used_at REAL NOT NULL,
+                PRIMARY KEY(thread_id, kind, ref_id)
+            )
+            """)
+        try execute("""
+            CREATE TABLE IF NOT EXISTS ghost_thread_cameras (
+                thread_id TEXT NOT NULL,
+                camera_id TEXT NOT NULL,
+                bound_at REAL NOT NULL,
+                PRIMARY KEY(thread_id, camera_id)
+            )
+            """)
+        try execute("""
+            CREATE TABLE IF NOT EXISTS ghost_thread_links (
+                thread_a TEXT NOT NULL,
+                thread_b TEXT NOT NULL,
+                linked_at REAL NOT NULL,
+                PRIMARY KEY(thread_a, thread_b)
+            )
+            """)
+        try execute("""
+            CREATE TABLE IF NOT EXISTS ghost_chat_tool_calls (
+                id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                args_json TEXT NOT NULL,
+                result_rows INTEGER NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                ok INTEGER NOT NULL,
+                error TEXT,
                 created_at REAL NOT NULL
             )
             """)
-        try execute("CREATE INDEX IF NOT EXISTS ghost_chat_messages_thread ON ghost_chat_messages(thread_id, created_at ASC)")
+        try execute("CREATE INDEX IF NOT EXISTS ghost_chat_tool_calls_thread ON ghost_chat_tool_calls(thread_id, created_at ASC)")
+
+        try execute("""
+            CREATE TABLE IF NOT EXISTS ghost_chat_actions (
+                action_id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                params_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                reviewed_at REAL
+            )
+            """)
+        try execute("CREATE INDEX IF NOT EXISTS ghost_chat_actions_thread ON ghost_chat_actions(thread_id, created_at DESC)")
+
+        try execute("""
+            CREATE TABLE IF NOT EXISTS ghost_chat_clips (
+                clip_id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL,
+                camera_id TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                expires_at REAL NOT NULL
+            )
+            """)
+        try execute("CREATE INDEX IF NOT EXISTS ghost_chat_clips_expires ON ghost_chat_clips(expires_at ASC)")
     }
 
     public func saveGhostTrackVisualMetadata(
@@ -1367,7 +1549,9 @@ public final class LocalTrackingStore: @unchecked Sendable {
         hsvHistogram: [Float] = [],
         resolvedSex: GhostResolvedSex = .unknown,
         identityState: GhostIdentityMatchState? = nil,
-        identityScore: Double? = nil
+        identityScore: Double? = nil,
+        ghostIdentityID: String? = nil,
+        isBest: Bool? = nil
     ) throws {
         lock.lock()
         defer { lock.unlock() }
@@ -1383,7 +1567,9 @@ public final class LocalTrackingStore: @unchecked Sendable {
                 vehicle_color = ?,
                 resolved_sex = ?,
                 identity_state = COALESCE(?, identity_state),
-                identity_score = COALESCE(?, identity_score)
+                identity_score = COALESCE(?, identity_score),
+                ghost_identity_id = COALESCE(?, ghost_identity_id),
+                is_best = COALESCE(?, is_best)
             WHERE track_id = ?
             """
         let statement = try prepare(sql)
@@ -1417,9 +1603,47 @@ public final class LocalTrackingStore: @unchecked Sendable {
         bind(resolvedSex.rawValue, at: 9, to: statement)
         if let identityState { bind(identityState.rawValue, at: 10, to: statement) } else { sqlite3_bind_null(statement, 10) }
         if let identityScore { sqlite3_bind_double(statement, 11, identityScore) } else { sqlite3_bind_null(statement, 11) }
-        bind(trackID.uuidString, at: 12, to: statement)
+        if let ghostIdentityID { bind(ghostIdentityID, at: 12, to: statement) } else { sqlite3_bind_null(statement, 12) }
+        if let isBest { sqlite3_bind_int(statement, 13, isBest ? 1 : 0) } else { sqlite3_bind_null(statement, 13) }
+        bind(trackID.uuidString, at: 14, to: statement)
         guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseError() }
     }
+
+    // MARK: - AI Request Content-Hash Cache
+
+    public func cachedGhostAIResponse(requestHash: String) throws -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        let stmt = try prepare("SELECT response_json FROM ghost_ai_cache WHERE request_hash = ? LIMIT 1")
+        defer { sqlite3_finalize(stmt) }
+        bind(requestHash, at: 1, to: stmt)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return text(stmt, 0)
+    }
+
+    public func saveGhostAICacheResponse(
+        requestHash: String,
+        taskType: String,
+        promptVersion: String = "v1",
+        responseJSON: String,
+        now: Date = Date()
+    ) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        let stmt = try prepare("""
+            INSERT OR REPLACE INTO ghost_ai_cache(request_hash, task_type, prompt_version, response_json, created_at)
+            VALUES(?, ?, ?, ?, ?)
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(requestHash, at: 1, to: stmt)
+        bind(taskType, at: 2, to: stmt)
+        bind(promptVersion, at: 3, to: stmt)
+        bind(responseJSON, at: 4, to: stmt)
+        sqlite3_bind_double(stmt, 5, now.timeIntervalSince1970)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
+    }
+
+    // MARK: - Identity Profiles, Topology & Dedup Decisions
 
     public func upsertGhostIdentityProfile(_ profile: GhostIdentityGalleryProfile) throws {
         let data = try JSONEncoder().encode(profile)
@@ -1444,6 +1668,15 @@ public final class LocalTrackingStore: @unchecked Sendable {
         guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseError() }
     }
 
+    public func deleteGhostIdentityProfile(identityID: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        let stmt = try prepare("DELETE FROM ghost_identities WHERE identity_id = ?")
+        defer { sqlite3_finalize(stmt) }
+        bind(identityID, at: 1, to: stmt)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
+    }
+
     public func loadGhostIdentityProfiles(limit: Int = 500) throws -> [GhostIdentityGalleryProfile] {
         lock.lock()
         defer { lock.unlock() }
@@ -1462,64 +1695,1728 @@ public final class LocalTrackingStore: @unchecked Sendable {
         return profiles
     }
 
+    public func saveGhostCameraLinks(_ links: [GhostCameraTransitionLink]) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        let stmt = try prepare("""
+            INSERT OR REPLACE INTO ghost_camera_links(
+                link_key, from_camera_id, to_camera_id, transition_count,
+                mean_transit_sec, min_transit_sec, max_transit_sec, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            """)
+        defer { sqlite3_finalize(stmt) }
+        for link in links {
+            sqlite3_reset(stmt)
+            sqlite3_clear_bindings(stmt)
+            let key = "\(link.fromCameraID)->\(link.toCameraID)"
+            bind(key, at: 1, to: stmt)
+            bind(link.fromCameraID, at: 2, to: stmt)
+            bind(link.toCameraID, at: 3, to: stmt)
+            sqlite3_bind_int(stmt, 4, Int32(link.transitionCount))
+            sqlite3_bind_double(stmt, 5, link.meanTransitSec)
+            sqlite3_bind_double(stmt, 6, link.minTransitSec)
+            sqlite3_bind_double(stmt, 7, link.maxTransitSec)
+            sqlite3_bind_double(stmt, 8, link.updatedAt.timeIntervalSince1970)
+            guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
+        }
+    }
+
+    public func loadGhostCameraLinks() throws -> [GhostCameraTransitionLink] {
+        lock.lock()
+        defer { lock.unlock() }
+        let stmt = try prepare("""
+            SELECT from_camera_id, to_camera_id, transition_count, mean_transit_sec, min_transit_sec, max_transit_sec, updated_at
+            FROM ghost_camera_links
+            """)
+        defer { sqlite3_finalize(stmt) }
+        var links: [GhostCameraTransitionLink] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            links.append(
+                GhostCameraTransitionLink(
+                    fromCameraID: text(stmt, 0),
+                    toCameraID: text(stmt, 1),
+                    transitionCount: Int(sqlite3_column_int(stmt, 2)),
+                    meanTransitSec: sqlite3_column_double(stmt, 3),
+                    minTransitSec: sqlite3_column_double(stmt, 4),
+                    maxTransitSec: sqlite3_column_double(stmt, 5),
+                    updatedAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 6))
+                )
+            )
+        }
+        return links
+    }
+
+    public func saveGhostDedupDecision(
+        _ decision: GhostSweeperPairDecision,
+        evidenceHash: String? = nil,
+        decidedAt: Date = Date()
+    ) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        let pairKey = decision.idA < decision.idB ? "\(decision.idA)|\(decision.idB)" : "\(decision.idB)|\(decision.idA)"
+        let stmt = try prepare("""
+            INSERT OR REPLACE INTO ghost_dedup_decisions(
+                pair_key, id_a, id_b, layer, should_merge, record_cannot_link, confidence, reason, decided_at, evidence_hash
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(pairKey, at: 1, to: stmt)
+        bind(decision.idA, at: 2, to: stmt)
+        bind(decision.idB, at: 3, to: stmt)
+        bind(decision.layer.rawValue, at: 4, to: stmt)
+        sqlite3_bind_int(stmt, 5, decision.shouldMerge ? 1 : 0)
+        sqlite3_bind_int(stmt, 6, decision.recordCannotLink ? 1 : 0)
+        sqlite3_bind_double(stmt, 7, decision.confidence)
+        bind(decision.reason, at: 8, to: stmt)
+        sqlite3_bind_double(stmt, 9, decidedAt.timeIntervalSince1970)
+        if let evidenceHash { bind(evidenceHash, at: 10, to: stmt) } else { sqlite3_bind_null(stmt, 10) }
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
+    }
+
+    public func loadGhostCannotLinkPairs() throws -> [(String, String)] {
+        lock.lock()
+        defer { lock.unlock() }
+        let stmt = try prepare("SELECT id_a, id_b FROM ghost_dedup_decisions WHERE record_cannot_link = 1")
+        defer { sqlite3_finalize(stmt) }
+        var pairs: [(String, String)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            pairs.append((text(stmt, 0), text(stmt, 1)))
+        }
+        return pairs
+    }
+
+    // MARK: - Narrative Chapters ("Ghost Memory") & Operator Controls
+
     public func saveGhostNarrativeChapter(
         id: UUID = UUID(),
         cameraID: UUID,
         cameraName: String,
         startedAt: Date,
         endedAt: Date,
-        chapter: GhostTemporalNarrativeResult
+        chapter: GhostTemporalNarrativeResult,
+        frameCount: Int = 0,
+        sightingCount: Int = 0,
+        identityCount: Int = 0,
+        collageJPEG: Data? = nil
     ) throws {
-        let data = try JSONEncoder().encode(chapter)
+        let record = GhostNarrativeChapterRecord(
+            chapterID: id.uuidString,
+            cameraID: cameraID,
+            cameraName: cameraName,
+            startedAt: startedAt,
+            endedAt: endedAt,
+            narrative: chapter,
+            aiSummary: chapter.summary,
+            operatorText: nil,
+            operatorMarked: false,
+            pinned: false,
+            frameCount: frameCount,
+            sightingCount: sightingCount,
+            identityCount: identityCount,
+            collagePath: nil
+        )
+        try saveGhostNarrativeChapterRecord(record, collageJPEG: collageJPEG)
+    }
+
+    public func saveGhostNarrativeChapterRecord(
+        _ record: GhostNarrativeChapterRecord,
+        collageJPEG: Data? = nil
+    ) throws {
+        let data = try JSONEncoder().encode(record.narrative)
         guard let json = String(data: data, encoding: .utf8) else { return }
         lock.lock()
         defer { lock.unlock() }
+
+        var savedCollagePath = record.collagePath
+        if let collageJPEG, !collageJPEG.isEmpty {
+            try FileManager.default.createDirectory(
+                at: cropDirectory,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            let name = "narrative_\(record.chapterID.lowercased()).jpg"
+            let url = cropDirectory.appendingPathComponent(name)
+            try? collageJPEG.write(to: url, options: [.atomic])
+            savedCollagePath = name
+        }
+
         let statement = try prepare("""
-            INSERT OR REPLACE INTO ghost_narrative_chapters(chapter_id, camera_id, camera_name, started_at, ended_at, chapter_json)
-            VALUES(?, ?, ?, ?, ?, ?)
+            INSERT INTO ghost_narrative_chapters(
+                chapter_id, camera_id, camera_name, started_at, ended_at, chapter_json,
+                ai_summary, operator_text, operator_marked, pinned, frame_count, sighting_count, identity_count, collage_path
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chapter_id) DO UPDATE SET
+                camera_id = excluded.camera_id,
+                camera_name = excluded.camera_name,
+                started_at = excluded.started_at,
+                ended_at = excluded.ended_at,
+                chapter_json = excluded.chapter_json,
+                ai_summary = COALESCE(ghost_narrative_chapters.ai_summary, excluded.ai_summary),
+                operator_text = COALESCE(excluded.operator_text, ghost_narrative_chapters.operator_text),
+                operator_marked = MAX(ghost_narrative_chapters.operator_marked, excluded.operator_marked),
+                pinned = MAX(ghost_narrative_chapters.pinned, excluded.pinned),
+                frame_count = MAX(ghost_narrative_chapters.frame_count, excluded.frame_count),
+                sighting_count = MAX(ghost_narrative_chapters.sighting_count, excluded.sighting_count),
+                identity_count = MAX(ghost_narrative_chapters.identity_count, excluded.identity_count),
+                collage_path = COALESCE(excluded.collage_path, ghost_narrative_chapters.collage_path)
             """)
         defer { sqlite3_finalize(statement) }
-        bind(id.uuidString, at: 1, to: statement)
-        bind(cameraID.uuidString, at: 2, to: statement)
-        bind(cameraName, at: 3, to: statement)
-        sqlite3_bind_double(statement, 4, startedAt.timeIntervalSince1970)
-        sqlite3_bind_double(statement, 5, endedAt.timeIntervalSince1970)
+        bind(record.chapterID, at: 1, to: statement)
+        bind(record.cameraID.uuidString, at: 2, to: statement)
+        bind(record.cameraName, at: 3, to: statement)
+        sqlite3_bind_double(statement, 4, record.startedAt.timeIntervalSince1970)
+        sqlite3_bind_double(statement, 5, record.endedAt.timeIntervalSince1970)
         bind(json, at: 6, to: statement)
+        bind(record.aiSummary, at: 7, to: statement)
+        if let opText = record.operatorText { bind(opText, at: 8, to: statement) } else { sqlite3_bind_null(statement, 8) }
+        sqlite3_bind_int(statement, 9, record.operatorMarked ? 1 : 0)
+        sqlite3_bind_int(statement, 10, record.pinned ? 1 : 0)
+        sqlite3_bind_int(statement, 11, Int32(record.frameCount))
+        sqlite3_bind_int(statement, 12, Int32(record.sightingCount))
+        sqlite3_bind_int(statement, 13, Int32(record.identityCount))
+        if let savedCollagePath { bind(savedCollagePath, at: 14, to: statement) } else { sqlite3_bind_null(statement, 14) }
         guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseError() }
     }
 
-    public func loadGhostNarrativeChapters(cameraID: UUID? = nil, limit: Int = 50) throws -> [(id: String, cameraID: String, cameraName: String, startedAt: Date, endedAt: Date, chapter: GhostTemporalNarrativeResult)] {
+    public func setGhostNarrativePinned(chapterID: String, pinned: Bool) throws {
         lock.lock()
         defer { lock.unlock() }
-        let sql: String
-        if cameraID != nil {
-            sql = "SELECT chapter_id, camera_id, camera_name, started_at, ended_at, chapter_json FROM ghost_narrative_chapters WHERE camera_id = ? ORDER BY ended_at DESC LIMIT ?"
+        let stmt = try prepare("""
+            UPDATE ghost_narrative_chapters
+            SET pinned = ?,
+                operator_marked = CASE WHEN ? = 1 THEN 1 ELSE operator_marked END
+            WHERE chapter_id = ?
+            """)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int(stmt, 1, pinned ? 1 : 0)
+        sqlite3_bind_int(stmt, 2, pinned ? 1 : 0)
+        bind(chapterID, at: 3, to: stmt)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
+    }
+
+    /// Saves or clears operator custom text on a narrative chapter while preserving `ai_summary` and keeping `operator_marked = 1`.
+    public func setGhostNarrativeOperatorText(chapterID: String, operatorText: String?) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        let trimmed = operatorText?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let stmt = try prepare("""
+            UPDATE ghost_narrative_chapters
+            SET operator_text = ?,
+                operator_marked = 1
+            WHERE chapter_id = ?
+            """)
+        defer { sqlite3_finalize(stmt) }
+        if let trimmed, !trimmed.isEmpty {
+            bind(trimmed, at: 1, to: stmt)
         } else {
-            sql = "SELECT chapter_id, camera_id, camera_name, started_at, ended_at, chapter_json FROM ghost_narrative_chapters ORDER BY ended_at DESC LIMIT ?"
+            sqlite3_bind_null(stmt, 1)
         }
-        let statement = try prepare(sql)
-        defer { sqlite3_finalize(statement) }
+        bind(chapterID, at: 2, to: stmt)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
+    }
+
+    public func loadGhostNarrativeChapterRecords(
+        cameraID: UUID? = nil,
+        since: Date? = nil,
+        until: Date? = nil,
+        limit: Int = 50
+    ) throws -> [GhostNarrativeChapterRecord] {
+        lock.lock()
+        defer { lock.unlock() }
+        var clauses: [String] = []
+        if cameraID != nil { clauses.append("camera_id = ?") }
+        if since != nil { clauses.append("ended_at >= ?") }
+        if until != nil { clauses.append("started_at <= ?") }
+        let whereSQL = clauses.isEmpty ? "" : "WHERE " + clauses.joined(separator: " AND ")
+        let sql = """
+            SELECT chapter_id, camera_id, camera_name, started_at, ended_at, chapter_json,
+                   ai_summary, operator_text, operator_marked, pinned,
+                   frame_count, sighting_count, identity_count, collage_path
+            FROM ghost_narrative_chapters
+            \(whereSQL)
+            ORDER BY ended_at DESC
+            LIMIT ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        var bindIdx: Int32 = 1
         if let cameraID {
-            bind(cameraID.uuidString, at: 1, to: statement)
-            sqlite3_bind_int(statement, 2, Int32(max(1, min(500, limit))))
-        } else {
-            sqlite3_bind_int(statement, 1, Int32(max(1, min(500, limit))))
+            bind(cameraID.uuidString, at: bindIdx, to: stmt)
+            bindIdx += 1
         }
-        var results: [(String, String, String, Date, Date, GhostTemporalNarrativeResult)] = []
+        if let since {
+            sqlite3_bind_double(stmt, bindIdx, since.timeIntervalSince1970)
+            bindIdx += 1
+        }
+        if let until {
+            sqlite3_bind_double(stmt, bindIdx, until.timeIntervalSince1970)
+            bindIdx += 1
+        }
+        sqlite3_bind_int(stmt, bindIdx, Int32(max(1, min(500, limit))))
+
+        var records: [GhostNarrativeChapterRecord] = []
         let decoder = JSONDecoder()
-        while sqlite3_step(statement) == SQLITE_ROW {
-            let cid = text(statement, 0)
-            let camID = text(statement, 1)
-            let camName = text(statement, 2)
-            let sAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 3))
-            let eAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 4))
-            let json = text(statement, 5)
-            if let data = json.data(using: .utf8),
-               let chapter = try? decoder.decode(GhostTemporalNarrativeResult.self, from: data) {
-                results.append((cid, camID, camName, sAt, eAt, chapter))
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let cid = text(stmt, 0)
+            let camIDStr = text(stmt, 1)
+            let camUUID = UUID(uuidString: camIDStr) ?? UUID()
+            let camName = text(stmt, 2)
+            let sAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 3))
+            let eAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 4))
+            let json = text(stmt, 5)
+            guard let data = json.data(using: .utf8),
+                  let chapter = try? decoder.decode(GhostTemporalNarrativeResult.self, from: data) else { continue }
+            let aiSum = sqlite3_column_type(stmt, 6) == SQLITE_NULL ? chapter.summary : text(stmt, 6)
+            let opText = sqlite3_column_type(stmt, 7) == SQLITE_NULL ? nil : text(stmt, 7)
+            let opMarked = sqlite3_column_int(stmt, 8) != 0
+            let pinned = sqlite3_column_int(stmt, 9) != 0
+            let frameCount = Int(sqlite3_column_int(stmt, 10))
+            let sightingCount = Int(sqlite3_column_int(stmt, 11))
+            let identityCount = Int(sqlite3_column_int(stmt, 12))
+            let collagePath = sqlite3_column_type(stmt, 13) == SQLITE_NULL ? nil : text(stmt, 13)
+            records.append(
+                GhostNarrativeChapterRecord(
+                    chapterID: cid,
+                    cameraID: camUUID,
+                    cameraName: camName,
+                    startedAt: sAt,
+                    endedAt: eAt,
+                    narrative: chapter,
+                    aiSummary: aiSum,
+                    operatorText: opText,
+                    operatorMarked: opMarked,
+                    pinned: pinned,
+                    frameCount: frameCount,
+                    sightingCount: sightingCount,
+                    identityCount: identityCount,
+                    collagePath: collagePath
+                )
+            )
+        }
+        return records
+    }
+
+    public func loadGhostNarrativeChapters(cameraID: UUID? = nil, limit: Int = 50) throws -> [(id: String, cameraID: String, cameraName: String, startedAt: Date, endedAt: Date, chapter: GhostTemporalNarrativeResult)] {
+        let records = try loadGhostNarrativeChapterRecords(cameraID: cameraID, limit: limit)
+        return records.map {
+            var chap = $0.narrative
+            chap.summary = $0.effectiveSummary
+            return ($0.chapterID, $0.cameraID.uuidString, $0.cameraName, $0.startedAt, $0.endedAt, chap)
+        }
+    }
+
+    // MARK: - Semantic Knowledge Layer (Attribute Index, Dossiers, Visits, Routes, FTS5)
+
+    public func indexGhostTrackKnowledge(
+        trackID: String,
+        identityID: String,
+        cameraID: String,
+        capturedAt: Date,
+        cropQuality: Double,
+        description: GhostCropDescription?,
+        chromaSignature: GhostChromaSignature?,
+        displayName: String? = nil,
+        kind: String = "person"
+    ) throws {
+        let entries = GhostAttributeIndexEntry.extractEntries(
+            trackID: trackID,
+            identityID: identityID,
+            cameraID: cameraID,
+            capturedAt: capturedAt,
+            cropQuality: cropQuality,
+            description: description,
+            chromaSignature: chromaSignature
+        )
+
+        lock.lock()
+        do {
+            // Update tracked_objects.ghost_identity_id if row exists
+            let upd = try prepare("UPDATE tracked_objects SET ghost_identity_id = ? WHERE track_id = ?")
+            defer { sqlite3_finalize(upd) }
+            bind(identityID, at: 1, to: upd)
+            bind(trackID, at: 2, to: upd)
+            _ = sqlite3_step(upd)
+
+            // Replace existing attribute entries for this trackID
+            let del = try prepare("DELETE FROM ghost_attribute_index WHERE track_id = ?")
+            defer { sqlite3_finalize(del) }
+            bind(trackID, at: 1, to: del)
+            guard sqlite3_step(del) == SQLITE_DONE else { throw databaseError() }
+
+            let ins = try prepare("""
+                INSERT INTO ghost_attribute_index(
+                    track_id, identity_id, camera_id, captured_at, facet, value, confidence, crop_quality, source
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)
+            defer { sqlite3_finalize(ins) }
+            for entry in entries {
+                sqlite3_reset(ins)
+                sqlite3_clear_bindings(ins)
+                bind(entry.trackID, at: 1, to: ins)
+                bind(entry.identityID, at: 2, to: ins)
+                bind(entry.cameraID, at: 3, to: ins)
+                sqlite3_bind_double(ins, 4, entry.capturedAt.timeIntervalSince1970)
+                bind(entry.facet, at: 5, to: ins)
+                bind(entry.value, at: 6, to: ins)
+                sqlite3_bind_double(ins, 7, entry.confidence)
+                sqlite3_bind_double(ins, 8, entry.cropQuality)
+                bind(entry.source, at: 9, to: ins)
+                guard sqlite3_step(ins) == SQLITE_DONE else { throw databaseError() }
+            }
+
+            if let summaryText = description?.summary, !summaryText.isEmpty {
+                if let delCropFTS = try? prepare("DELETE FROM ghost_crop_fts WHERE track_id = ?") {
+                    defer { sqlite3_finalize(delCropFTS) }
+                    bind(trackID, at: 1, to: delCropFTS)
+                    _ = sqlite3_step(delCropFTS)
+                }
+                if let insCropFTS = try? prepare("INSERT INTO ghost_crop_fts(track_id, identity_id, description_text) VALUES(?, ?, ?)") {
+                    defer { sqlite3_finalize(insCropFTS) }
+                    bind(trackID, at: 1, to: insCropFTS)
+                    bind(identityID, at: 2, to: insCropFTS)
+                    bind(summaryText, at: 3, to: insCropFTS)
+                    _ = sqlite3_step(insCropFTS)
+                }
+            }
+        } catch {
+            lock.unlock()
+            throw error
+        }
+        lock.unlock()
+
+        _ = try rebuildGhostIdentityDossier(
+            identityID: identityID,
+            displayName: displayName,
+            kind: description?.kind ?? kind,
+            now: capturedAt
+        )
+        _ = try rebuildGhostVisits(identityID: identityID)
+    }
+
+    @discardableResult
+    public func rebuildGhostIdentityDossier(
+        identityID: String,
+        displayName: String? = nil,
+        kind: String = "person",
+        now: Date = Date()
+    ) throws -> GhostIdentityDossier {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let stmt = try prepare("""
+            SELECT track_id, identity_id, camera_id, captured_at, facet, value, confidence, crop_quality, source
+            FROM ghost_attribute_index
+            WHERE identity_id = ?
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(identityID, at: 1, to: stmt)
+        var entries: [GhostAttributeIndexEntry] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            entries.append(
+                GhostAttributeIndexEntry(
+                    trackID: text(stmt, 0),
+                    identityID: text(stmt, 1),
+                    cameraID: text(stmt, 2),
+                    capturedAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 3)),
+                    facet: text(stmt, 4),
+                    value: text(stmt, 5),
+                    confidence: sqlite3_column_double(stmt, 6),
+                    cropQuality: sqlite3_column_double(stmt, 7),
+                    source: text(stmt, 8)
+                )
+            )
+        }
+
+        // Pull free-text descriptions from ghost_crop_fts or tracked_objects
+        var descriptions: [String] = []
+        if let ftsStmt = try? prepare("SELECT description_text FROM ghost_crop_fts WHERE identity_id = ?") {
+            defer { sqlite3_finalize(ftsStmt) }
+            bind(identityID, at: 1, to: ftsStmt)
+            while sqlite3_step(ftsStmt) == SQLITE_ROW {
+                descriptions.append(text(ftsStmt, 0))
             }
         }
+
+        var resolvedDisplayName = displayName
+        var resolvedKind = kind
+        if resolvedDisplayName == nil {
+            let profStmt = try prepare("SELECT kind, display_code, profile_json FROM ghost_identities WHERE identity_id = ? LIMIT 1")
+            defer { sqlite3_finalize(profStmt) }
+            bind(identityID, at: 1, to: profStmt)
+            if sqlite3_step(profStmt) == SQLITE_ROW {
+                resolvedKind = text(profStmt, 0)
+                let code = text(profStmt, 1)
+                if let pData = text(profStmt, 2).data(using: .utf8),
+                   let prof = try? JSONDecoder().decode(GhostIdentityGalleryProfile.self, from: pData) {
+                    resolvedDisplayName = prof.displayName ?? code
+                } else {
+                    resolvedDisplayName = code
+                }
+            }
+        }
+
+        let dossier = GhostIdentityDossierBuilder.build(
+            identityID: identityID,
+            displayName: resolvedDisplayName,
+            kind: resolvedKind,
+            entries: entries,
+            descriptions: descriptions,
+            now: now
+        )
+
+        let facetsJSON = (try? String(data: JSONEncoder().encode(dossier.facets), encoding: .utf8)) ?? "{}"
+        let altsJSON = (try? String(data: JSONEncoder().encode(dossier.alternatives), encoding: .utf8)) ?? "{}"
+
+        let upsert = try prepare("""
+            INSERT OR REPLACE INTO ghost_identity_dossiers(
+                identity_id, display_name, kind, facets_json, alternatives_json, summary_line, text_blob, updated_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            """)
+        defer { sqlite3_finalize(upsert) }
+        bind(dossier.identityID, at: 1, to: upsert)
+        if let dn = dossier.displayName { bind(dn, at: 2, to: upsert) } else { sqlite3_bind_null(upsert, 2) }
+        bind(dossier.kind, at: 3, to: upsert)
+        bind(facetsJSON, at: 4, to: upsert)
+        bind(altsJSON, at: 5, to: upsert)
+        bind(dossier.summaryLine, at: 6, to: upsert)
+        bind(dossier.textBlob, at: 7, to: upsert)
+        sqlite3_bind_double(upsert, 8, dossier.updatedAt.timeIntervalSince1970)
+        guard sqlite3_step(upsert) == SQLITE_DONE else { throw databaseError() }
+
+        if let delFTS = try? prepare("DELETE FROM ghost_identity_fts WHERE identity_id = ?") {
+            defer { sqlite3_finalize(delFTS) }
+            bind(dossier.identityID, at: 1, to: delFTS)
+            _ = sqlite3_step(delFTS)
+        }
+        if let insFTS = try? prepare("INSERT INTO ghost_identity_fts(identity_id, summary_line, text_blob) VALUES(?, ?, ?)") {
+            defer { sqlite3_finalize(insFTS) }
+            bind(dossier.identityID, at: 1, to: insFTS)
+            bind(dossier.summaryLine, at: 2, to: insFTS)
+            bind(dossier.textBlob, at: 3, to: insFTS)
+            _ = sqlite3_step(insFTS)
+        }
+
+        return dossier
+    }
+
+    public func getGhostIdentityDossier(identityID: String) throws -> GhostIdentityDossier? {
+        lock.lock()
+        defer { lock.unlock() }
+        let stmt = try prepare("""
+            SELECT identity_id, display_name, kind, facets_json, alternatives_json, summary_line, text_blob, updated_at
+            FROM ghost_identity_dossiers
+            WHERE identity_id = ? OR display_name = ?
+            LIMIT 1
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(identityID, at: 1, to: stmt)
+        bind(identityID, at: 2, to: stmt)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        let id = text(stmt, 0)
+        let dn = sqlite3_column_type(stmt, 1) == SQLITE_NULL ? nil : text(stmt, 1)
+        let kind = text(stmt, 2)
+        let facets = (try? JSONDecoder().decode([String: String].self, from: Data(text(stmt, 3).utf8))) ?? [:]
+        let alts = (try? JSONDecoder().decode([String: [String]].self, from: Data(text(stmt, 4).utf8))) ?? [:]
+        let summary = text(stmt, 5)
+        let blob = text(stmt, 6)
+        let uAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 7))
+        return GhostIdentityDossier(
+            identityID: id,
+            displayName: dn,
+            kind: kind,
+            facets: facets,
+            alternatives: alts,
+            summaryLine: summary,
+            textBlob: blob,
+            updatedAt: uAt
+        )
+    }
+
+    public func loadAllGhostIdentityDossiers() throws -> [GhostIdentityDossier] {
+        lock.lock()
+        defer { lock.unlock() }
+        let stmt = try prepare("""
+            SELECT identity_id, display_name, kind, facets_json, alternatives_json, summary_line, text_blob, updated_at
+            FROM ghost_identity_dossiers
+            ORDER BY updated_at DESC
+            """)
+        defer { sqlite3_finalize(stmt) }
+        var list: [GhostIdentityDossier] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let id = text(stmt, 0)
+            let dn = sqlite3_column_type(stmt, 1) == SQLITE_NULL ? nil : text(stmt, 1)
+            let kind = text(stmt, 2)
+            let facets = (try? JSONDecoder().decode([String: String].self, from: Data(text(stmt, 3).utf8))) ?? [:]
+            let alts = (try? JSONDecoder().decode([String: [String]].self, from: Data(text(stmt, 4).utf8))) ?? [:]
+            let summary = text(stmt, 5)
+            let blob = text(stmt, 6)
+            let uAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 7))
+            list.append(
+                GhostIdentityDossier(
+                    identityID: id,
+                    displayName: dn,
+                    kind: kind,
+                    facets: facets,
+                    alternatives: alts,
+                    summaryLine: summary,
+                    textBlob: blob,
+                    updatedAt: uAt
+                )
+            )
+        }
+        return list
+    }
+
+    @discardableResult
+    public func rebuildGhostVisits(
+        identityID: String? = nil,
+        visitGapSeconds: TimeInterval = 120.0
+    ) throws -> [GhostVisitSession] {
+        let sightings = try loadSightingsForKnowledge(identityID: identityID)
+        let visits = GhostVisitBuilder.buildVisits(sightings: sightings, visitGapSeconds: visitGapSeconds)
+
+        lock.lock()
+        defer { lock.unlock() }
+        if let identityID {
+            let del = try prepare("DELETE FROM ghost_visits WHERE identity_id = ?")
+            defer { sqlite3_finalize(del) }
+            bind(identityID, at: 1, to: del)
+            guard sqlite3_step(del) == SQLITE_DONE else { throw databaseError() }
+        } else {
+            try execute("DELETE FROM ghost_visits")
+        }
+
+        let ins = try prepare("""
+            INSERT OR REPLACE INTO ghost_visits(
+                visit_id, identity_id, started_at, ended_at, camera_ids_json, track_ids_json, sighting_count, best_track_id
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            """)
+        defer { sqlite3_finalize(ins) }
+        let encoder = JSONEncoder()
+        for v in visits {
+            sqlite3_reset(ins)
+            sqlite3_clear_bindings(ins)
+            let camsJSON = (try? String(data: encoder.encode(v.cameraIDs), encoding: .utf8)) ?? "[]"
+            let trksJSON = (try? String(data: encoder.encode(v.trackIDs), encoding: .utf8)) ?? "[]"
+            bind(v.visitID, at: 1, to: ins)
+            bind(v.identityID, at: 2, to: ins)
+            sqlite3_bind_double(ins, 3, v.startedAt.timeIntervalSince1970)
+            sqlite3_bind_double(ins, 4, v.endedAt.timeIntervalSince1970)
+            bind(camsJSON, at: 5, to: ins)
+            bind(trksJSON, at: 6, to: ins)
+            sqlite3_bind_int(ins, 7, Int32(v.sightingCount))
+            bind(v.bestTrackID, at: 8, to: ins)
+            guard sqlite3_step(ins) == SQLITE_DONE else { throw databaseError() }
+        }
+        return visits
+    }
+
+    private func loadSightingsForKnowledge(identityID: String? = nil) throws -> [GhostSightingForVisit] {
+        lock.lock()
+        defer { lock.unlock() }
+        var results: [GhostSightingForVisit] = []
+        var seenTracks = Set<String>()
+
+        let sql: String
+        if identityID != nil {
+            sql = """
+                SELECT track_id, ghost_identity_id, camera_id, camera_name, first_seen, last_seen, COALESCE(crop_quality, best_confidence, 0.75)
+                FROM tracked_objects
+                WHERE ghost_identity_id = ?
+                ORDER BY first_seen ASC
+                """
+        } else {
+            sql = """
+                SELECT track_id, ghost_identity_id, camera_id, camera_name, first_seen, last_seen, COALESCE(crop_quality, best_confidence, 0.75)
+                FROM tracked_objects
+                WHERE ghost_identity_id IS NOT NULL AND ghost_identity_id != ''
+                ORDER BY first_seen ASC
+                """
+        }
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        if let identityID { bind(identityID, at: 1, to: stmt) }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let tid = text(stmt, 0)
+            let gid = text(stmt, 1)
+            seenTracks.insert(tid)
+            results.append(
+                GhostSightingForVisit(
+                    trackID: tid,
+                    identityID: gid,
+                    cameraID: text(stmt, 2),
+                    cameraName: text(stmt, 3),
+                    firstSeenAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 4)),
+                    lastSeenAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 5)),
+                    quality: sqlite3_column_double(stmt, 6)
+                )
+            )
+        }
+
+        // Also include tracks present in ghost_attribute_index in case synthetic tests indexed attributes directly
+        let attrSQL = identityID != nil
+            ? "SELECT track_id, identity_id, camera_id, MIN(captured_at), MAX(captured_at), MAX(crop_quality) FROM ghost_attribute_index WHERE identity_id = ? GROUP BY track_id, identity_id, camera_id"
+            : "SELECT track_id, identity_id, camera_id, MIN(captured_at), MAX(captured_at), MAX(crop_quality) FROM ghost_attribute_index GROUP BY track_id, identity_id, camera_id"
+        let attrStmt = try prepare(attrSQL)
+        defer { sqlite3_finalize(attrStmt) }
+        if let identityID { bind(identityID, at: 1, to: attrStmt) }
+        while sqlite3_step(attrStmt) == SQLITE_ROW {
+            let tid = text(attrStmt, 0)
+            guard !seenTracks.contains(tid) else { continue }
+            seenTracks.insert(tid)
+            results.append(
+                GhostSightingForVisit(
+                    trackID: tid,
+                    identityID: text(attrStmt, 1),
+                    cameraID: text(attrStmt, 2),
+                    cameraName: text(attrStmt, 2),
+                    firstSeenAt: Date(timeIntervalSince1970: sqlite3_column_double(attrStmt, 3)),
+                    lastSeenAt: Date(timeIntervalSince1970: sqlite3_column_double(attrStmt, 4)),
+                    quality: sqlite3_column_double(attrStmt, 5)
+                )
+            )
+        }
         return results
+    }
+
+    /// Deterministically rebuilds `ghost_Identity_dossiers`, `ghost_visits`, and FTS5 indices from stored attribute entries and tracks.
+    /// Never wipes `ghost_narrative_chapters` or `ghost_chat_threads`.
+    public func rebuildAllGhostKnowledge(
+        visitGapSeconds: TimeInterval = 120.0,
+        now: Date = Date()
+    ) throws {
+        var identityIDs = Set<String>()
+        lock.lock()
+        do {
+            let s1 = try prepare("SELECT DISTINCT identity_id FROM ghost_attribute_index")
+            defer { sqlite3_finalize(s1) }
+            while sqlite3_step(s1) == SQLITE_ROW { identityIDs.insert(text(s1, 0)) }
+
+            let s2 = try prepare("SELECT identity_id FROM ghost_identities")
+            defer { sqlite3_finalize(s2) }
+            while sqlite3_step(s2) == SQLITE_ROW { identityIDs.insert(text(s2, 0)) }
+        } catch {
+            lock.unlock()
+            throw error
+        }
+        lock.unlock()
+
+        for id in identityIDs {
+            _ = try rebuildGhostIdentityDossier(identityID: id, now: now)
+        }
+        _ = try rebuildGhostVisits(identityID: nil, visitGapSeconds: visitGapSeconds)
+    }
+
+    /// Conjunctive facet + FTS5/LIKE search across `ghost_attribute_index` and `ghost_identity_dossiers`.
+    public func searchGhostIdentitiesByAttributes(
+        kind: String? = nil,
+        facets: [String: String] = [:],
+        freeTextQuery: String? = nil,
+        cameraID: String? = nil,
+        since: Date? = nil,
+        until: Date? = nil,
+        limit: Int = 25
+    ) throws -> [GhostIdentityDossier] {
+        let allDossiers = try loadAllGhostIdentityDossiers()
+        var candidateIDs = Set(allDossiers.map(\.identityID))
+
+        if let kind = kind?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !kind.isEmpty {
+            candidateIDs = candidateIDs.filter { id in
+                guard let d = allDossiers.first(where: { $0.identityID == id }) else { return false }
+                return d.kind.lowercased() == kind || d.facets["kind"]?.lowercased() == kind
+            }
+        }
+
+        // Conjunctive facet filter via ghost_attribute_index + dossier facets
+        for (rawFacet, rawVal) in facets {
+            let facet = rawFacet.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let normVal = (facet.contains("color") ? GhostColorNormalizer.normalizeColorToken(rawVal) : nil)
+                ?? rawVal.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !facet.isEmpty, !normVal.isEmpty else { continue }
+
+            var matchingForFacet = Set<String>()
+            lock.lock()
+            if let stmt = try? prepare("SELECT DISTINCT identity_id FROM ghost_attribute_index WHERE facet = ? AND (value = ? OR value LIKE ?)") {
+                defer { sqlite3_finalize(stmt) }
+                bind(facet, at: 1, to: stmt)
+                bind(normVal, at: 2, to: stmt)
+                bind("%\(normVal)%", at: 3, to: stmt)
+                while sqlite3_step(stmt) == SQLITE_ROW {
+                    matchingForFacet.insert(text(stmt, 0))
+                }
+            }
+            lock.unlock()
+
+            for d in allDossiers {
+                if let fVal = d.facets[facet]?.lowercased(), fVal.contains(normVal) {
+                    matchingForFacet.insert(d.identityID)
+                }
+                if let alts = d.alternatives[facet], alts.contains(where: { $0.lowercased().contains(normVal) }) {
+                    matchingForFacet.insert(d.identityID)
+                }
+            }
+            candidateIDs.formIntersection(matchingForFacet)
+        }
+
+        if cameraID != nil || since != nil || until != nil {
+            let sightings = try loadSightingsForKnowledge()
+            let matchingSightingIDs = Set(
+                sightings.filter { s in
+                    if let cameraID, !cameraID.isEmpty, s.cameraID != cameraID && s.cameraName != cameraID { return false }
+                    if let since, s.lastSeenAt < since { return false }
+                    if let until, s.firstSeenAt > until { return false }
+                    return true
+                }.map(\.identityID)
+            )
+            candidateIDs.formIntersection(matchingSightingIDs)
+        }
+
+        var ftsRankOrder: [String] = []
+        if let q = freeTextQuery?.trimmingCharacters(in: .whitespacesAndNewlines), !q.isEmpty {
+            var textMatches = Set<String>()
+            let tokens = q.lowercased()
+                .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .filter { $0.count >= 2 }
+
+            // 1. Try FTS5 BM25 query
+            if !tokens.isEmpty {
+                let ftsExpr = tokens.map { "\"\($0)\"*" }.joined(separator: " OR ")
+                lock.lock()
+                if let ftsStmt = try? prepare("SELECT identity_id FROM ghost_identity_fts WHERE ghost_identity_fts MATCH ? ORDER BY bm25(ghost_identity_fts) LIMIT 100") {
+                    defer { sqlite3_finalize(ftsStmt) }
+                    bind(ftsExpr, at: 1, to: ftsStmt)
+                    while sqlite3_step(ftsStmt) == SQLITE_ROW {
+                        let id = text(ftsStmt, 0)
+                        textMatches.insert(id)
+                        ftsRankOrder.append(id)
+                    }
+                }
+                lock.unlock()
+            }
+
+            // 2. Fallback / supplement via normalized tokens & substring check
+            for d in allDossiers {
+                let hay = (d.summaryLine + " " + d.textBlob).lowercased()
+                let matchedAll = tokens.allSatisfy { tok in
+                    if hay.contains(tok) { return true }
+                    if let normColor = GhostColorNormalizer.normalizeColorToken(tok), hay.contains(normColor) {
+                        return true
+                    }
+                    return false
+                }
+                if matchedAll {
+                    textMatches.insert(d.identityID)
+                }
+            }
+            candidateIDs.formIntersection(textMatches)
+        }
+
+        let dossierMap = Dictionary(uniqueKeysWithValues: allDossiers.map { ($0.identityID, $0) })
+        var orderedResults: [GhostIdentityDossier] = []
+        for id in ftsRankOrder where candidateIDs.contains(id) {
+            if let d = dossierMap[id] {
+                orderedResults.append(d)
+                candidateIDs.remove(id)
+            }
+        }
+        let remaining = candidateIDs.compactMap { dossierMap[$0] }.sorted { $0.updatedAt > $1.updatedAt }
+        orderedResults.append(contentsOf: remaining)
+        return Array(orderedResults.prefix(max(1, limit)))
+    }
+
+    public func getGhostIdentityRoute(
+        identityID: String,
+        topology: GhostCameraTopology? = nil
+    ) throws -> GhostIdentityRoute {
+        let sightings = try loadSightingsForKnowledge(identityID: identityID)
+        let topo: GhostCameraTopology
+        if let topology {
+            topo = topology
+        } else {
+            topo = GhostCameraTopology(links: (try? loadGhostCameraLinks()) ?? [])
+        }
+        return GhostRouteBuilder.buildRoute(identityID: identityID, sightings: sightings, topology: topo)
+    }
+
+    public func whoWasPresent(
+        cameraID: String? = nil,
+        since: Date,
+        until: Date,
+        kind: String? = nil
+    ) throws -> [GhostIdentityDossier] {
+        let sightings = try loadSightingsForKnowledge()
+        let activeIDs = Set(
+            sightings.filter { s in
+                if let cameraID, !cameraID.isEmpty, s.cameraID != cameraID && s.cameraName != cameraID {
+                    return false
+                }
+                return s.lastSeenAt >= since && s.firstSeenAt <= until
+            }.map(\.identityID)
+        )
+        let dossiers = try loadAllGhostIdentityDossiers()
+        return dossiers.filter { d in
+            guard activeIDs.contains(d.identityID) else { return false }
+            if let kind = kind?.lowercased(), !kind.isEmpty {
+                return d.kind.lowercased() == kind
+            }
+            return true
+        }
+    }
+
+    public func listGhostVisits(
+        identityID: String? = nil,
+        cameraID: String? = nil,
+        since: Date? = nil,
+        until: Date? = nil,
+        limit: Int = 50
+    ) throws -> [GhostVisitSession] {
+        lock.lock()
+        defer { lock.unlock() }
+        let stmt = try prepare("""
+            SELECT visit_id, identity_id, started_at, ended_at, camera_ids_json, track_ids_json, sighting_count, best_track_id
+            FROM ghost_visits
+            ORDER BY started_at DESC
+            LIMIT 500
+            """)
+        defer { sqlite3_finalize(stmt) }
+        var visits: [GhostVisitSession] = []
+        let decoder = JSONDecoder()
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let vid = text(stmt, 0)
+            let iid = text(stmt, 1)
+            let sAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 2))
+            let eAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 3))
+            let cams = (try? decoder.decode([String].self, from: Data(text(stmt, 4).utf8))) ?? []
+            let trks = (try? decoder.decode([String].self, from: Data(text(stmt, 5).utf8))) ?? []
+            let cnt = Int(sqlite3_column_int(stmt, 6))
+            let best = text(stmt, 7)
+
+            if let identityID, !identityID.isEmpty, iid != identityID { continue }
+            if let cameraID, !cameraID.isEmpty, !cams.contains(cameraID) { continue }
+            if let since, eAt < since { continue }
+            if let until, sAt > until { continue }
+
+            visits.append(
+                GhostVisitSession(
+                    visitID: vid,
+                    identityID: iid,
+                    startedAt: sAt,
+                    endedAt: eAt,
+                    cameraIDs: cams,
+                    trackIDs: trks,
+                    sightingCount: cnt,
+                    bestTrackID: best
+                )
+            )
+            if visits.count >= limit { break }
+        }
+        return visits
+    }
+
+    public func findGhostCompanions(
+        identityID: String,
+        maxGapSeconds: TimeInterval = 15.0
+    ) throws -> [GhostCompanionRecord] {
+        let sightings = try loadSightingsForKnowledge()
+        return GhostCompanionFinder.findCompanions(
+            for: identityID,
+            allSightings: sightings,
+            maxGapSeconds: maxGapSeconds
+        )
+    }
+
+    public func executeReadOnlyGhostSQL(_ rawSQL: String, maxLimit: Int = 200) throws -> [[String: String]] {
+        let safeSQL = try GhostReadOnlySQLGuard.validateAndCap(rawSQL, maxLimit: maxLimit)
+        lock.lock()
+        defer { lock.unlock() }
+        let stmt = try prepare(safeSQL)
+        defer { sqlite3_finalize(stmt) }
+        let colCount = sqlite3_column_count(stmt)
+        var rows: [[String: String]] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            var row: [String: String] = [:]
+            for c in 0..<colCount {
+                let colName = sqlite3_column_name(stmt, c).map { String(cString: $0) } ?? "col_\(c)"
+                row[colName] = sqlite3_column_type(stmt, c) == SQLITE_NULL ? "null" : text(stmt, c)
+            }
+            rows.append(row)
+            if rows.count >= maxLimit { break }
+        }
+        return rows
+    }
+
+    // MARK: - Agent Conversation History, Focus Memory, Chain Debt & Merge
+
+    @discardableResult
+    public func ensureGhostChatThread(
+        threadID: String = UUID().uuidString,
+        title: String = "Investigation",
+        operatorName: String = "operator",
+        kind: String = "general",
+        severity: String = "normal",
+        now: Date = Date()
+    ) throws -> GhostChatThreadRecord {
+        lock.lock()
+        defer { lock.unlock() }
+        let stmt = try prepare("""
+            INSERT INTO ghost_chat_threads(thread_id, title, operator_name, kind, severity, pinned, created_at, updated_at)
+            VALUES(?, ?, ?, ?, ?, 0, ?, ?)
+            ON CONFLICT(thread_id) DO UPDATE SET
+                updated_at = MAX(ghost_chat_threads.updated_at, excluded.updated_at)
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(threadID, at: 1, to: stmt)
+        bind(title, at: 2, to: stmt)
+        bind(operatorName, at: 3, to: stmt)
+        bind(kind, at: 4, to: stmt)
+        bind(severity, at: 5, to: stmt)
+        sqlite3_bind_double(stmt, 6, now.timeIntervalSince1970)
+        sqlite3_bind_double(stmt, 7, now.timeIntervalSince1970)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
+        return try loadGhostChatThreadUnlocked(threadID: threadID) ?? GhostChatThreadRecord(
+            threadID: threadID,
+            title: title,
+            operatorName: operatorName,
+            kind: kind,
+            severity: severity,
+            createdAt: now,
+            updatedAt: now
+        )
+    }
+
+    private func loadGhostChatThreadUnlocked(threadID: String) throws -> GhostChatThreadRecord? {
+        let stmt = try prepare("""
+            SELECT thread_id, title, operator_name, kind, severity, pinned, last_response_id, pending_outputs_json, created_at, updated_at
+            FROM ghost_chat_threads
+            WHERE thread_id = ?
+            LIMIT 1
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(threadID, at: 1, to: stmt)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        let tid = text(stmt, 0)
+        let title = text(stmt, 1)
+        let opName = text(stmt, 2)
+        let kind = text(stmt, 3)
+        let sev = text(stmt, 4)
+        let pinned = sqlite3_column_int(stmt, 5) != 0
+        let lastResp = sqlite3_column_type(stmt, 6) == SQLITE_NULL ? nil : text(stmt, 6)
+        let pendingJSON = sqlite3_column_type(stmt, 7) == SQLITE_NULL ? nil : text(stmt, 7)
+        let pending = pendingJSON.flatMap { try? JSONDecoder().decode([GhostPendingOutputDebt].self, from: Data($0.utf8)) } ?? []
+        let cAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 8))
+        let uAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 9))
+
+        var cameras: [String] = []
+        let camStmt = try prepare("SELECT camera_id FROM ghost_thread_cameras WHERE thread_id = ? ORDER BY bound_at ASC")
+        defer { sqlite3_finalize(camStmt) }
+        bind(tid, at: 1, to: camStmt)
+        while sqlite3_step(camStmt) == SQLITE_ROW { cameras.append(text(camStmt, 0)) }
+
+        var linked: [String] = []
+        let linkStmt = try prepare("SELECT thread_b FROM ghost_thread_links WHERE thread_a = ? ORDER BY linked_at ASC")
+        defer { sqlite3_finalize(linkStmt) }
+        bind(tid, at: 1, to: linkStmt)
+        while sqlite3_step(linkStmt) == SQLITE_ROW { linked.append(text(linkStmt, 0)) }
+
+        return GhostChatThreadRecord(
+            threadID: tid,
+            title: title,
+            operatorName: opName,
+            kind: kind,
+            severity: sev,
+            pinned: pinned,
+            lastResponseID: lastResp,
+            pendingOutputs: pending,
+            boundCameraIDs: cameras,
+            linkedThreadIDs: linked,
+            createdAt: cAt,
+            updatedAt: uAt
+        )
+    }
+
+    public func loadGhostChatThread(threadID: String) throws -> GhostChatThreadRecord? {
+        lock.lock()
+        defer { lock.unlock() }
+        return try loadGhostChatThreadUnlocked(threadID: threadID)
+    }
+
+    public func listGhostChatThreads(limit: Int = 50) throws -> [GhostChatThreadRecord] {
+        lock.lock()
+        defer { lock.unlock() }
+        let stmt = try prepare("SELECT thread_id FROM ghost_chat_threads ORDER BY pinned DESC, updated_at DESC LIMIT ?")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int(stmt, 1, Int32(max(1, min(500, limit))))
+        var ids: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW { ids.append(text(stmt, 0)) }
+        return try ids.compactMap { try loadGhostChatThreadUnlocked(threadID: $0) }
+    }
+
+    /// Appends a message to `ghost_chat_messages`. Automatically applies `GhostOpSec.stripPersona` to user prompts and `GhostOpSec.sanitizeText` to assistant outputs.
+    @discardableResult
+    public func appendGhostChatMessage(_ message: GhostChatMessageRecord) throws -> GhostChatMessageRecord {
+        _ = try ensureGhostChatThread(threadID: message.threadID, now: message.createdAt)
+        var sanitized = message
+        if sanitized.role == "user" {
+            sanitized.text = GhostOpSec.stripPersona(sanitized.text)
+        } else if sanitized.role == "assistant" {
+            sanitized.text = GhostOpSec.sanitizeText(sanitized.text)
+            if let ans = sanitized.structuredAnswer {
+                sanitized.structuredAnswer = GhostOpSec.sanitizeAnswer(ans)
+            }
+        }
+        let structuredJSON = sanitized.structuredAnswer.flatMap { try? String(data: JSONEncoder().encode($0), encoding: .utf8) }
+
+        lock.lock()
+        defer { lock.unlock() }
+        let stmt = try prepare("""
+            INSERT OR REPLACE INTO ghost_chat_messages(
+                message_id, thread_id, role, content, structured_json, created_at, clip_id, call_id
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(sanitized.messageID, at: 1, to: stmt)
+        bind(sanitized.threadID, at: 2, to: stmt)
+        bind(sanitized.role, at: 3, to: stmt)
+        bind(sanitized.text, at: 4, to: stmt)
+        if let structuredJSON { bind(structuredJSON, at: 5, to: stmt) } else { sqlite3_bind_null(stmt, 5) }
+        sqlite3_bind_double(stmt, 6, sanitized.createdAt.timeIntervalSince1970)
+        if let clipID = sanitized.clipID { bind(clipID, at: 7, to: stmt) } else { sqlite3_bind_null(stmt, 7) }
+        if let callID = sanitized.callID { bind(callID, at: 8, to: stmt) } else { sqlite3_bind_null(stmt, 8) }
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
+
+        let upd = try prepare("UPDATE ghost_chat_threads SET updated_at = MAX(updated_at, ?) WHERE thread_id = ?")
+        defer { sqlite3_finalize(upd) }
+        sqlite3_bind_double(upd, 1, sanitized.createdAt.timeIntervalSince1970)
+        bind(sanitized.threadID, at: 2, to: upd)
+        _ = sqlite3_step(upd)
+        return sanitized
+    }
+
+    public func loadGhostChatMessages(threadID: String, limit: Int = 200) throws -> [GhostChatMessageRecord] {
+        lock.lock()
+        defer { lock.unlock() }
+        let stmt = try prepare("""
+            SELECT message_id, thread_id, role, content, structured_json, created_at, clip_id, call_id
+            FROM ghost_chat_messages
+            WHERE thread_id = ?
+            ORDER BY created_at ASC
+            LIMIT ?
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(threadID, at: 1, to: stmt)
+        sqlite3_bind_int(stmt, 2, Int32(max(1, min(1000, limit))))
+        var messages: [GhostChatMessageRecord] = []
+        let decoder = JSONDecoder()
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let mid = text(stmt, 0)
+            let tid = text(stmt, 1)
+            let role = text(stmt, 2)
+            let content = text(stmt, 3)
+            let structJSON = sqlite3_column_type(stmt, 4) == SQLITE_NULL ? nil : text(stmt, 4)
+            let ans = structJSON.flatMap { try? decoder.decode(GhostChatFinalAnswer.self, from: Data($0.utf8)) }
+            let cAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 5))
+            let clipID = sqlite3_column_type(stmt, 6) == SQLITE_NULL ? nil : text(stmt, 6)
+            let callID = sqlite3_column_type(stmt, 7) == SQLITE_NULL ? nil : text(stmt, 7)
+            messages.append(
+                GhostChatMessageRecord(
+                    messageID: mid,
+                    threadID: tid,
+                    role: role,
+                    text: content,
+                    structuredAnswer: ans,
+                    clipID: clipID,
+                    callID: callID,
+                    createdAt: cAt
+                )
+            )
+        }
+        return messages
+    }
+
+    public func setGhostThreadChainHead(
+        threadID: String,
+        lastResponseID: String?,
+        pendingOutputs: [GhostPendingOutputDebt] = [],
+        now: Date = Date()
+    ) throws {
+        _ = try ensureGhostChatThread(threadID: threadID, now: now)
+        let pendingJSON = pendingOutputs.isEmpty ? nil : (try? String(data: JSONEncoder().encode(pendingOutputs), encoding: .utf8))
+        lock.lock()
+        defer { lock.unlock() }
+        let stmt = try prepare("""
+            UPDATE ghost_chat_threads
+            SET last_response_id = ?,
+                pending_outputs_json = ?,
+                updated_at = MAX(updated_at, ?)
+            WHERE thread_id = ?
+            """)
+        defer { sqlite3_finalize(stmt) }
+        if let lastResponseID { bind(lastResponseID, at: 1, to: stmt) } else { sqlite3_bind_null(stmt, 1) }
+        if let pendingJSON { bind(pendingJSON, at: 2, to: stmt) } else { sqlite3_bind_null(stmt, 2) }
+        sqlite3_bind_double(stmt, 3, now.timeIntervalSince1970)
+        bind(threadID, at: 4, to: stmt)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
+    }
+
+    /// Reads and atomically clears `pending_outputs_json` for a thread when settling OpenAI Responses API `function_call_output` debt.
+    public func consumeGhostThreadPendingOutputs(threadID: String) throws -> (lastResponseID: String?, owedOutputs: [GhostPendingOutputDebt]) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let thread = try loadGhostChatThreadUnlocked(threadID: threadID) else {
+            return (nil, [])
+        }
+        if !thread.pendingOutputs.isEmpty {
+            let clr = try prepare("UPDATE ghost_chat_threads SET pending_outputs_json = NULL WHERE thread_id = ?")
+            defer { sqlite3_finalize(clr) }
+            bind(threadID, at: 1, to: clr)
+            _ = sqlite3_step(clr)
+        }
+        return (thread.lastResponseID, thread.pendingOutputs)
+    }
+
+    public func pushGhostThreadFocus(
+        threadID: String,
+        kind: String = "identity",
+        refID: String,
+        label: String? = nil,
+        pinned: Bool = false,
+        now: Date = Date()
+    ) throws {
+        guard !refID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        _ = try ensureGhostChatThread(threadID: threadID, now: now)
+        lock.lock()
+        defer { lock.unlock() }
+        let stmt = try prepare("""
+            INSERT INTO ghost_thread_focus(thread_id, kind, ref_id, label, pinned, last_used_at)
+            VALUES(?, ?, ?, ?, ?, ?)
+            ON CONFLICT(thread_id, kind, ref_id) DO UPDATE SET
+                label = COALESCE(excluded.label, ghost_thread_focus.label),
+                pinned = MAX(ghost_thread_focus.pinned, excluded.pinned),
+                last_used_at = MAX(ghost_thread_focus.last_used_at, excluded.last_used_at)
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(threadID, at: 1, to: stmt)
+        bind(kind, at: 2, to: stmt)
+        bind(refID, at: 3, to: stmt)
+        if let label { bind(label, at: 4, to: stmt) } else { sqlite3_bind_null(stmt, 4) }
+        sqlite3_bind_int(stmt, 5, pinned ? 1 : 0)
+        sqlite3_bind_double(stmt, 6, now.timeIntervalSince1970)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
+    }
+
+    public func loadGhostThreadFocusEntries(threadID: String, limit: Int = 6) throws -> [GhostThreadFocusEntry] {
+        lock.lock()
+        defer { lock.unlock() }
+        let stmt = try prepare("""
+            SELECT thread_id, kind, ref_id, label, pinned, last_used_at
+            FROM ghost_thread_focus
+            WHERE thread_id = ?
+            ORDER BY pinned DESC, last_used_at DESC
+            LIMIT ?
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(threadID, at: 1, to: stmt)
+        sqlite3_bind_int(stmt, 2, Int32(max(1, min(50, limit))))
+        var entries: [GhostThreadFocusEntry] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            entries.append(
+                GhostThreadFocusEntry(
+                    threadID: text(stmt, 0),
+                    kind: text(stmt, 1),
+                    refID: text(stmt, 2),
+                    label: sqlite3_column_type(stmt, 3) == SQLITE_NULL ? nil : text(stmt, 3),
+                    pinned: sqlite3_column_int(stmt, 4) != 0,
+                    lastUsedAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 5))
+                )
+            )
+        }
+        return entries
+    }
+
+    /// Builds the system-prompt focus block (`Active Entity Focus`) for pronoun resolution ("he", "she", "that car", "он", "она", "эта машина").
+    public func loadGhostThreadFocusBlock(threadID: String, limit: Int = 6) throws -> String {
+        let entries = try loadGhostThreadFocusEntries(threadID: threadID, limit: limit)
+        guard !entries.isEmpty else { return "" }
+        var lines: [String] = ["Active Entity Focus (use to resolve pronouns like he/she/they/that vehicle):"]
+        for entry in entries {
+            let pinTag = entry.pinned ? " [PINNED]" : ""
+            if entry.kind == "identity", let dossier = try? getGhostIdentityDossier(identityID: entry.refID) {
+                lines.append("- \(dossier.summaryLine)\(pinTag)")
+            } else {
+                let lbl = entry.label.map { " (\($0))" } ?? ""
+                lines.append("- [\(entry.kind)] \(entry.refID)\(lbl)\(pinTag)")
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    public func bindGhostThreadCameras(threadID: String, cameraIDs: [String], now: Date = Date()) throws {
+        guard !cameraIDs.isEmpty else { return }
+        _ = try ensureGhostChatThread(threadID: threadID, now: now)
+        lock.lock()
+        defer { lock.unlock() }
+        let stmt = try prepare("""
+            INSERT OR IGNORE INTO ghost_thread_cameras(thread_id, camera_id, bound_at)
+            VALUES(?, ?, ?)
+            """)
+        defer { sqlite3_finalize(stmt) }
+        for camID in cameraIDs where !camID.isEmpty {
+            sqlite3_reset(stmt)
+            sqlite3_clear_bindings(stmt)
+            bind(threadID, at: 1, to: stmt)
+            bind(camID, at: 2, to: stmt)
+            sqlite3_bind_double(stmt, 3, now.timeIntervalSince1970)
+            guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
+        }
+    }
+
+    public func linkGhostThreads(threadA: String, threadB: String, now: Date = Date()) throws {
+        guard threadA != threadB else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        let stmt = try prepare("""
+            INSERT OR IGNORE INTO ghost_thread_links(thread_a, thread_b, linked_at)
+            VALUES(?, ?, ?)
+            """)
+        defer { sqlite3_finalize(stmt) }
+        for (a, b) in [(threadA, threadB), (threadB, threadA)] {
+            sqlite3_reset(stmt)
+            sqlite3_clear_bindings(stmt)
+            bind(a, at: 1, to: stmt)
+            bind(b, at: 2, to: stmt)
+            sqlite3_bind_double(stmt, 3, now.timeIntervalSince1970)
+            guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
+        }
+    }
+
+    /// Transactionally merges `sourceThreadID` into `targetThreadID`, re-parenting all messages, tool calls, clips, actions, focus entries, cameras, and links, and resetting `last_response_id = NULL` and `pending_outputs_json = NULL` so the next turn rebuilds a full history transcript.
+    public func mergeGhostThreads(
+        sourceThreadID: String,
+        intoTargetThreadID targetThreadID: String,
+        now: Date = Date()
+    ) throws {
+        guard sourceThreadID != targetThreadID else { return }
+        _ = try ensureGhostChatThread(threadID: targetThreadID, now: now)
+
+        lock.lock()
+        defer { lock.unlock() }
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        do {
+            for table in ["ghost_chat_messages", "ghost_chat_tool_calls", "ghost_chat_clips", "ghost_chat_actions"] {
+                let stmt = try prepare("UPDATE \(table) SET thread_id = ? WHERE thread_id = ?")
+                defer { sqlite3_finalize(stmt) }
+                bind(targetThreadID, at: 1, to: stmt)
+                bind(sourceThreadID, at: 2, to: stmt)
+                guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
+            }
+
+            // Merge focus with MAX(last_used_at) and MAX(pinned)
+            let focusStmt = try prepare("""
+                INSERT INTO ghost_thread_focus(thread_id, kind, ref_id, label, pinned, last_used_at)
+                SELECT ?, kind, ref_id, label, pinned, last_used_at FROM ghost_thread_focus WHERE thread_id = ?
+                ON CONFLICT(thread_id, kind, ref_id) DO UPDATE SET
+                    label = COALESCE(ghost_thread_focus.label, excluded.label),
+                    pinned = MAX(ghost_thread_focus.pinned, excluded.pinned),
+                    last_used_at = MAX(ghost_thread_focus.last_used_at, excluded.last_used_at)
+                """)
+            defer { sqlite3_finalize(focusStmt) }
+            bind(targetThreadID, at: 1, to: focusStmt)
+            bind(sourceThreadID, at: 2, to: focusStmt)
+            guard sqlite3_step(focusStmt) == SQLITE_DONE else { throw databaseError() }
+
+            let delFocus = try prepare("DELETE FROM ghost_thread_focus WHERE thread_id = ?")
+            defer { sqlite3_finalize(delFocus) }
+            bind(sourceThreadID, at: 1, to: delFocus)
+            guard sqlite3_step(delFocus) == SQLITE_DONE else { throw databaseError() }
+
+            // Merge bound cameras
+            let camStmt = try prepare("""
+                INSERT OR IGNORE INTO ghost_thread_cameras(thread_id, camera_id, bound_at)
+                SELECT ?, camera_id, bound_at FROM ghost_thread_cameras WHERE thread_id = ?
+                """)
+            defer { sqlite3_finalize(camStmt) }
+            bind(targetThreadID, at: 1, to: camStmt)
+            bind(sourceThreadID, at: 2, to: camStmt)
+            guard sqlite3_step(camStmt) == SQLITE_DONE else { throw databaseError() }
+
+            let delCam = try prepare("DELETE FROM ghost_thread_cameras WHERE thread_id = ?")
+            defer { sqlite3_finalize(delCam) }
+            bind(sourceThreadID, at: 1, to: delCam)
+            guard sqlite3_step(delCam) == SQLITE_DONE else { throw databaseError() }
+
+            // Re-parent thread links and remove self-links
+            let linkA = try prepare("UPDATE OR IGNORE ghost_thread_links SET thread_a = ? WHERE thread_a = ?")
+            defer { sqlite3_finalize(linkA) }
+            bind(targetThreadID, at: 1, to: linkA)
+            bind(sourceThreadID, at: 2, to: linkA)
+            _ = sqlite3_step(linkA)
+
+            let linkB = try prepare("UPDATE OR IGNORE ghost_thread_links SET thread_b = ? WHERE thread_b = ?")
+            defer { sqlite3_finalize(linkB) }
+            bind(targetThreadID, at: 1, to: linkB)
+            bind(sourceThreadID, at: 2, to: linkB)
+            _ = sqlite3_step(linkB)
+
+            let cleanLinks = try prepare("DELETE FROM ghost_thread_links WHERE thread_a = ? OR thread_b = ? OR thread_a = thread_b")
+            defer { sqlite3_finalize(cleanLinks) }
+            bind(sourceThreadID, at: 1, to: cleanLinks)
+            bind(sourceThreadID, at: 2, to: cleanLinks)
+            _ = sqlite3_step(cleanLinks)
+
+            // Reset chain head on target thread so next turn sends full merged history
+            let resetTarget = try prepare("""
+                UPDATE ghost_chat_threads
+                SET last_response_id = NULL,
+                    pending_outputs_json = NULL,
+                    updated_at = ?
+                WHERE thread_id = ?
+                """)
+            defer { sqlite3_finalize(resetTarget) }
+            sqlite3_bind_double(resetTarget, 1, now.timeIntervalSince1970)
+            bind(targetThreadID, at: 2, to: resetTarget)
+            guard sqlite3_step(resetTarget) == SQLITE_DONE else { throw databaseError() }
+
+            // Delete source thread
+            let delSrc = try prepare("DELETE FROM ghost_chat_threads WHERE thread_id = ?")
+            defer { sqlite3_finalize(delSrc) }
+            bind(sourceThreadID, at: 1, to: delSrc)
+            guard sqlite3_step(delSrc) == SQLITE_DONE else { throw databaseError() }
+
+            try execute("COMMIT")
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    public func recordGhostToolCallAudit(_ record: GhostToolCallAuditRecord) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        let stmt = try prepare("""
+            INSERT OR REPLACE INTO ghost_chat_tool_calls(
+                id, thread_id, tool_name, args_json, result_rows, duration_ms, ok, error, created_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(record.id, at: 1, to: stmt)
+        bind(record.threadID, at: 2, to: stmt)
+        bind(record.toolName, at: 3, to: stmt)
+        bind(record.argsJSON, at: 4, to: stmt)
+        sqlite3_bind_int(stmt, 5, Int32(record.resultRows))
+        sqlite3_bind_int(stmt, 6, Int32(record.durationMs))
+        sqlite3_bind_int(stmt, 7, record.ok ? 1 : 0)
+        if let err = record.error { bind(err, at: 8, to: stmt) } else { sqlite3_bind_null(stmt, 8) }
+        sqlite3_bind_double(stmt, 9, record.createdAt.timeIntervalSince1970)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
+    }
+
+    public func saveGhostChatAction(_ action: GhostChatActionRecord) throws {
+        let paramsJSON = (try? String(data: JSONEncoder().encode(action.parameters), encoding: .utf8)) ?? "{}"
+        lock.lock()
+        defer { lock.unlock() }
+        let stmt = try prepare("""
+            INSERT OR REPLACE INTO ghost_chat_actions(
+                action_id, thread_id, action_type, title, params_json, status, created_at, reviewed_at
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(action.actionID, at: 1, to: stmt)
+        bind(action.threadID, at: 2, to: stmt)
+        bind(action.actionType, at: 3, to: stmt)
+        bind(action.title, at: 4, to: stmt)
+        bind(paramsJSON, at: 5, to: stmt)
+        bind(action.status, at: 6, to: stmt)
+        sqlite3_bind_double(stmt, 7, action.createdAt.timeIntervalSince1970)
+        if let rev = action.reviewedAt { sqlite3_bind_double(stmt, 8, rev.timeIntervalSince1970) } else { sqlite3_bind_null(stmt, 8) }
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
+    }
+
+    public func listGhostChatActions(threadID: String? = nil, status: String? = nil) throws -> [GhostChatActionRecord] {
+        lock.lock()
+        defer { lock.unlock() }
+        var clauses: [String] = []
+        if threadID != nil { clauses.append("thread_id = ?") }
+        if status != nil { clauses.append("status = ?") }
+        let whereSQL = clauses.isEmpty ? "" : "WHERE " + clauses.joined(separator: " AND ")
+        let stmt = try prepare("""
+            SELECT action_id, thread_id, action_type, title, params_json, status, created_at, reviewed_at
+            FROM ghost_chat_actions
+            \(whereSQL)
+            ORDER BY created_at DESC
+            LIMIT 100
+            """)
+        defer { sqlite3_finalize(stmt) }
+        var idx: Int32 = 1
+        if let threadID { bind(threadID, at: idx, to: stmt); idx += 1 }
+        if let status { bind(status, at: idx, to: stmt); idx += 1 }
+        var list: [GhostChatActionRecord] = []
+        let decoder = JSONDecoder()
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let aid = text(stmt, 0)
+            let tid = text(stmt, 1)
+            let atype = text(stmt, 2)
+            let title = text(stmt, 3)
+            let params = (try? decoder.decode([String: String].self, from: Data(text(stmt, 4).utf8))) ?? [:]
+            let st = text(stmt, 5)
+            let cAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 6))
+            let rAt = sqlite3_column_type(stmt, 7) == SQLITE_NULL ? nil : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 7))
+            list.append(
+                GhostChatActionRecord(
+                    actionID: aid,
+                    threadID: tid,
+                    actionType: atype,
+                    title: title,
+                    parameters: params,
+                    status: st,
+                    createdAt: cAt,
+                    reviewedAt: rAt
+                )
+            )
+        }
+        return list
+    }
+
+    public func resolveGhostChatAction(actionID: String, confirmed: Bool, now: Date = Date()) throws -> GhostChatActionRecord? {
+        lock.lock()
+        let status = confirmed ? "confirmed" : "rejected"
+        do {
+            let upd = try prepare("UPDATE ghost_chat_actions SET status = ?, reviewed_at = ? WHERE action_id = ?")
+            defer { sqlite3_finalize(upd) }
+            bind(status, at: 1, to: upd)
+            sqlite3_bind_double(upd, 2, now.timeIntervalSince1970)
+            bind(actionID, at: 3, to: upd)
+            guard sqlite3_step(upd) == SQLITE_DONE else { throw databaseError() }
+        } catch {
+            lock.unlock()
+            throw error
+        }
+        lock.unlock()
+        return try listGhostChatActions().first(where: { $0.actionID == actionID })
+    }
+
+    @discardableResult
+    public func saveGhostChatClip(
+        clipID: String = UUID().uuidString,
+        threadID: String,
+        cameraID: String,
+        clipData: Data,
+        fileExtension: String = "jpg",
+        createdAt: Date = Date()
+    ) throws -> GhostChatClipRecord {
+        try FileManager.default.createDirectory(
+            at: cropDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let fileName = "chatclip_\(clipID.lowercased()).\(fileExtension)"
+        let fileURL = cropDirectory.appendingPathComponent(fileName)
+        try clipData.write(to: fileURL, options: [.atomic])
+
+        let record = GhostChatClipRecord(
+            clipID: clipID,
+            threadID: threadID,
+            cameraID: cameraID,
+            filePath: fileName,
+            createdAt: createdAt
+        )
+
+        lock.lock()
+        defer { lock.unlock() }
+        let stmt = try prepare("""
+            INSERT OR REPLACE INTO ghost_chat_clips(clip_id, thread_id, camera_id, file_path, created_at, expires_at)
+            VALUES(?, ?, ?, ?, ?, ?)
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(record.clipID, at: 1, to: stmt)
+        bind(record.threadID, at: 2, to: stmt)
+        bind(record.cameraID, at: 3, to: stmt)
+        bind(record.filePath, at: 4, to: stmt)
+        sqlite3_bind_double(stmt, 5, record.createdAt.timeIntervalSince1970)
+        sqlite3_bind_double(stmt, 6, record.expiresAt.timeIntervalSince1970)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
+        return record
+    }
+
+    public func loadGhostChatClips(threadID: String) throws -> [GhostChatClipRecord] {
+        lock.lock()
+        defer { lock.unlock() }
+        let stmt = try prepare("""
+            SELECT clip_id, thread_id, camera_id, file_path, created_at, expires_at
+            FROM ghost_chat_clips
+            WHERE thread_id = ?
+            ORDER BY created_at DESC
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(threadID, at: 1, to: stmt)
+        var list: [GhostChatClipRecord] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            list.append(
+                GhostChatClipRecord(
+                    clipID: text(stmt, 0),
+                    threadID: text(stmt, 1),
+                    cameraID: text(stmt, 2),
+                    filePath: text(stmt, 3),
+                    createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 4)),
+                    expiresAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 5))
+                )
+            )
+        }
+        return list
+    }
+
+    // MARK: - Storage Janitor (Degrade-Before-Delete Ladder & Protected Evidence)
+
+    /// Executes the Ghost Storage Janitor pass:
+    /// 1. Prunes expired 44-minute `ghost_chat_clips` (deleting file on disk + SQLite row).
+    /// 2. Identifies protected tracks: `is_best = 1`, the highest-quality crop of every identity, and tracks belonging to operator-named identities.
+    /// 3. Enforces per-identity crop cap (`maxCropsPerIdentity = 48`, or `1` when `dataSaverEnabled`) and age/disk pressure by degrading `cutout_path -> NULL` and `crop_path -> NULL` on disk while **preserving** the SQLite row, `reid_embedding` (512D), and `chroma_blob`.
+    /// 4. Prunes old `ghost_chat_tool_calls` and `ghost_ai_cache` older than `logRetentionDays`, while never touching `ghost_narrative_chapters` or `ghost_chat_threads`.
+    public func runGhostStorageJanitorPass(
+        policy: GhostStorageJanitorPolicy = GhostStorageJanitorPolicy(),
+        now: Date = Date()
+    ) throws -> GhostStorageJanitorReport {
+        var report = GhostStorageJanitorReport()
+
+        // Check free disk space
+        if let attrs = try? FileManager.default.attributesOfFileSystem(forPath: cropDirectory.deletingLastPathComponent().path),
+           let freeBytes = (attrs[.systemFreeSize] as? NSNumber)?.doubleValue {
+            let freeGB = freeBytes / (1024.0 * 1024.0 * 1024.0)
+            if freeGB < policy.minFreeDiskGB {
+                report.lowDiskSpaceTriggered = true
+            }
+        }
+
+        let Profiles = (try? loadGhostIdentityProfiles(limit: 5000)) ?? []
+        let namedIdentityIDs = Set(Profiles.compactMap { prof -> String? in
+            guard let name = prof.displayName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else { return nil }
+            return prof.identityID
+        })
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        // 1. Prune expired chat clips (44-min TTL)
+        let expStmt = try prepare("SELECT clip_id, file_path FROM ghost_chat_clips WHERE expires_at <= ?")
+        defer { sqlite3_finalize(expStmt) }
+        sqlite3_bind_double(expStmt, 1, now.timeIntervalSince1970)
+        var expiredClips: [(String, String)] = []
+        while sqlite3_step(expStmt) == SQLITE_ROW {
+            expiredClips.append((text(expStmt, 0), text(expStmt, 1)))
+        }
+        for (cid, path) in expiredClips {
+            removeCrop(at: path)
+            let del = try prepare("DELETE FROM ghost_chat_clips WHERE clip_id = ?")
+            defer { sqlite3_finalize(del) }
+            bind(cid, at: 1, to: del)
+            if sqlite3_step(del) == SQLITE_DONE {
+                report.expiredClipsRemovedCount += 1
+            }
+        }
+
+        // 2. Inspect all tracked_objects to determine best crop per identity & overflow / aging candidates
+        struct TrackMediaRow {
+            let trackID: String
+            let identityID: String?
+            let lastSeen: Double
+            let quality: Double
+            let isBest: Bool
+            let cropPath: String?
+            let cutoutPath: String?
+        }
+
+        let trkStmt = try prepare("""
+            SELECT track_id, ghost_identity_id, last_seen, COALESCE(crop_quality, best_confidence, 0.5), COALESCE(is_best, 0), crop_path, cutout_path
+            FROM tracked_objects
+            ORDER BY COALESCE(crop_quality, best_confidence, 0.5) DESC, last_seen DESC
+            """)
+        defer { sqlite3_finalize(trkStmt) }
+        var allTracks: [TrackMediaRow] = []
+        while sqlite3_step(trkStmt) == SQLITE_ROW {
+            allTracks.append(
+                TrackMediaRow(
+                    trackID: text(trkStmt, 0),
+                    identityID: sqlite3_column_type(trkStmt, 1) == SQLITE_NULL ? nil : text(trkStmt, 1),
+                    lastSeen: sqlite3_column_double(trkStmt, 2),
+                    quality: sqlite3_column_double(trkStmt, 3),
+                    isBest: sqlite3_column_int(trkStmt, 4) != 0,
+                    cropPath: sqlite3_column_type(trkStmt, 5) == SQLITE_NULL ? nil : text(trkStmt, 5),
+                    cutoutPath: sqlite3_column_type(trkStmt, 6) == SQLITE_NULL ? nil : text(trkStmt, 6)
+                )
+            )
+        }
+
+        var protectedTrackIDs = Set<String>()
+        var tracksPerIdentity: [String: [TrackMediaRow]] = [:]
+        for row in allTracks {
+            if row.isBest {
+                protectedTrackIDs.insert(row.trackID)
+            }
+            if let gid = row.identityID, !gid.isEmpty {
+                tracksPerIdentity[gid, default: []].append(row)
+                if namedIdentityIDs.contains(gid) {
+                    protectedTrackIDs.insert(row.trackID)
+                }
+            }
+        }
+        // Always protect the #1 highest-quality crop per identity
+        for (_, rows) in tracksPerIdentity {
+            if let bestRow = rows.first {
+                protectedTrackIDs.insert(bestRow.trackID)
+            }
+        }
+
+        let effectiveCap = policy.dataSaverEnabled ? 1 : max(1, policy.maxCropsPerIdentity)
+        var overflowTrackIDs = Set<String>()
+        for (_, rows) in tracksPerIdentity where rows.count > effectiveCap {
+            for overflow in rows.dropFirst(effectiveCap) where !protectedTrackIDs.contains(overflow.trackID) {
+                overflowTrackIDs.insert(overflow.trackID)
+            }
+        }
+
+        let retentionCutoff = now.addingTimeInterval(-Double(max(1, policy.trackImageRetentionDays)) * 86_400).timeIntervalSince1970
+
+        for row in allTracks where !protectedTrackIDs.contains(row.trackID) {
+            let isOverflow = overflowTrackIDs.contains(row.trackID)
+            let isAged = row.lastSeen < retentionCutoff
+            guard isOverflow || isAged || report.lowDiskSpaceTriggered else { continue }
+
+            // Step 1 of Degrade Ladder: remove cutout PNG first
+            if let cutout = row.cutoutPath {
+                removeCrop(at: cutout)
+                let u = try prepare("UPDATE tracked_objects SET cutout_path = NULL WHERE track_id = ?")
+                defer { sqlite3_finalize(u) }
+                bind(row.trackID, at: 1, to: u)
+                if sqlite3_step(u) == SQLITE_DONE {
+                    report.degradedCutoutCount += 1
+                }
+            }
+            // Step 2 of Degrade Ladder: remove crop JPEG while keeping SQLite row + 512D reid_embedding + chroma_blob
+            if let crop = row.cropPath {
+                removeCrop(at: crop)
+                let u = try prepare("UPDATE tracked_objects SET crop_path = NULL WHERE track_id = ?")
+                defer { sqlite3_finalize(u) }
+                bind(row.trackID, at: 1, to: u)
+                if sqlite3_step(u) == SQLITE_DONE {
+                    report.degradedCropCount += 1
+                    if isOverflow {
+                        report.overflowCropsDegradedCount += 1
+                    }
+                }
+            }
+        }
+
+        // 3. Prune old AI logs & cache older than logRetentionDays
+        let logCutoff = now.addingTimeInterval(-Double(max(1, policy.logRetentionDays)) * 86_400).timeIntervalSince1970
+        for table in ["ghost_chat_tool_calls", "ghost_ai_cache"] {
+            let del = try prepare("DELETE FROM \(table) WHERE created_at < ?")
+            defer { sqlite3_finalize(del) }
+            sqlite3_bind_double(del, 1, logCutoff)
+            if sqlite3_step(del) == SQLITE_DONE {
+                report.oldLogsPrunedCount += Int(sqlite3_changes(database))
+            }
+        }
+
+        return report
     }
 
     public func cacheVehicleRegistryRecord(_ record: GhostVehicleRegistryRecord) throws {

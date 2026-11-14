@@ -7,11 +7,18 @@ struct CameraMemoryView: View {
     @Environment(\.locale) private var locale
     @State private var selectedFrame: CameraMemoryFrame?
     @State private var selectedImage: NSImage?
+    @State private var editingChapter: GhostNarrativeChapterRecord?
+    @State private var operatorTextDraft: String = ""
+    @State private var showPinnedOnly: Bool = false
     @State private var loadError = ""
     @State private var confirmsClear = false
 
     private var memoryEnabled: Bool {
         model.featurePreferences.enabledFeatures.contains(.chronologicalMemory)
+    }
+
+    private var filteredChapters: [GhostNarrativeChapterRecord] {
+        showPinnedOnly ? model.ghostNarrativeChapters.filter(\.pinned) : model.ghostNarrativeChapters
     }
 
     var body: some View {
@@ -58,6 +65,8 @@ struct CameraMemoryView: View {
             if !loadError.isEmpty {
                 Text(locale.appLanguage.localizedMessage(loadError)).font(.system(size: 12)).foregroundStyle(ACTATheme.danger)
             }
+
+            ghostMemorySection
 
             if model.cameraMemoryFrames.isEmpty {
                 ContentUnavailableView(
@@ -121,6 +130,35 @@ struct CameraMemoryView: View {
             .padding(20)
             .frame(minWidth: 520, minHeight: 360)
         }
+        .sheet(item: $editingChapter) { chapter in
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Edit Ghost Memory Chapter · \(chapter.cameraName)")
+                    .font(.headline)
+                Text("Original AI summary: \(chapter.aiSummary)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextEditor(text: $operatorTextDraft)
+                    .font(.body)
+                    .frame(minHeight: 100)
+                HStack {
+                    Button("Restore AI Summary") {
+                        model.saveGhostNarrativeOperatorText(chapter, text: nil)
+                        editingChapter = nil
+                    }
+                    Spacer()
+                    Button("Cancel") {
+                        editingChapter = nil
+                    }
+                    Button("Save Operator Text") {
+                        model.saveGhostNarrativeOperatorText(chapter, text: operatorTextDraft)
+                        editingChapter = nil
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding(20)
+            .frame(minWidth: 460, minHeight: 240)
+        }
         .confirmationDialog("Delete all sampled memory frames?", isPresented: $confirmsClear) {
             Button("Delete all frames", role: .destructive) {
                 for frame in model.cameraMemoryFrames { model.deleteCameraMemoryFrame(frame) }
@@ -128,6 +166,92 @@ struct CameraMemoryView: View {
         } message: {
             Text("This removes locally retained sampled images and cannot be undone.")
         }
+    }
+
+    @ViewBuilder
+    private var ghostMemorySection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("Ghost Memory · Narrative Chapters (\(filteredChapters.count))", systemImage: "book.pages")
+                    .font(.system(size: 14, weight: .semibold))
+                Spacer()
+                Toggle("Pinned only", isOn: $showPinnedOnly)
+                    .toggleStyle(.checkbox)
+                    .font(.system(size: 11))
+                if let firstCam = model.config.cameras.first(where: \.enabled) {
+                    Button("Close chapter now") {
+                        model.forceCloseGhostNarrativeChapter(cameraID: firstCam.id)
+                    }
+                    .font(.system(size: 11))
+                }
+                Button("Rebuild Knowledge") {
+                    model.rebuildGhostKnowledgeLayer()
+                }
+                .font(.system(size: 11))
+            }
+
+            if !filteredChapters.isEmpty {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(filteredChapters.prefix(15))) { chapter in
+                            ghostChapterRow(chapter)
+                        }
+                    }
+                }
+                .frame(maxHeight: 200)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func ghostChapterRow(_ chapter: GhostNarrativeChapterRecord) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(chapter.cameraName)
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(chapter.narrative.chapterTitle)
+                        .font(.system(size: 12, weight: .medium))
+                    if chapter.operatorMarked {
+                        Text("OPERATOR")
+                            .font(.system(size: 9, weight: .bold))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(ACTATheme.primary.opacity(0.2))
+                            .cornerRadius(3)
+                    }
+                }
+                Text("\(chapter.startedAt.formatted(date: .abbreviated, time: .shortened, locale: locale)) – \(chapter.endedAt.formatted(date: .omitted, time: .shortened, locale: locale)) · frames: \(chapter.frameCount) · sightings: \(chapter.sightingCount)")
+                    .font(.system(size: 10).monospacedDigit())
+                    .foregroundStyle(ACTATheme.textMuted)
+                Text(chapter.effectiveSummary)
+                    .font(.system(size: 12))
+                    .foregroundStyle(ACTATheme.textSecondary)
+                if let delta = chapter.narrative.deltaFromPrevious, !delta.isEmpty {
+                    Text("Δ \(delta)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(ACTATheme.textMuted)
+                }
+            }
+            Spacer()
+            Button {
+                model.toggleGhostNarrativePin(chapter)
+            } label: {
+                Image(systemName: chapter.pinned ? "pin.fill" : "pin")
+            }
+            .help(chapter.pinned ? "Unpin chapter" : "Pin chapter")
+
+            Button {
+                operatorTextDraft = chapter.operatorText ?? chapter.effectiveSummary
+                editingChapter = chapter
+            } label: {
+                Image(systemName: "pencil")
+            }
+            .help("Edit operator summary")
+        }
+        .padding(8)
+        .background(ACTATheme.surfaceElevated.opacity(0.5))
+        .cornerRadius(6)
     }
 
     private func show(_ frame: CameraMemoryFrame) {

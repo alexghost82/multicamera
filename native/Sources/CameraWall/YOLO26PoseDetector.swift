@@ -263,6 +263,10 @@ final class YOLO26PoseDetector: @unchecked Sendable {
             return url
         }
         guard url.pathExtension == "mlpackage" else { throw YOLO26PoseDetectorError.unsupportedModel }
+        let siblingCompiled = url.deletingPathExtension().appendingPathExtension("mlmodelc")
+        if FileManager.default.isReadableFile(atPath: siblingCompiled.appendingPathComponent("coremldata.bin").path) {
+            return siblingCompiled
+        }
         let coreMLDirectory = url.appendingPathComponent("Data/com.apple.CoreML", isDirectory: true)
         let modelFile = coreMLDirectory.appendingPathComponent("model.mlmodel")
         let weightsFile = coreMLDirectory.appendingPathComponent("weights/weight.bin")
@@ -272,12 +276,23 @@ final class YOLO26PoseDetector: @unchecked Sendable {
         }
         let digest = SHA256.hash(data: try Data(contentsOf: modelFile) + Data(contentsOf: weightsFile))
             .map { String(format: "%02x", $0) }.joined().prefix(16)
-        let cacheDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let appSupportModels = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("CameraWall/Models", isDirectory: true)
-        try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true,
-                                                 attributes: [.posixPermissions: 0o700])
+        let cacheDirectory: URL
+        if (try? FileManager.default.createDirectory(at: appSupportModels, withIntermediateDirectories: true,
+                                                     attributes: [.posixPermissions: 0o700])) != nil,
+           FileManager.default.isWritableFile(atPath: appSupportModels.path) {
+            cacheDirectory = appSupportModels
+        } else {
+            cacheDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("CameraWall/Models", isDirectory: true)
+            try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true,
+                                                    attributes: [.posixPermissions: 0o700])
+        }
         let destination = cacheDirectory.appendingPathComponent("yolo26s-pose-\(digest).mlmodelc", isDirectory: true)
-        if FileManager.default.fileExists(atPath: destination.path) { return destination }
+        if FileManager.default.isReadableFile(atPath: destination.appendingPathComponent("coremldata.bin").path) {
+            return destination
+        }
+        try? FileManager.default.removeItem(at: destination)
         let compiled = try MLModel.compileModel(at: url)
         do { try FileManager.default.copyItem(at: compiled, to: destination) }
         catch where FileManager.default.fileExists(atPath: destination.path) {}

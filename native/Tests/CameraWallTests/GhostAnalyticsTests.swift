@@ -1,4 +1,4 @@
-import CameraCore
+@testable import CameraCore
 @testable import CameraWall
 import CoreGraphics
 import Foundation
@@ -733,7 +733,7 @@ final class GhostAnalyticsTests: XCTestCase {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("ghost-all-mem-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: tempDir) }
         let store = try LocalTrackingStore(url: tempDir.appendingPathComponent("test.sqlite3"))
-        let memStore = CameraMemoryStore(directoryURL: tempDir.appendingPathComponent("camera-memory", isDirectory: true))
+        let memStore = CameraMemoryStore(url: tempDir.appendingPathComponent("camera-memory", isDirectory: true))
 
         let camID = UUID()
         let t0 = Date(timeIntervalSince1970: 1_715_000_000)
@@ -759,18 +759,20 @@ final class GhostAnalyticsTests: XCTestCase {
             cropJPEG: testCollage.jpegData,
             at: t0
         )
-        let personDesc = TrackedObjectDescription(
-            summary: "Person in yellow safety vest carrying a silver toolbox",
-            overallConfidence: 0.91,
-            attributes: [
-                "clothing": TrackedAttributeEvidence(value: "yellow safety vest", confidence: 0.92, evidence: "bright reflective vest"),
-                "carried_items": TrackedAttributeEvidence(value: "silver toolbox", confidence: 0.89, evidence: "metal box in right hand")
-            ]
-        )
+        let personDesc = try XCTUnwrap(TrackedObjectDescription.parse("""
+            {
+              "summary": "Person in yellow safety vest carrying a silver toolbox",
+              "overallConfidence": 0.91,
+              "attributes": {
+                "clothing": {"value": "yellow safety vest", "confidence": 0.92, "evidence": "bright reflective vest"},
+                "carried_items": {"value": "silver toolbox", "confidence": 0.89, "evidence": "metal box in right hand"}
+              }
+            }
+            """))
         try store.saveDescription(personDesc, for: personTrackID, at: t0.addingTimeInterval(5))
 
         // Verify `saveDescription` automatically synced into `ghost_attribute_index`, `ghost_identity_dossiers`, and `ghost_crop_fts`
-        let vestHits = try store.searchGhostIdentitiesByAttributes(query: "yellow safety vest", limit: 10)
+        let vestHits = try store.searchGhostIdentitiesByAttributes(freeTextQuery: "yellow safety vest", limit: 10)
         XCTAssertFalse(vestHits.isEmpty, "saveDescription must automatically index attributes into ghost_attribute_index")
         let syncedPersonIdentityID = vestHits[0].identityID
         let syncedDossier = try store.getGhostIdentityDossier(identityID: syncedPersonIdentityID)
@@ -801,16 +803,17 @@ final class GhostAnalyticsTests: XCTestCase {
         )
         try store.saveVehicleTextEvidence(vehicleOCR)
 
-        let plateHits = try store.searchGhostIdentitiesByAttributes(query: "KZ777ABC02", limit: 10)
+        let plateHits = try store.searchGhostIdentitiesByAttributes(freeTextQuery: "KZ777ABC02", limit: 10)
         XCTAssertFalse(plateHits.isEmpty, "saveVehicleTextEvidence must automatically index plate OCR into ghost_attribute_index")
 
-        // 3. Save an automatic camera scan (`recordAutomaticScan`)
-        _ = try store.recordAutomaticScan(
-            cameraID: camID,
-            cameraName: "Main Gate",
-            summary: "Delivery truck parked near Main Gate barrier",
-            matchedAlerts: ["Gate barrier active"],
-            at: t0.addingTimeInterval(20)
+        // 3. Save an automatic camera scan (`saveAutomaticScan`)
+        try store.saveAutomaticScan(
+            CameraScanRecord(
+                cameraID: camID,
+                cameraName: "Main Gate",
+                observedAt: t0.addingTimeInterval(20),
+                answer: "Delivery truck parked near Main Gate barrier"
+            )
         )
 
         // 4. Save a chronological memory frame in `CameraMemoryStore`
@@ -844,13 +847,13 @@ final class GhostAnalyticsTests: XCTestCase {
 
         // 6. Save a persisted alert mentor brief in SQLite (`ghost_alert_mentor_briefs`)
         try store.saveGhostAlertMentorBrief(
-            alertID: "ALT-SQL-1",
-            cameraID: camID.uuidString,
+            cameraID: camID,
             brief: GhostAlertMentorBrief(
+                alertID: "ALT-SQL-1",
                 confirmedThreat: true,
                 tacticalHeadline: "Unauthorized vehicle near gate",
                 precursorSummary: "Truck approached barrier",
-                visualConfirmation: "Visible in frame",
+                escalationTrajectory: "Approaching restricted barrier",
                 recommendedOperatorAction: "Verify driver badge",
                 confidence: 0.88
             ),
@@ -858,7 +861,7 @@ final class GhostAnalyticsTests: XCTestCase {
         )
 
         // 7. Configure coordinator with `memoryFrameStore` and `GhostOperationalMemorySnapshot`
-        let client = GhostAIClient(config: GhostAIConfiguration(mode: .offline))
+        let client = GhostAIClient(config: GhostAIConfiguration(mode: .dryRun))
         let coordinator = GhostAnalyticsCoordinator(
             aiClient: client,
             trackingStore: store,
@@ -888,20 +891,23 @@ final class GhostAnalyticsTests: XCTestCase {
             createdAt: t0,
             ttlSeconds: 3600
         )
-        let isapiEv = ISAPIEvent(
+        let isapiEv = ISAPIEventRecord(
             cameraID: camID,
             cameraName: "Main Gate",
-            eventType: "linedetection",
-            eventState: "active",
-            eventDescription: "Line crossing alarm",
-            occurredAt: t0.addingTimeInterval(32),
+            payload: ISAPIEventPayload(
+                eventType: "linedetection",
+                eventState: "active",
+                channelID: "1",
+                eventDescription: "Line crossing alarm",
+                occurredAt: t0.addingTimeInterval(32)
+            ),
             receivedAt: t0.addingTimeInterval(32)
         )
         let mission = try CameraMission(
             cameraID: camID,
             name: "Gate Check",
             brief: "Check if gate is clear",
-            intervalMinutes: 30,
+            intervalSeconds: 1800,
             lastRunAt: t0.addingTimeInterval(50),
             lastResult: "Gate lane has one truck"
         )
@@ -928,48 +934,44 @@ final class GhostAnalyticsTests: XCTestCase {
 
         // 8. Verify agent tools directly on `coordinator`:
         // 8a. `list_memory_frames` and `view_memory_frame` read from `CameraMemoryStore`
-        let listFramesOut = coordinator.executeAgentTool(
-            threadID: "T-MEM",
+        let listFramesOut = await coordinator.executeAgentTool(
             toolName: "list_memory_frames",
             arguments: ["camera_id": camID.uuidString],
-            allLiveFrames: [],
+            threadID: "T-MEM",
             now: t0.addingTimeInterval(60)
         )
-        XCTAssertEqual(listFramesOut.rowsCount, 1)
+        XCTAssertEqual(listFramesOut.resultRows, 1)
         XCTAssertTrue(listFramesOut.outputJSON.contains(savedMemFrame.id.uuidString))
 
-        let viewFrameOut = coordinator.executeAgentTool(
-            threadID: "T-MEM",
+        let viewFrameOut = await coordinator.executeAgentTool(
             toolName: "view_memory_frame",
             arguments: ["frame_id": savedMemFrame.id.uuidString],
-            allLiveFrames: [],
+            threadID: "T-MEM",
             now: t0.addingTimeInterval(60)
         )
-        XCTAssertEqual(viewFrameOut.rowsCount, 1)
+        XCTAssertEqual(viewFrameOut.resultRows, 1)
         XCTAssertEqual(viewFrameOut.attachedImages.count, 1)
 
         // 8b. `search_tracked_objects` reads tracks, descriptions, vehicle OCR, automatic scans, and attaches crop JPEGs
-        let searchTracksOut = coordinator.executeAgentTool(
-            threadID: "T-MEM",
+        let searchTracksOut = await coordinator.executeAgentTool(
             toolName: "search_tracked_objects",
             arguments: [
                 "query": "KZ777ABC02",
                 "include_scans": "true",
                 "attach_crops": "true"
             ],
-            allLiveFrames: [],
+            threadID: "T-MEM",
             now: t0.addingTimeInterval(60)
         )
-        XCTAssertGreaterThanOrEqual(searchTracksOut.rowsCount, 1)
+        XCTAssertGreaterThanOrEqual(searchTracksOut.resultRows, 1)
         XCTAssertTrue(searchTracksOut.outputJSON.contains("KZ777ABC02"))
         XCTAssertFalse(searchTracksOut.attachedImages.isEmpty)
 
         // 8c. `get_operational_events` reads VLM alerts + review notes, SQLite mentor briefs, watch rules, ISAPI events, and missions
-        let opEventsOut = coordinator.executeAgentTool(
-            threadID: "T-MEM",
+        let opEventsOut = await coordinator.executeAgentTool(
             toolName: "get_operational_events",
             arguments: ["kind": "all", "camera_id": camID.uuidString],
-            allLiveFrames: [],
+            threadID: "T-MEM",
             now: t0.addingTimeInterval(60)
         )
         XCTAssertTrue(opEventsOut.outputJSON.contains("Confirmed scheduled maintenance technician"))
@@ -979,17 +981,16 @@ final class GhostAnalyticsTests: XCTestCase {
         XCTAssertTrue(opEventsOut.outputJSON.contains("Gate Check"))
 
         // 8d. `get_timeline` merges visits, narrative chapters, memory frames, alerts, ISAPI events, and mission runs
-        let timelineOut = coordinator.executeAgentTool(
-            threadID: "T-MEM",
+        let timelineOut = await coordinator.executeAgentTool(
             toolName: "get_timeline",
             arguments: ["camera_id": camID.uuidString],
-            allLiveFrames: [],
+            threadID: "T-MEM",
             now: t0.addingTimeInterval(60)
         )
         XCTAssertTrue(timelineOut.outputJSON.contains("narrative_chapter"))
         XCTAssertTrue(timelineOut.outputJSON.contains("memory_frame"))
         XCTAssertTrue(timelineOut.outputJSON.contains("vlm_alert"))
-        XCTAssertTrue(timelineOut.outputJSON.contains("mentor_alert"))
+        XCTAssertTrue(timelineOut.outputJSON.contains("alert_mentor_brief"))
         XCTAssertTrue(timelineOut.outputJSON.contains("isapi_event"))
         XCTAssertTrue(timelineOut.outputJSON.contains("mission_run"))
 

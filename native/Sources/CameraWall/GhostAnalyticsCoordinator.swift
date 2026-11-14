@@ -206,6 +206,47 @@ public struct GhostCameraNarrativeState: Sendable {
 
 // MARK: - 4. Ghost Analytics Coordinator
 
+/// A live camera snapshot captured when the operator asks Ghost Chat a question.
+public struct GhostLiveCameraFrame: Sendable, Equatable {
+    public var cameraID: UUID?
+    public var cameraName: String
+    public var jpegData: Data
+
+    public init(cameraID: UUID?, cameraName: String, jpegData: Data) {
+        self.cameraID = cameraID
+        self.cameraName = cameraName
+        self.jpegData = jpegData
+    }
+}
+
+struct GhostOperationalMemorySnapshot {
+    var vlmAlerts: [VLMAlert] = []
+    var alertReviews: [UUID: OperationsAlertReview] = [:]
+    var alertAcknowledgements: [UUID: Date] = [:]
+    var watchRules: [OperationsWatchRule] = []
+    var isapiEvents: [ISAPIEventRecord] = []
+    var missions: [CameraMission] = []
+    var missionRuns: [CameraMissionRun] = []
+
+    init(
+        vlmAlerts: [VLMAlert] = [],
+        alertReviews: [UUID: OperationsAlertReview] = [:],
+        alertAcknowledgements: [UUID: Date] = [:],
+        watchRules: [OperationsWatchRule] = [],
+        isapiEvents: [ISAPIEventRecord] = [],
+        missions: [CameraMission] = [],
+        missionRuns: [CameraMissionRun] = []
+    ) {
+        self.vlmAlerts = vlmAlerts
+        self.alertReviews = alertReviews
+        self.alertAcknowledgements = alertAcknowledgements
+        self.watchRules = watchRules
+        self.isapiEvents = isapiEvents
+        self.missions = missions
+        self.missionRuns = missionRuns
+    }
+}
+
 public final class GhostAnalyticsCoordinator: @unchecked Sendable {
     // Gate & Poller Constants
     public static let describeGateMinBatch: Int = 8
@@ -230,6 +271,22 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
     public let memoryGuard = GhostMemoryGuard()
     public var janitorPolicy = GhostStorageJanitorPolicy()
     private weak var trackingStore: LocalTrackingStore?
+    /// Chronological archive of full camera frames exposed to the chat agent.
+    public var memoryFrameStore: CameraMemoryStore?
+    /// Provider for persistent operational memory (VLM alerts, reviews, watches, ISAPI events, scheduled missions).
+    var operationalMemoryProvider: (() -> GhostOperationalMemorySnapshot)?
+    private var operationalSnapshot = GhostOperationalMemorySnapshot()
+
+    func updateOperationalMemorySnapshot(_ snapshot: GhostOperationalMemorySnapshot) {
+        lock.withLock { operationalSnapshot = snapshot }
+    }
+
+    private func currentOperationalMemorySnapshot() -> GhostOperationalMemorySnapshot {
+        if let provider = operationalMemoryProvider {
+            return provider()
+        }
+        return lock.withLock { operationalSnapshot }
+    }
 
     // Stateful Schedulers & Queues
     private var captureScheduler = GhostCaptureScheduler()
@@ -258,7 +315,8 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
 
     public init(
         aiClient: GhostAIClient,
-        trackingStore: LocalTrackingStore? = nil
+        trackingStore: LocalTrackingStore? = nil,
+        memoryFrameStore: CameraMemoryStore? = nil
     ) {
         let initialProfiles = (try? trackingStore?.loadGhostIdentityProfiles(limit: 500)) ?? []
         let initialLinks = (try? trackingStore?.loadGhostCameraLinks()) ?? []
@@ -267,6 +325,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
 
         self.aiClient = aiClient
         self.trackingStore = trackingStore
+        self.memoryFrameStore = memoryFrameStore
         self.aiClient.attachCacheStore(trackingStore)
         self.identityResolver = GhostIdentityResolver(
             galleries: initialProfiles,
@@ -295,6 +354,8 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
         maskHeight: Int = 0,
         embedding: [Float]?,
         neighborBoxes: [NormalizedRect] = [],
+        enqueueDescribe: Bool = true,
+        enqueuePlate: Bool = true,
         now: Date = Date()
     ) -> GhostIdentityResolutionDecision? {
         let memState = memoryGuard.evaluate()
@@ -377,7 +438,8 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
         cropWindowsByTrack[trackKey] = window
 
         if let cropImage, (captureReason != nil || acceptedIntoTopK) {
-            if pendingDescribeQueue.count < 256,
+            if enqueueDescribe,
+               pendingDescribeQueue.count < 256,
                !pendingDescribeQueue.contains(where: { $0.trackID == trackID }) {
                 pendingDescribeQueue.append(
                     GhostPendingDescribeItem(
@@ -391,7 +453,8 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                     )
                 )
             }
-            if isVehicle, pendingPlateQueue.count < 128,
+            if enqueuePlate,
+               isVehicle, pendingPlateQueue.count < 128,
                !pendingPlateQueue.contains(where: { $0.trackID == trackID }) {
                 pendingPlateQueue.append(
                     GhostPendingPlateItem(
@@ -650,11 +713,16 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             fallbackFactory: { GhostPlateCollageResult(plates: []) }
         )
 
+        let allowRegistry = aiClient.configuration().allowPlateRegistryLookup
         for readItem in result.plates where readItem.confidence >= 0.55 {
             guard readItem.cellIndex >= 1, readItem.cellIndex <= batchToRun.count else { continue }
             let source = batchToRun[readItem.cellIndex - 1]
             if let normalized = GhostVehicleRegistryRecord.normalizeIsraeliPlate(readItem.plateText) {
-                _ = await registryClient.lookupPlate(rawPlate: normalized, store: trackingStore)
+                _ = await registryClient.lookupPlate(
+                    rawPlate: normalized,
+                    store: trackingStore,
+                    allowExternalLookup: allowRegistry
+                )
                 let trackKey = source.trackID.uuidString
                 if var profile = identityResolver.allGalleries().first(where: { $0.memberTrackKeys.contains(trackKey) }) {
                     profile.plateNumber = normalized
@@ -784,6 +852,9 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
         activeIdentityIDs: [String] = [],
         narrativeMode: GhostNarrativeTriggerMode? = nil,
         activeAlertRulesDescription: String = "Weapon, Violence, Fallen Person, Perimeter Intrusion, Fire/Smoke",
+        evaluateAlerts: Bool = true,
+        sampleNarrative: Bool = true,
+        retainCollageJPEG: Bool = true,
         now: Date = Date()
     ) async {
         let effectiveLabels = activeLabels.isEmpty ? (hasActiveObjects ? ["person"] : []) : activeLabels
@@ -792,29 +863,33 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             var nFlush: (frames: [GhostNarrativeSampledFrame], sightingCount: Int, identityCount: Int)?
             var pSummary: String?
 
-            var ringState = alertRingsByCamera[cameraID] ?? GhostCameraAlertRingState()
-            if ringState.offerFrame(cgImage, at: now) {
-                rReady = ringState.ringFrames
+            if evaluateAlerts {
+                var ringState = alertRingsByCamera[cameraID] ?? GhostCameraAlertRingState()
+                if ringState.offerFrame(cgImage, at: now) {
+                    rReady = ringState.ringFrames
+                }
+                alertRingsByCamera[cameraID] = ringState
             }
-            alertRingsByCamera[cameraID] = ringState
 
-            var narState = narrativeStatesByCamera[cameraID] ?? GhostCameraNarrativeState()
-            if let flushed = narState.offerFrame(
-                cgImage,
-                activeLabels: effectiveLabels,
-                activeTrackIDs: activeTrackIDs,
-                activeIdentityIDs: activeIdentityIDs,
-                modeOverride: narrativeMode,
-                at: now
-            ) {
-                nFlush = flushed
-                pSummary = narState.lastChapterSummary
+            if sampleNarrative {
+                var narState = narrativeStatesByCamera[cameraID] ?? GhostCameraNarrativeState()
+                if let flushed = narState.offerFrame(
+                    cgImage,
+                    activeLabels: effectiveLabels,
+                    activeTrackIDs: activeTrackIDs,
+                    activeIdentityIDs: activeIdentityIDs,
+                    modeOverride: narrativeMode,
+                    at: now
+                ) {
+                    nFlush = flushed
+                    pSummary = narState.lastChapterSummary
+                }
+                narrativeStatesByCamera[cameraID] = narState
             }
-            narrativeStatesByCamera[cameraID] = narState
             return (rReady, nFlush, pSummary)
         }
 
-        if let ringReady, canDispatchAlertEvaluation(now: now) {
+        if evaluateAlerts, let ringReady, canDispatchAlertEvaluation(now: now) {
             await evaluateCriticalAlertRing(
                 cameraID: cameraID,
                 cameraName: cameraName,
@@ -824,21 +899,26 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             )
         }
 
-        if let narrativeFlush {
+        if sampleNarrative, let narrativeFlush {
             await flushNarrativeChapter(
                 cameraID: cameraID,
                 cameraName: cameraName,
                 sampledFrames: narrativeFlush.frames,
                 sightingCount: narrativeFlush.sightingCount,
                 identityCount: narrativeFlush.identityCount,
-                previousSummary: prevNarrativeSummary
+                previousSummary: prevNarrativeSummary,
+                retainCollageJPEG: retainCollageJPEG
             )
         }
     }
 
     /// Immediately closes and summarizes the in-progress Ghost Memory chapter for a camera (e.g., on camera stop or operator button).
     @discardableResult
-    public func forceCloseNarrativeChapter(cameraID: UUID, cameraName: String) async -> GhostNarrativeChapterRecord? {
+    public func forceCloseNarrativeChapter(
+        cameraID: UUID,
+        cameraName: String,
+        retainCollageJPEG: Bool = true
+    ) async -> GhostNarrativeChapterRecord? {
         let (flushed, prevSummary): ((frames: [GhostNarrativeSampledFrame], sightingCount: Int, identityCount: Int)?, String?) = lock.withLock {
             guard var state = narrativeStatesByCamera[cameraID],
                   let drained = state.forceClose() else {
@@ -855,7 +935,8 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             sampledFrames: flushed.frames,
             sightingCount: flushed.sightingCount,
             identityCount: flushed.identityCount,
-            previousSummary: prevSummary
+            previousSummary: prevSummary,
+            retainCollageJPEG: retainCollageJPEG
         )
     }
 
@@ -983,7 +1064,8 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
         sampledFrames: [GhostNarrativeSampledFrame],
         sightingCount: Int,
         identityCount: Int,
-        previousSummary: String?
+        previousSummary: String?,
+        retainCollageJPEG: Bool = true
     ) async -> GhostNarrativeChapterRecord? {
         guard let startedAt = sampledFrames.first?.capturedAt,
               let endedAt = sampledFrames.last?.capturedAt else { return nil }
@@ -1048,7 +1130,10 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             identityCount: identityCount,
             collagePath: nil
         )
-        try? trackingStore?.saveGhostNarrativeChapterRecord(record, collageJPEG: collage.jpegData)
+        try? trackingStore?.saveGhostNarrativeChapterRecord(
+            record,
+            collageJPEG: retainCollageJPEG ? collage.jpegData : nil
+        )
         return record
     }
 
@@ -1106,19 +1191,245 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
 
     // MARK: - Step E: Ghost Chat / Tactical Research Agent, Tool Registry, Focus Memory & Action Execution
 
+    public static let presentAnswerToolName = "present_answer"
+
+    /// Tool catalog exposed to the model; the model decides which ones to call.
+    public static let agentTools: [GhostAgentToolSpec] = {
+        let timeHint = "ISO-8601 timestamp with offset (e.g. 2026-05-01T14:00:00+03:00) or relative like -2h, -30m, -1d"
+        let cameraHint = "Camera name or camera UUID"
+        var tools: [GhostAgentToolSpec] = [
+            .object(
+                name: "get_timeline",
+                description: "Chronological merged timeline (ascending) of Ghost Memory narrative chapters, archived memory frames and critical alerts in a time window. Default window: last 24h.",
+                properties: [("since", "string", timeHint), ("until", "string", timeHint), ("camera", "string", cameraHint), ("limit", "integer", "Max entries (default 60)")]
+            ),
+            .object(
+                name: "list_narrative_chapters",
+                description: "Lists Ghost Memory narrative chapters (what happened on a camera during a period) in chronological order with titles and summaries.",
+                properties: [("camera", "string", cameraHint), ("since", "string", timeHint), ("until", "string", timeHint), ("limit", "integer", "Max chapters (default 12)"), ("pinned_only", "boolean", "Only operator pinned/marked chapters")]
+            ),
+            .object(
+                name: "get_narrative_chapter",
+                description: "Full narrative chapter: summary, atmosphere and timestamped events with actors. Optionally attaches the chapter frame collage image.",
+                properties: [("chapter_id", "string", "Chapter id from list_narrative_chapters/get_timeline"), ("include_collage", "boolean", "Attach the collage image (default true)")],
+                required: ["chapter_id"]
+            ),
+            .object(
+                name: "list_memory_frames",
+                description: "Lists archived full camera frames (chronological memory, kept up to 7 days) with capture time and detection summary.",
+                properties: [("camera", "string", cameraHint), ("since", "string", timeHint), ("until", "string", timeHint), ("limit", "integer", "Max frames (default 20)")]
+            ),
+            .object(
+                name: "view_memory_frame",
+                description: "Opens up to 4 archived memory frames as images so you can inspect them visually.",
+                properties: [("frame_id", "string", "Frame id, or several ids separated by commas")],
+                required: ["frame_id"]
+            ),
+            .object(
+                name: "live_look",
+                description: "Attaches the current live frames of the cameras (captured when the operator asked) plus recent narrative context for that camera.",
+                properties: [("camera", "string", "\(cameraHint); omit for all live cameras")]
+            ),
+            .object(
+                name: "search_identities_by_attributes",
+                description: "Searches the persistent identity knowledge layer by free text and/or attribute facets.",
+                properties: [
+                    ("query", "string", "Free-text description (any language)"),
+                    ("kind", "string", "person or vehicle"),
+                    ("upper_color", "string", "Upper clothing color"), ("lower_color", "string", "Lower clothing color"),
+                    ("vehicle_color", "string", "Vehicle color"), ("sex", "string", "male/female"),
+                    ("age_group", "string", "Age group"), ("headwear", "string", "Headwear"), ("bag", "string", "Bag type"),
+                    ("make", "string", "Vehicle make"), ("model", "string", "Vehicle model"), ("plate_number", "string", "License plate"),
+                    ("camera", "string", cameraHint), ("limit", "integer", "Max results (default 20)")
+                ]
+            ),
+            .object(
+                name: "get_identity_dossier",
+                description: "Dossier of one identity: facets, summary, alternatives.",
+                properties: [("identity_id", "string", "Identity code such as P-001 or V-004")],
+                required: ["identity_id"]
+            ),
+            .object(
+                name: "get_identity_route",
+                description: "Ordered cross-camera route of an identity with transit times and plausibility.",
+                properties: [("identity_id", "string", "Identity code")],
+                required: ["identity_id"]
+            ),
+            .object(
+                name: "who_was_present",
+                description: "Identities seen in a time window, optionally on one camera.",
+                properties: [("camera", "string", cameraHint), ("since", "string", timeHint), ("until", "string", timeHint), ("window_seconds", "integer", "Used when since is omitted (default 3600)"), ("kind", "string", "person or vehicle")]
+            ),
+            .object(
+                name: "list_visits",
+                description: "Visits (grouped sightings) of an identity and/or on a camera.",
+                properties: [("identity_id", "string", "Identity code"), ("camera", "string", cameraHint), ("limit", "integer", "Max visits (default 25)")]
+            ),
+            .object(
+                name: "find_companions",
+                description: "Identities repeatedly seen together with the given identity.",
+                properties: [("identity_id", "string", "Identity code")],
+                required: ["identity_id"]
+            ),
+            .object(
+                name: "get_camera_alert_history",
+                description: "Recent critical and persistent operational alerts (including SQLite Alert Mentor briefs and VLM alerts with operator review status).",
+                properties: [("camera", "string", cameraHint), ("since", "string", timeHint), ("until", "string", timeHint), ("limit", "integer", "Max alerts (default 20)")]
+            ),
+            .object(
+                name: "search_tracked_objects",
+                description: "Searches the 30-day archive of per-camera tracked objects, VLM descriptions, vehicle OCR texts, operator identity groups, and automatic camera scans. Optionally attaches up to 4 saved crop images.",
+                properties: [
+                    ("query", "string", "Free-text search over descriptions, labels, vehicle OCR, and automatic scans"),
+                    ("camera", "string", cameraHint),
+                    ("label", "string", "Object category or label: person, vehicle, car, truck, etc."),
+                    ("since", "string", timeHint),
+                    ("until", "string", timeHint),
+                    ("include_scans", "boolean", "Include automatic VLM camera scans (default true)"),
+                    ("attach_crops", "boolean", "Attach up to 4 saved crop images for matching tracks (default false)"),
+                    ("limit", "integer", "Max tracks (default 25)")
+                ]
+            ),
+            .object(
+                name: "get_operational_events",
+                description: "Returns persistent operational alerts (VLM alerts with operator review status and notes, Alert Mentor briefs), active standing watch rules, hardware ISAPI camera events, and scheduled camera missions / mission runs.",
+                properties: [
+                    ("camera", "string", cameraHint),
+                    ("since", "string", timeHint),
+                    ("until", "string", timeHint),
+                    ("kind", "string", "Filter by event kind: all | alerts | watch_rules | isapi | missions (default all)"),
+                    ("limit", "integer", "Max items per category (default 25)")
+                ]
+            ),
+            .object(
+                name: "run_readonly_sql",
+                description: "Read-only SELECT over the Ghost knowledge & tracking SQLite tables (`tracked_objects`, `operator_identity_groups`, `automatic_camera_scans`, `ghost_identity_dossiers`, `ghost_attribute_index`, `ghost_visits`, `ghost_narrative_chapters`, `ghost_alert_mentor_briefs`, `ghost_camera_links`, `ghost_vehicle_registry_cache`).",
+                properties: [("sql", "string", "A single SELECT statement")],
+                required: ["sql"]
+            )
+        ]
+        tools.append(
+            GhostAgentToolSpec(
+                name: presentAnswerToolName,
+                description: "Terminal tool: presents the final answer to the operator. Call exactly once when you are done.",
+                parametersSchemaJSON: """
+                {"type":"object","required":["answerMarkdown"],"properties":{\
+                "answerMarkdown":{"type":"string","description":"Final answer in Markdown"},\
+                "citedIdentityIDs":{"type":"array","items":{"type":"string"}},\
+                "citedCameraIDs":{"type":"array","items":{"type":"string"}},\
+                "confidence":{"type":"number","description":"0..1"},\
+                "followUpSuggestions":{"type":"array","items":{"type":"string"}},\
+                "proposedActions":{"type":"array","items":{"type":"object","required":["actionType","title"],"properties":{\
+                "actionType":{"type":"string","description":"merge_identities | split_identity | create_watch | rename_identity | bookmark_alert"},\
+                "title":{"type":"string"},\
+                "parameters":{"type":"object","additionalProperties":{"type":"string"}}}}}}}
+                """
+            )
+        )
+        return tools
+    }()
+
+    private static func agentISO(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.timeZone = .current
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.string(from: date)
+    }
+
+    /// Parses ISO-8601 (with/without offset or fractional seconds), local `yyyy-MM-dd HH:mm`, or relative `-2h` / `-30m` / `-1d`.
+    static func parseAgentTime(_ raw: String?, now: Date) -> Date? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }
+        if raw.lowercased() == "now" { return now }
+        let relative = raw.hasPrefix("-") ? String(raw.dropFirst()) : raw
+        if let unit = relative.last, "smhd".contains(unit), let value = Double(relative.dropLast()) {
+            let factor: Double = ["s": 1, "m": 60, "h": 3600, "d": 86_400][String(unit)] ?? 1
+            return now.addingTimeInterval(-value * factor)
+        }
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = iso.date(from: raw) { return date }
+        iso.formatOptions = [.withInternetDateTime]
+        if let date = iso.date(from: raw) { return date }
+        let local = DateFormatter()
+        local.locale = Locale(identifier: "en_US_POSIX")
+        local.timeZone = .current
+        for format in ["yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd'T'HH:mm", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm", "yyyy-MM-dd"] {
+            local.dateFormat = format
+            if let date = local.date(from: raw) { return date }
+        }
+        return nil
+    }
+
+    /// Resolves a camera argument given as UUID or (partial, case-insensitive) camera name.
+    static func resolveAgentCamera(_ raw: String?, cameraNames: [UUID: String]) -> (uuid: UUID?, raw: String?) {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty,
+              !["all", "any", "live", "active", "*"].contains(raw.lowercased()) else { return (nil, nil) }
+        if let uuid = UUID(uuidString: raw) { return (uuid, raw) }
+        let needle = raw.lowercased()
+        if let exact = cameraNames.first(where: { $0.value.lowercased() == needle }) { return (exact.key, raw) }
+        if let partial = cameraNames.sorted(by: { $0.value < $1.value }).first(where: { $0.value.lowercased().contains(needle) }) {
+            return (partial.key, raw)
+        }
+        return (nil, raw)
+    }
+
+    private func agentChapterSummary(_ record: GhostNarrativeChapterRecord) -> [String: Any] {
+        [
+            "chapter_id": record.chapterID,
+            "camera_id": record.cameraID.uuidString,
+            "camera_name": record.cameraName,
+            "started_at": Self.agentISO(record.startedAt),
+            "ended_at": Self.agentISO(record.endedAt),
+            "title": record.narrative.chapterTitle,
+            "summary": record.effectiveSummary,
+            "atmosphere": record.narrative.atmosphere,
+            "delta_from_previous": record.narrative.deltaFromPrevious ?? "",
+            "event_count": record.narrative.events.count,
+            "pinned": record.pinned,
+            "operator_marked": record.operatorMarked,
+            "has_collage": record.collagePath != nil
+        ]
+    }
+
+    private func loadAgentMemoryFrames(cameraID: UUID?, since: Date?, until: Date?, now: Date) throws -> [CameraMemoryFrame] {
+        guard let memoryFrameStore else { return [] }
+        return try memoryFrameStore.load(now: max(now, Date()))
+            .filter { frame in
+                (cameraID == nil || frame.cameraID == cameraID)
+                    && (since == nil || frame.capturedAt >= since!)
+                    && (until == nil || frame.capturedAt <= until!)
+            }
+            .sorted { $0.capturedAt < $1.capturedAt }
+    }
+
     /// Executes a read-only agent tool and records an audit entry in `ghost_chat_tool_calls`.
     public func executeAgentTool(
         toolName: String,
         arguments: [String: String] = [:],
         threadID: String = "default",
         liveCameraImages: [Data] = [],
+        liveFrames: [GhostLiveCameraFrame] = [],
+        cameraNames: [UUID: String] = [:],
         now: Date = Date()
-    ) async -> (outputJSON: String, resultRows: Int, savedClipID: String?) {
+    ) async -> (outputJSON: String, resultRows: Int, savedClipID: String?, attachedImages: [Data]) {
         let start = Date()
         var outputDict: [String: Any] = ["tool": toolName]
         var rowsCount = 0
         var savedClipID: String?
+        var attachedImages: [Data] = []
         var errorMsg: String?
+
+        let allLiveFrames = liveFrames + liveCameraImages.map { GhostLiveCameraFrame(cameraID: nil, cameraName: "live", jpegData: $0) }
+        let camera = Self.resolveAgentCamera(arguments["camera"] ?? arguments["camera_id"], cameraNames: cameraNames)
+        let knowledgeCameraID = camera.uuid?.uuidString ?? camera.raw
+        let since = Self.parseAgentTime(arguments["since"], now: now)
+        let until = Self.parseAgentTime(arguments["until"], now: now)
+        func intArg(_ key: String, _ fallback: Int, _ range: ClosedRange<Int>) -> Int {
+            min(range.upperBound, max(range.lowerBound, Int(arguments[key] ?? "") ?? fallback))
+        }
+        if camera.raw != nil, camera.uuid == nil, !cameraNames.isEmpty {
+            outputDict["camera_warning"] = "Camera '\(camera.raw ?? "")' not found. Known cameras: \(cameraNames.values.sorted().joined(separator: ", "))"
+        }
 
         do {
             switch toolName {
@@ -1131,8 +1442,8 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                     kind: arguments["kind"],
                     facets: facets,
                     freeTextQuery: arguments["query"],
-                    cameraID: arguments["camera_id"],
-                    limit: Int(arguments["limit"] ?? "20") ?? 20
+                    cameraID: knowledgeCameraID,
+                    limit: intArg("limit", 20, 1...100)
                 )) ?? []
                 rowsCount = matches.count
                 outputDict["matches"] = matches.map {
@@ -1173,21 +1484,24 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
 
             case "who_was_present":
                 let windowSec = Double(arguments["window_seconds"] ?? "3600") ?? 3600.0
-                let since = now.addingTimeInterval(-windowSec)
+                let windowEnd = until ?? now
+                let windowStart = since ?? windowEnd.addingTimeInterval(-windowSec)
                 let present = (try trackingStore?.whoWasPresent(
-                    cameraID: arguments["camera_id"],
-                    since: since,
-                    until: now,
+                    cameraID: knowledgeCameraID,
+                    since: windowStart,
+                    until: windowEnd,
                     kind: arguments["kind"]
                 )) ?? []
                 rowsCount = present.count
+                outputDict["since"] = Self.agentISO(windowStart)
+                outputDict["until"] = Self.agentISO(windowEnd)
                 outputDict["present"] = present.map { ["identity_id": $0.identityID, "summary": $0.summaryLine] }
 
             case "list_visits":
                 let visits = (try trackingStore?.listGhostVisits(
                     identityID: arguments["identity_id"],
-                    cameraID: arguments["camera_id"],
-                    limit: Int(arguments["limit"] ?? "25") ?? 25
+                    cameraID: knowledgeCameraID,
+                    limit: intArg("limit", 25, 1...200)
                 )) ?? []
                 rowsCount = visits.count
                 outputDict["visits"] = visits.map {
@@ -1212,52 +1526,529 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                     ]
                 }
 
-            case "get_channel_narrative":
-                let camUUID = arguments["camera_id"].flatMap(UUID.init(uuidString:))
-                let chaps = (try trackingStore?.loadGhostNarrativeChapterRecords(cameraID: camUUID, limit: 10)) ?? []
-                rowsCount = chaps.count
-                outputDict["chapters"] = chaps.map {
+            case "list_narrative_chapters", "get_channel_narrative":
+                let limit = intArg("limit", 12, 1...50)
+                let pinnedOnly = arguments["pinned_only"] == "true"
+                var chapters = (try trackingStore?.loadGhostNarrativeChapterRecords(
+                    cameraID: camera.uuid,
+                    since: since,
+                    until: until,
+                    limit: pinnedOnly ? 300 : limit
+                )) ?? []
+                if pinnedOnly { chapters = chapters.filter { $0.pinned || $0.operatorMarked } }
+                let chronological = Array(chapters.prefix(limit).reversed())
+                rowsCount = chronological.count
+                outputDict["order"] = "chronological_ascending"
+                outputDict["chapters"] = chronological.map(agentChapterSummary)
+
+            case "get_narrative_chapter":
+                let chapterID = arguments["chapter_id"] ?? ""
+                if let record = try trackingStore?.loadGhostNarrativeChapterRecord(chapterID: chapterID) {
+                    rowsCount = 1
+                    var dict = agentChapterSummary(record)
+                    dict["frame_count"] = record.frameCount
+                    dict["sighting_count"] = record.sightingCount
+                    dict["identity_count"] = record.identityCount
+                    dict["events"] = record.narrative.events.map { event -> [String: Any] in
+                        [
+                            "at": Self.agentISO(record.startedAt.addingTimeInterval(event.timestampOffsetSec)),
+                            "frame_badge": event.frameBadgeIndex,
+                            "headline": event.headline,
+                            "detail": event.detail,
+                            "actors": event.actors,
+                            "severity": event.severity
+                        ]
+                    }
+                    if arguments["include_collage"] != "false",
+                       let collage = trackingStore?.ghostNarrativeCollageData(for: record) {
+                        attachedImages.append(collage)
+                        dict["collage_attached"] = true
+                    }
+                    outputDict["chapter"] = dict
+                } else {
+                    outputDict["chapter"] = NSNull()
+                    outputDict["error"] = "chapter_not_found"
+                }
+
+            case "list_memory_frames":
+                if memoryFrameStore == nil {
+                    outputDict["note"] = "Memory frame archive is not available."
+                }
+                let frames = try loadAgentMemoryFrames(cameraID: camera.uuid, since: since, until: until, now: now)
+                let window = Array(frames.suffix(intArg("limit", 20, 1...60)))
+                rowsCount = window.count
+                outputDict["order"] = "chronological_ascending"
+                outputDict["total_in_window"] = frames.count
+                outputDict["frames"] = window.map {
                     [
-                        "chapter_id": $0.chapterID,
+                        "frame_id": $0.id.uuidString,
+                        "camera_id": $0.cameraID.uuidString,
                         "camera_name": $0.cameraName,
-                        "title": $0.narrative.chapterTitle,
-                        "summary": $0.effectiveSummary,
-                        "pinned": $0.pinned,
-                        "operator_marked": $0.operatorMarked
+                        "captured_at": Self.agentISO($0.capturedAt),
+                        "summary": $0.summary
                     ]
                 }
 
-            case "get_camera_alert_history":
-                let alerts: [[String: Any]] = lock.withLock {
-                    recentCriticalAlerts.prefix(20).map { item in
-                        [
-                            "camera_id": item.cameraID.uuidString,
-                            "camera_name": item.cameraName,
-                            "title": item.detection.title,
-                            "severity": item.detection.severity,
-                            "confirmed": item.mentorBrief?.confirmedThreat ?? true
-                        ]
+            case "view_memory_frame":
+                let rawIDs = [arguments["frame_id"], arguments["frame_ids"]].compactMap { $0 }.joined(separator: ",")
+                let ids = rawIDs
+                    .components(separatedBy: CharacterSet(charactersIn: ",; []\"\n"))
+                    .compactMap { UUID(uuidString: $0) }
+                let frames = (try memoryFrameStore?.load(now: max(now, Date()))) ?? []
+                var opened: [[String: Any]] = []
+                for id in ids.prefix(4) {
+                    guard let frame = frames.first(where: { $0.id == id }),
+                          let data = try? memoryFrameStore?.imageData(for: frame) else { continue }
+                    attachedImages.append(data)
+                    opened.append([
+                        "frame_id": frame.id.uuidString,
+                        "camera_name": frame.cameraName,
+                        "captured_at": Self.agentISO(frame.capturedAt),
+                        "summary": frame.summary,
+                        "image_index": attachedImages.count
+                    ])
+                }
+                rowsCount = opened.count
+                outputDict["opened"] = opened
+                if opened.isEmpty { outputDict["error"] = "frame_not_found" }
+
+            case "get_timeline":
+                let windowEnd = until ?? now
+                let windowStart = since ?? windowEnd.addingTimeInterval(-86_400)
+                var entries: [(Date, [String: Any])] = []
+                let chapters = (try trackingStore?.loadGhostNarrativeChapterRecords(
+                    cameraID: camera.uuid, since: windowStart, until: windowEnd, limit: 150
+                )) ?? []
+                for chapter in chapters {
+                    var dict = agentChapterSummary(chapter)
+                    dict["type"] = "narrative_chapter"
+                    dict["at"] = Self.agentISO(chapter.startedAt)
+                    entries.append((chapter.startedAt, dict))
+                }
+                for frame in try loadAgentMemoryFrames(cameraID: camera.uuid, since: windowStart, until: windowEnd, now: now) {
+                    entries.append((frame.capturedAt, [
+                        "type": "memory_frame",
+                        "at": Self.agentISO(frame.capturedAt),
+                        "frame_id": frame.id.uuidString,
+                        "camera_name": frame.cameraName,
+                        "summary": frame.summary
+                    ]))
+                }
+                var seenAlertKeys = Set<String>()
+                let alerts = lock.withLock { recentCriticalAlerts }
+                for alert in alerts where alert.triggeredAt >= windowStart && alert.triggeredAt <= windowEnd
+                    && (camera.uuid == nil || alert.cameraID == camera.uuid) {
+                    let key = "\(alert.cameraID.uuidString)|\(Int(alert.triggeredAt.timeIntervalSince1970))|\(alert.detection.title)"
+                    seenAlertKeys.insert(key)
+                    entries.append((alert.triggeredAt, [
+                        "type": "alert",
+                        "at": Self.agentISO(alert.triggeredAt),
+                        "camera_name": alert.cameraName,
+                        "title": alert.detection.title,
+                        "severity": alert.detection.severity,
+                        "confirmed": alert.mentorBrief?.confirmedThreat ?? true
+                    ]))
+                }
+                let persistedBriefs = (try? trackingStore?.loadGhostAlertMentorBriefs(
+                    cameraID: camera.uuid, since: windowStart, until: windowEnd, limit: 50
+                )) ?? []
+                for row in persistedBriefs {
+                    let camUUID = UUID(uuidString: row.cameraID)
+                    let camName = camUUID.flatMap { cameraNames[$0] } ?? row.cameraID
+                    let key = "\(row.cameraID)|\(Int(row.createdAt.timeIntervalSince1970))|\(row.brief.tacticalHeadline)"
+                    guard seenAlertKeys.insert(key).inserted else { continue }
+                    entries.append((row.createdAt, [
+                        "type": "alert_mentor_brief",
+                        "at": Self.agentISO(row.createdAt),
+                        "alert_id": row.alertID,
+                        "camera_id": row.cameraID,
+                        "camera_name": camName,
+                        "title": row.brief.tacticalHeadline,
+                        "precursor_summary": row.brief.precursorSummary,
+                        "confirmed": row.brief.confirmedThreat
+                    ]))
+                }
+                let op = currentOperationalMemorySnapshot()
+                do {
+                    for vlmAlert in op.vlmAlerts where vlmAlert.createdAt >= windowStart && vlmAlert.createdAt <= windowEnd
+                        && (camera.uuid == nil || vlmAlert.cameraID == camera.uuid) {
+                        let status = OperationsAlertQueue.status(
+                            for: vlmAlert.id, reviews: op.alertReviews, acknowledgements: op.alertAcknowledgements
+                        )
+                        let priority = op.alertReviews[vlmAlert.id]?.priority ?? vlmAlert.priority
+                        entries.append((vlmAlert.createdAt, [
+                            "type": "vlm_alert",
+                            "at": Self.agentISO(vlmAlert.createdAt),
+                            "alert_id": vlmAlert.id.uuidString,
+                            "camera_id": vlmAlert.cameraID.uuidString,
+                            "camera_name": vlmAlert.cameraName,
+                            "condition": vlmAlert.condition,
+                            "evidence": vlmAlert.evidence,
+                            "priority": priority.rawValue,
+                            "status": status.rawValue
+                        ]))
+                    }
+                    for isapi in op.isapiEvents {
+                        let eventDate = isapi.occurredAt ?? isapi.receivedAt
+                        guard eventDate >= windowStart && eventDate <= windowEnd
+                            && (camera.uuid == nil || isapi.cameraID == camera.uuid) else { continue }
+                        entries.append((eventDate, [
+                            "type": "isapi_event",
+                            "at": Self.agentISO(eventDate),
+                            "camera_id": isapi.cameraID.uuidString,
+                            "camera_name": isapi.cameraName,
+                            "event_type": isapi.eventType,
+                            "event_state": isapi.eventState ?? "",
+                            "description": isapi.eventDescription ?? ""
+                        ]))
+                    }
+                    for run in op.missionRuns where run.occurredAt >= windowStart && run.occurredAt <= windowEnd
+                        && (camera.uuid == nil || run.cameraID == camera.uuid) {
+                        entries.append((run.occurredAt, [
+                            "type": "mission_run",
+                            "at": Self.agentISO(run.occurredAt),
+                            "camera_id": run.cameraID.uuidString,
+                            "mission_name": run.missionName,
+                            "status": run.status.rawValue,
+                            "summary": run.summary
+                        ]))
                     }
                 }
+                entries.sort { $0.0 < $1.0 }
+                let window = entries.suffix(intArg("limit", 60, 1...150))
+                rowsCount = window.count
+                outputDict["since"] = Self.agentISO(windowStart)
+                outputDict["until"] = Self.agentISO(windowEnd)
+                outputDict["order"] = "chronological_ascending"
+                outputDict["total_in_window"] = entries.count
+                outputDict["entries"] = window.map(\.1)
+
+            case "get_camera_alert_history":
+                let limit = intArg("limit", 20, 1...50)
+                var mergedAlerts: [(Date, [String: Any])] = []
+                let ramAlerts = lock.withLock { recentCriticalAlerts }
+                for item in ramAlerts where (camera.uuid == nil || item.cameraID == camera.uuid)
+                    && (since == nil || item.triggeredAt >= since!)
+                    && (until == nil || item.triggeredAt <= until!) {
+                    mergedAlerts.append((item.triggeredAt, [
+                        "source": "critical_sentinel",
+                        "at": Self.agentISO(item.triggeredAt),
+                        "camera_id": item.cameraID.uuidString,
+                        "camera_name": item.cameraName,
+                        "title": item.detection.title,
+                        "severity": item.detection.severity,
+                        "confirmed": item.mentorBrief?.confirmedThreat ?? true
+                    ]))
+                }
+                let persistedBriefs = (try? trackingStore?.loadGhostAlertMentorBriefs(
+                    cameraID: camera.uuid, since: since, until: until, limit: limit
+                )) ?? []
+                for row in persistedBriefs {
+                    let camUUID = UUID(uuidString: row.cameraID)
+                    let camName = camUUID.flatMap { cameraNames[$0] } ?? row.cameraID
+                    mergedAlerts.append((row.createdAt, [
+                        "source": "alert_mentor_sqlite",
+                        "alert_id": row.alertID,
+                        "at": Self.agentISO(row.createdAt),
+                        "camera_id": row.cameraID,
+                        "camera_name": camName,
+                        "title": row.brief.tacticalHeadline,
+                        "precursor_summary": row.brief.precursorSummary,
+                        "recommended_action": row.brief.recommendedOperatorAction,
+                        "confirmed": row.brief.confirmedThreat
+                    ]))
+                }
+                let op = currentOperationalMemorySnapshot()
+                for vlmAlert in op.vlmAlerts where (camera.uuid == nil || vlmAlert.cameraID == camera.uuid)
+                    && (since == nil || vlmAlert.createdAt >= since!)
+                    && (until == nil || vlmAlert.createdAt <= until!) {
+                    let status = OperationsAlertQueue.status(
+                        for: vlmAlert.id, reviews: op.alertReviews, acknowledgements: op.alertAcknowledgements
+                    )
+                    let review = op.alertReviews[vlmAlert.id]
+                    mergedAlerts.append((vlmAlert.createdAt, [
+                        "source": "vlm_alert_store",
+                        "alert_id": vlmAlert.id.uuidString,
+                        "at": Self.agentISO(vlmAlert.createdAt),
+                        "camera_id": vlmAlert.cameraID.uuidString,
+                        "camera_name": vlmAlert.cameraName,
+                        "title": vlmAlert.condition,
+                        "evidence": vlmAlert.evidence,
+                        "severity": (review?.priority ?? vlmAlert.priority).rawValue,
+                        "status": status.rawValue,
+                        "operator_note": review?.note ?? "",
+                        "confirmed": status != .resolved
+                    ]))
+                }
+                mergedAlerts.sort { $0.0 > $1.0 }
+                let alerts = Array(mergedAlerts.prefix(limit).map(\.1))
                 rowsCount = alerts.count
                 outputDict["alerts"] = alerts
 
+            case "search_tracked_objects":
+                let limit = intArg("limit", 25, 1...100)
+                let includeScans = arguments["include_scans"] != "false"
+                let attachCrops = arguments["attach_crops"] == "true"
+                let queryRaw = arguments["query"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let labelFilter = arguments["label"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+                let queryTokens: [String] = {
+                    guard !queryRaw.isEmpty else { return [] }
+                    return queryRaw.lowercased()
+                        .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                        .filter { $0.count >= 2 }
+                }()
+                let expandedQueryTokens = queryRaw.isEmpty ? Set<String>() : GhostLexicon.expandQueryTerms(queryRaw)
+
+                let allTracks = (try trackingStore?.recentTracks(limit: 500)) ?? []
+                var matchedTrackDicts: [[String: Any]] = []
+                for record in allTracks {
+                    if let camUUID = camera.uuid, record.cameraID != camUUID { continue }
+                    if camera.uuid == nil, let camRaw = camera.raw?.lowercased(), !camRaw.isEmpty,
+                       !record.cameraName.lowercased().contains(camRaw) { continue }
+                    if let since, record.lastSeen < since { continue }
+                    if let until, record.firstSeen > until { continue }
+                    if !labelFilter.isEmpty {
+                        let recLabel = record.label.lowercased()
+                        let isVehicleLabel = ["bicycle", "car", "motorcycle", "bus", "train", "truck", "boat", "vehicle"].contains(recLabel)
+                        if labelFilter == "vehicle" {
+                            if !isVehicleLabel { continue }
+                        } else if !recLabel.contains(labelFilter) {
+                            continue
+                        }
+                    }
+
+                    let vehicleOCR = try? trackingStore?.vehicleTextEvidence(for: record.trackID)
+                    let ocrCandidates = vehicleOCR?.candidates.map(\.text) ?? []
+                    let attrSummary = record.description?.attributes.map { "\($0.key):\($0.value.value)" }.joined(separator: " ") ?? ""
+                    let searchable = [
+                        record.label,
+                        record.cameraName,
+                        record.description?.summary ?? "",
+                        attrSummary,
+                        ocrCandidates.joined(separator: " "),
+                        record.operatorGroupID?.uuidString ?? ""
+                    ].joined(separator: " ").lowercased()
+
+                    if !queryTokens.isEmpty {
+                        let matchedDirect = queryTokens.allSatisfy { tok in
+                            searchable.contains(tok)
+                                || (GhostColorNormalizer.normalizeColorToken(tok).map { searchable.contains($0) } ?? false)
+                        }
+                        let matchedExpanded = !expandedQueryTokens.isEmpty && expandedQueryTokens.contains { searchable.contains($0) }
+                        if !matchedDirect && !matchedExpanded { continue }
+                    }
+
+                    var item: [String: Any] = [
+                        "track_id": record.trackID.uuidString,
+                        "camera_id": record.cameraID.uuidString,
+                        "camera_name": record.cameraName,
+                        "label": record.label,
+                        "first_seen": Self.agentISO(record.firstSeen),
+                        "last_seen": Self.agentISO(record.lastSeen),
+                        "observation_count": record.observationCount,
+                        "best_confidence": record.bestConfidence,
+                        "has_crop": record.cropPath != nil
+                    ]
+                    if let groupID = record.operatorGroupID {
+                        item["operator_group_id"] = groupID.uuidString
+                    }
+                    if let desc = record.description {
+                        item["description_summary"] = desc.summary
+                        item["attributes"] = desc.attributes.mapValues { $0.value }
+                    }
+                    if !ocrCandidates.isEmpty {
+                        item["vehicle_ocr_candidates"] = ocrCandidates
+                    }
+                    if attachCrops, attachedImages.count < 4,
+                       let url = trackingStore?.imageURL(for: record),
+                       let data = try? Data(contentsOf: url), !data.isEmpty {
+                        attachedImages.append(data)
+                        item["image_index"] = attachedImages.count
+                    }
+                    matchedTrackDicts.append(item)
+                    if matchedTrackDicts.count >= limit { break }
+                }
+                outputDict["tracks"] = matchedTrackDicts
+
+                var scanDicts: [[String: Any]] = []
+                if includeScans {
+                    let scans = (try trackingStore?.automaticScans(limit: 100, now: max(now, Date()))) ?? []
+                    for scan in scans {
+                        if let camUUID = camera.uuid, scan.cameraID != camUUID { continue }
+                        if camera.uuid == nil, let camRaw = camera.raw?.lowercased(), !camRaw.isEmpty,
+                           !scan.cameraName.lowercased().contains(camRaw) { continue }
+                        if let since, scan.observedAt < since { continue }
+                        if let until, scan.observedAt > until { continue }
+                        if !queryTokens.isEmpty {
+                            let hay = (scan.cameraName + " " + scan.answer).lowercased()
+                            let matchedDirect = queryTokens.contains { hay.contains($0) }
+                            let matchedExpanded = expandedQueryTokens.contains { hay.contains($0) }
+                            if !matchedDirect && !matchedExpanded { continue }
+                        }
+                        scanDicts.append([
+                            "scan_id": scan.id.uuidString,
+                            "camera_id": scan.cameraID.uuidString,
+                            "camera_name": scan.cameraName,
+                            "observed_at": Self.agentISO(scan.observedAt),
+                            "answer": scan.answer
+                        ])
+                        if scanDicts.count >= limit { break }
+                    }
+                    outputDict["automatic_scans"] = scanDicts
+                }
+                rowsCount = matchedTrackDicts.count + scanDicts.count
+
+            case "get_operational_events":
+                let limit = intArg("limit", 25, 1...100)
+                let kindFilter = (arguments["kind"] ?? "all").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                let op = currentOperationalMemorySnapshot()
+                var totalRows = 0
+
+                if kindFilter == "all" || kindFilter == "alerts" {
+                    let filteredAlerts = op.vlmAlerts.filter { alert in
+                        (camera.uuid == nil || alert.cameraID == camera.uuid)
+                            && (since == nil || alert.createdAt >= since!)
+                            && (until == nil || alert.createdAt <= until!)
+                    }.prefix(limit)
+                    let alertDicts: [[String: Any]] = filteredAlerts.map { alert in
+                        let status = OperationsAlertQueue.status(
+                            for: alert.id, reviews: op.alertReviews, acknowledgements: op.alertAcknowledgements
+                        )
+                        let review = op.alertReviews[alert.id]
+                        return [
+                            "alert_id": alert.id.uuidString,
+                            "camera_id": alert.cameraID.uuidString,
+                            "camera_name": alert.cameraName,
+                            "created_at": Self.agentISO(alert.createdAt),
+                            "condition": alert.condition,
+                            "evidence": alert.evidence,
+                            "priority": (review?.priority ?? alert.priority).rawValue,
+                            "status": status.rawValue,
+                            "operator_note": review?.note ?? "",
+                            "has_clip": alert.clipID != nil
+                        ]
+                    }
+                    let mentorBriefs = (try? trackingStore?.loadGhostAlertMentorBriefs(
+                        cameraID: camera.uuid, since: since, until: until, limit: limit
+                    )) ?? []
+                    let mentorDicts: [[String: Any]] = mentorBriefs.map { row in
+                        [
+                            "alert_id": row.alertID,
+                            "camera_id": row.cameraID,
+                            "created_at": Self.agentISO(row.createdAt),
+                            "confirmed_threat": row.brief.confirmedThreat,
+                            "tactical_headline": row.brief.tacticalHeadline,
+                            "precursor_summary": row.brief.precursorSummary,
+                            "recommended_action": row.brief.recommendedOperatorAction
+                        ]
+                    }
+                    outputDict["vlm_alerts"] = alertDicts
+                    outputDict["mentor_briefs"] = mentorDicts
+                    totalRows += alertDicts.count + mentorDicts.count
+                }
+
+                if kindFilter == "all" || kindFilter == "watch_rules" {
+                    let rules = op.watchRules.filter { rule in
+                        guard let camUUID = camera.uuid else { return true }
+                        return rule.cameraIDs.isEmpty || rule.cameraIDs.contains(camUUID)
+                    }.prefix(limit)
+                    let ruleDicts: [[String: Any]] = rules.map { rule in
+                        [
+                            "watch_id": rule.id.uuidString,
+                            "text": rule.text,
+                            "terms": rule.terms,
+                            "created_at": Self.agentISO(rule.createdAt),
+                            "expires_at": rule.expiresAt.map(Self.agentISO) ?? "forever",
+                            "fired_track_count": rule.firedTrackIDs.count
+                        ]
+                    }
+                    outputDict["watch_rules"] = ruleDicts
+                    totalRows += ruleDicts.count
+                }
+
+                if kindFilter == "all" || kindFilter == "isapi" {
+                    let isapiFiltered = op.isapiEvents.filter { ev in
+                        let evDate = ev.occurredAt ?? ev.receivedAt
+                        return (camera.uuid == nil || ev.cameraID == camera.uuid)
+                            && (since == nil || evDate >= since!)
+                            && (until == nil || evDate <= until!)
+                    }.prefix(limit)
+                    let isapiDicts: [[String: Any]] = isapiFiltered.map { ev in
+                        [
+                            "event_id": ev.id.uuidString,
+                            "camera_id": ev.cameraID.uuidString,
+                            "camera_name": ev.cameraName,
+                            "event_type": ev.eventType,
+                            "event_state": ev.eventState ?? "",
+                            "description": ev.eventDescription ?? "",
+                            "occurred_at": Self.agentISO(ev.occurredAt ?? ev.receivedAt)
+                        ]
+                    }
+                    outputDict["isapi_events"] = isapiDicts
+                    totalRows += isapiDicts.count
+                }
+
+                if kindFilter == "all" || kindFilter == "missions" {
+                    let missionsFiltered = op.missions.filter { m in
+                        camera.uuid == nil || m.cameraID == camera.uuid
+                    }.prefix(limit)
+                    let missionDicts: [[String: Any]] = missionsFiltered.map { m in
+                        [
+                            "mission_id": m.id.uuidString,
+                            "camera_id": m.cameraID.uuidString,
+                            "name": m.name,
+                            "brief": m.brief,
+                            "enabled": m.enabled,
+                            "last_run_at": m.lastRunAt.map(Self.agentISO) ?? "",
+                            "last_result": m.lastResult ?? ""
+                        ]
+                    }
+                    let runsFiltered = op.missionRuns.filter { run in
+                        (camera.uuid == nil || run.cameraID == camera.uuid)
+                            && (since == nil || run.occurredAt >= since!)
+                            && (until == nil || run.occurredAt <= until!)
+                    }.suffix(limit)
+                    let runDicts: [[String: Any]] = runsFiltered.map { run in
+                        [
+                            "run_id": run.id.uuidString,
+                            "mission_id": run.missionID.uuidString,
+                            "camera_id": run.cameraID.uuidString,
+                            "mission_name": run.missionName,
+                            "status": run.status.rawValue,
+                            "occurred_at": Self.agentISO(run.occurredAt),
+                            "summary": run.summary
+                        ]
+                    }
+                    outputDict["missions"] = missionDicts
+                    outputDict["mission_runs"] = runDicts
+                    totalRows += missionDicts.count + runDicts.count
+                }
+                rowsCount = totalRows
+
             case "live_look":
-                let camID = arguments["camera_id"] ?? "active"
-                let camUUID = UUID(uuidString: camID)
-                let recentChapters = (try? trackingStore?.loadGhostNarrativeChapterRecords(cameraID: camUUID, limit: 3)) ?? []
+                let selected = allLiveFrames.filter { frame in
+                    guard camera.raw != nil else { return true }
+                    if let uuid = camera.uuid, frame.cameraID == uuid { return true }
+                    return frame.cameraName.lowercased().contains((camera.raw ?? "").lowercased())
+                }
+                let recentChapters = (try? trackingStore?.loadGhostNarrativeChapterRecords(cameraID: camera.uuid, limit: 3)) ?? []
                 let historyBlock = recentChapters.map { "[\($0.cameraName)] \($0.effectiveSummary)" }.joined(separator: " | ")
-                let visualHit = !liveCameraImages.isEmpty || (arguments["force_hit"] == "true")
+                let visualHit = !selected.isEmpty || (arguments["force_hit"] == "true")
                 let conf = visualHit ? 0.86 : 0.40
                 outputDict["_history_block"] = historyBlock.isEmpty ? "No recent narrative history on camera." : historyBlock
                 outputDict["visual_hit"] = visualHit
                 outputDict["confidence"] = conf
+                outputDict["captured_at"] = Self.agentISO(now)
+                outputDict["cameras"] = selected.prefix(4).enumerated().map { index, frame in
+                    ["image_index": index + 1, "camera_name": frame.cameraName, "camera_id": frame.cameraID?.uuidString ?? ""]
+                }
+                attachedImages.append(contentsOf: selected.prefix(4).map(\.jpegData))
                 rowsCount = 1
-                if visualHit && conf >= 0.55, let firstImg = liveCameraImages.first, let store = trackingStore {
+                if visualHit && conf >= 0.55, let firstFrame = selected.first, let store = trackingStore {
                     if let clip = try? store.saveGhostChatClip(
                         threadID: threadID,
-                        cameraID: camID,
-                        clipData: firstImg,
+                        cameraID: firstFrame.cameraID?.uuidString ?? (camera.raw ?? "live"),
+                        clipData: firstFrame.jpegData,
                         fileExtension: "jpg",
                         createdAt: now
                     ) {
@@ -1274,6 +2065,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
 
             default:
                 outputDict["status"] = "unknown_tool"
+                outputDict["available_tools"] = Self.agentTools.map(\.name)
             }
         } catch {
             errorMsg = error.localizedDescription
@@ -1297,14 +2089,21 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                 createdAt: now
             )
         )
-        return (outputJSON, rowsCount, savedClipID)
+        return (outputJSON, rowsCount, savedClipID, attachedImages)
     }
 
+    /// Tool-calling research agent: the model picks tools each step until it calls `present_answer`.
+    /// OpenAI turns are chained with the real Responses `id`; the terminal `present_answer` call is
+    /// recorded as owed `function_call_output` debt and settled at the start of the next turn.
     public func askGhostChatAgent(
         question: String,
         threadID: String = "default",
         focusedIdentityID: String? = nil,
         liveCameraImages: [Data] = [],
+        liveFrames: [GhostLiveCameraFrame] = [],
+        cameraNames: [UUID: String] = [:],
+        maxSteps: Int = 6,
+        onProgress: (@Sendable (String) -> Void)? = nil,
         now: Date = Date()
     ) async -> GhostChatPresentAnswer {
         let strippedQuestion = GhostOpSec.stripPersona(question)
@@ -1313,6 +2112,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             fallback: aiClient.configuration().preferredLanguage
         )
         let expandedTerms = GhostLexicon.expandQueryTerms(strippedQuestion)
+        let allLiveFrames = liveFrames + liveCameraImages.map { GhostLiveCameraFrame(cameraID: nil, cameraName: "live", jpegData: $0) }
 
         // 1. Ensure thread exists, record user message, and push explicit focus if supplied
         _ = try? trackingStore?.ensureGhostChatThread(
@@ -1338,117 +2138,189 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             )
         }
 
-        // 2. Consume any owed `function_call_output` debt from the previous turn's terminal `present_answer`
-        let chainDebt = (try? trackingStore?.consumeGhostThreadPendingOutputs(threadID: threadID)) ?? (nil, [])
+        // 2. Read (without consuming) the chain head and owed outputs; they are replaced only after a successful turn.
+        let storedThread = (try? trackingStore?.loadGhostChatThread(threadID: threadID)) ?? nil
+        var chainHead: String? = storedThread?.lastResponseID
+        let debtItems: [GhostAgentItem] = (storedThread?.pendingOutputs ?? []).map {
+            .functionOutput(callID: $0.callID, output: $0.outputJSON)
+        }
 
-        // 3. Load Active Entity Focus block (top 6 entities for pronoun resolution) & prior thread messages
+        // 3. Focus block, prior conversation (sent only when the server-side chain is unavailable)
         let focusBlock = (try? trackingStore?.loadGhostThreadFocusBlock(threadID: threadID, limit: 6)) ?? ""
-        let priorMessages = (try? trackingStore?.loadGhostChatMessages(threadID: threadID, limit: 12)) ?? []
-        let conversationTranscript = priorMessages.dropLast().suffix(8).map { msg in
-            "[\(msg.role.uppercased())]: \(msg.text)"
-        }.joined(separator: "\n")
-
-        // 4. Execute knowledge retrieval tools & optional live_look tool
-        let searchToolOut = await executeAgentTool(
-            toolName: "search_identities_by_attributes",
-            arguments: ["query": strippedQuestion, "limit": "15"],
-            threadID: threadID,
-            now: now
-        )
-        var liveLookClipID: String?
-        var liveLookContext = ""
-        if !liveCameraImages.isEmpty {
-            let liveOut = await executeAgentTool(
-                toolName: "live_look",
-                arguments: ["camera_id": "live"],
-                threadID: threadID,
-                liveCameraImages: liveCameraImages,
-                now: now
-            )
-            liveLookClipID = liveOut.savedClipID
-            liveLookContext = liveOut.outputJSON
+        let priorMessages = (try? trackingStore?.loadGhostChatMessages(threadID: threadID)) ?? []
+        let history: [GhostAgentItem] = priorMessages.dropLast().suffix(12).map { message in
+            message.role == "assistant" ? .assistantText(message.text) : .user(text: message.text, images: [])
         }
 
-        let galleries = identityResolver.allGalleries().sorted { $0.lastSeenAt > $1.lastSeenAt }
-        let facetsSnapshot: [String: GhostFacetSummary] = lock.withLock {
-            facetsByIdentityID
-        }
-
-        let matchingProfiles = galleries.prefix(20).map { g -> String in
-            let facet = facetsSnapshot[g.identityID]
-            let desc = facet?.summaryText ?? g.kind
-            let plate = g.plateNumber.map { " plate=\($0)" } ?? ""
-            let sex = g.resolvedSex != .unknown ? " sex=\(g.resolvedSex.rawValue)" : ""
-            let cams = Array(g.activeWindowsByCamera.keys).sorted().joined(separator: " -> ")
-            return "- \(g.displayCode) (id=\(g.identityID), kind=\(g.kind)\(sex)\(plate)): \(desc) | route: [\(cams)]"
+        let cameraDirectory = cameraNames.sorted { $0.value < $1.value }.map { id, name in
+            let live = allLiveFrames.contains { $0.cameraID == id } ? " [live frame available]" : ""
+            return "- \(name) (id=\(id.uuidString))\(live)"
         }.joined(separator: "\n")
+        let instructions = """
+        \(GhostPromptLibrary.ghostChatSystemPrompt(language: detectedLang))
 
-        let chapters = (try? trackingStore?.loadGhostNarrativeChapters(limit: 8)) ?? []
-        let narrativeContext = chapters.map { item in
-            "- [\(item.cameraName)] \(item.chapter.chapterTitle): \(item.chapter.summary)"
-        }.joined(separator: "\n")
-
-        let systemPrompt = GhostPromptLibrary.ghostChatSystemPrompt(language: detectedLang)
-        let fullPrompt = """
-        \(systemPrompt)
-
-        \(focusBlock.isEmpty ? "" : focusBlock + "\n")
-        \(conversationTranscript.isEmpty ? "" : "Prior Conversation Transcript:\n" + conversationTranscript + "\n")
-        Operator Question: "\(strippedQuestion)"
-        Expanded Multilingual Search Terms: \(Array(expandedTerms).sorted().prefix(16).joined(separator: ", "))
-
-        Knowledge Layer Search Output:
-        \(searchToolOut.outputJSON)
-
-        \(liveLookContext.isEmpty ? "" : "Live Look Past+Present Verification:\n" + liveLookContext + "\n")
-        Active Identity Dossiers & Cross-Camera Routes:
-        \(matchingProfiles.isEmpty ? "No active identities." : matchingProfiles)
-
-        Recent Ghost Memory Narrative Chapters:
-        \(narrativeContext.isEmpty ? "No narrative chapters yet." : narrativeContext)
-
-        Return strict JSON matching `GhostChatPresentAnswer`:
-        {
-          "answerMarkdown": "...",
-          "citedIdentityIDs": ["P-001"],
-          "citedCameraIDs": [],
-          "confidence": 0.92,
-          "followUpSuggestions": ["..."],
-          "proposedActions": []
-        }
+        Current local time: \(Self.agentISO(now)) (\(TimeZone.current.identifier)).
+        Cameras:
+        \(cameraDirectory.isEmpty ? "- (camera directory unavailable)" : cameraDirectory)
+        Live frames captured with this question: \(allLiveFrames.count) (use `live_look` to see them).
+        \(focusBlock.isEmpty ? "" : "\n" + focusBlock + "\n")
+        Expanded multilingual search terms for this question: \(Array(expandedTerms).sorted().prefix(16).joined(separator: ", "))
         """
 
         let focusEntries = (try? trackingStore?.loadGhostThreadFocusEntries(threadID: threadID, limit: 6)) ?? []
-        let response = await aiClient.generateStructured(
-            lane: .chat,
-            tier: .full,
-            taskType: "ghost_chat",
-            prompt: fullPrompt,
-            jpegImages: liveCameraImages,
-            previousResponseID: chainDebt.0,
-            owedOutputs: chainDebt.1,
-            useContentCache: false,
-            responseType: GhostChatPresentAnswer.self,
-            fallbackFactory: {
-                let topCode = focusEntries.first?.refID ?? galleries.first?.displayCode ?? "N/A"
-                let fallbackText: String
-                switch detectedLang {
-                case .ru:
-                    fallbackText = "Проанализировано досье (\(galleries.count) объектов). Фокус расследования: `\(topCode)`."
-                case .he:
-                    fallbackText = "נותחו תיקי זהות (\(galleries.count) אובייקטים). מוקד החקירה: `\(topCode)`."
-                case .en:
-                    fallbackText = "Analyzed \(galleries.count) identity dossiers. Investigation focus: `\(topCode)`."
-                }
-                return GhostChatPresentAnswer(
-                    answerMarkdown: fallbackText,
-                    citedIdentityIDs: topCode != "N/A" ? [topCode] : [],
-                    confidence: 0.85
+        let galleries = identityResolver.allGalleries().sorted { $0.lastSeenAt > $1.lastSeenAt }
+        let dossiers = (try? trackingStore?.loadAllGhostIdentityDossiers()) ?? []
+        let recentChapters = (try? trackingStore?.loadGhostNarrativeChapterRecords(limit: 5)) ?? []
+        let recentMemFrames = (try? loadAgentMemoryFrames(cameraID: nil, since: nil, until: nil, now: now)) ?? []
+        let recentTracks = (try? trackingStore?.recentTracks(limit: 10)) ?? []
+        let recentScans = (try? trackingStore?.automaticScans(limit: 5, now: max(now, Date()))) ?? []
+        let opSnapshot = currentOperationalMemorySnapshot()
+        let fallbackAnswer: () -> GhostChatPresentAnswer = {
+            let topCode = focusEntries.first?.refID ?? dossiers.first?.identityID ?? galleries.first?.displayCode ?? "N/A"
+            var citedIDs: [String] = []
+            if topCode != "N/A" { citedIDs.append(topCode) }
+            for d in dossiers.prefix(3) where !citedIDs.contains(d.identityID) {
+                citedIDs.append(d.identityID)
+            }
+            var citedCams: [String] = []
+            for ch in recentChapters.prefix(2) where !citedCams.contains(ch.cameraID.uuidString) {
+                citedCams.append(ch.cameraID.uuidString)
+            }
+            for fr in recentMemFrames.suffix(2) where !citedCams.contains(fr.cameraID.uuidString) {
+                citedCams.append(fr.cameraID.uuidString)
+            }
+            for tr in recentTracks.prefix(2) where !citedCams.contains(tr.cameraID.uuidString) {
+                citedCams.append(tr.cameraID.uuidString)
+            }
+
+            let totalDossiers = max(galleries.count, dossiers.count)
+            let chapterSnippet = recentChapters.first.map { " [\($0.cameraName): \($0.effectiveSummary)]" } ?? ""
+            let frameSnippet = recentMemFrames.last.map { " [Frame \($0.cameraName): \($0.summary)]" } ?? ""
+            let trackSnippet = recentTracks.first.flatMap { tr -> String? in
+                if let desc = tr.description?.summary { return " [Track \(tr.cameraName): \(desc)]" }
+                return " [Track \(tr.cameraName): \(tr.label)]"
+            } ?? ""
+            let opAlertsCount = opSnapshot.vlmAlerts.count + self.recentCriticalAlerts.count
+            let isapiCount = opSnapshot.isapiEvents.count
+            let missionRunsCount = opSnapshot.missionRuns.count
+
+            let fallbackText: String
+            switch detectedLang {
+            case .ru:
+                fallbackText = "Проанализировано досье (\(totalDossiers) объектов), хроника (\(recentChapters.count) глав, \(recentMemFrames.count) архивных кадров), треки (\(recentTracks.count) треков, \(recentScans.count) сканов) и оперативная память (тревог: \(opAlertsCount), ISAPI: \(isapiCount), миссий: \(missionRunsCount)). Фокус расследования: `\(topCode)`.\(chapterSnippet)\(frameSnippet)\(trackSnippet)"
+            case .he:
+                fallbackText = "נותחו תיקי זהות (\(totalDossiers) אובייקטים), כרוניקה (\(recentChapters.count) פרקים, \(recentMemFrames.count) פריימים), מעקבים (\(recentTracks.count)) והתראות (\(opAlertsCount)). מוקד החקירה: `\(topCode)`.\(chapterSnippet)\(frameSnippet)\(trackSnippet)"
+            case .en:
+                fallbackText = "Analyzed \(totalDossiers) identity dossiers, chronological memory (\(recentChapters.count) chapters, \(recentMemFrames.count) archived frames), track history (\(recentTracks.count) tracks, \(recentScans.count) scans), and operational events (alerts: \(opAlertsCount), ISAPI: \(isapiCount), mission runs: \(missionRunsCount)). Investigation focus: `\(topCode)`.\(chapterSnippet)\(frameSnippet)\(trackSnippet)"
+            }
+            return GhostChatPresentAnswer(
+                answerMarkdown: fallbackText,
+                citedIdentityIDs: citedIDs,
+                citedCameraIDs: citedCams,
+                confidence: 0.85
+            )
+        }
+
+        // 4. Agent loop
+        let isOffline = aiClient.configuration().mode == .dryRun
+        var turnItems: [GhostAgentItem] = [.user(text: strippedQuestion, images: [])]
+        var serverKnownCount = 0
+        var debtSettled = false
+        var pinnedBackend: GhostAgentBackend?
+        var modelAnswer: GhostChatPresentAnswer?
+        var finalCalls: [GhostAgentFunctionCall] = []
+        var finalResponseID: String?
+        var finalBackend: GhostAgentBackend?
+        var liveLookClipID: String?
+        let stepBudget = max(1, maxSteps)
+
+        stepLoop: for step in 0..<stepBudget {
+            let isLastStep = step == stepBudget - 1
+            func makeRequest(previous: String?) -> GhostAgentRequest {
+                GhostAgentRequest(
+                    tier: .full,
+                    instructions: instructions,
+                    fullInput: history + turnItems,
+                    chainedInput: (debtSettled ? [] : debtItems) + Array(turnItems[min(serverKnownCount, turnItems.count)...]),
+                    previousResponseID: previous,
+                    tools: Self.agentTools,
+                    toolChoice: isLastStep ? .function(Self.presentAnswerToolName) : .auto
                 )
             }
-        )
 
-        let sanitized = GhostOpSec.sanitizeAnswer(response)
+            let result: GhostAgentTurnResult
+            if isOffline {
+                result = offlineAgentStep(step: step, question: strippedQuestion, hasLiveFrames: !allLiveFrames.isEmpty, fallback: fallbackAnswer)
+            } else {
+                do {
+                    result = try await aiClient.runAgentStep(lane: .chat, request: makeRequest(previous: chainHead), pinnedBackend: pinnedBackend)
+                } catch GhostAgentError.chainRejected {
+                    chainHead = nil
+                    serverKnownCount = 0
+                    guard let retried = try? await aiClient.runAgentStep(lane: .chat, request: makeRequest(previous: nil), pinnedBackend: pinnedBackend) else {
+                        break stepLoop
+                    }
+                    result = retried
+                } catch {
+                    break stepLoop
+                }
+            }
+
+            pinnedBackend = result.backend
+            finalBackend = result.backend
+            if (result.backend == .openAI || result.backend == .offline), let responseID = result.responseID {
+                chainHead = responseID
+                debtSettled = true
+            } else {
+                chainHead = nil
+            }
+
+            if let text = result.text, !text.isEmpty, !result.functionCalls.isEmpty {
+                turnItems.append(.assistantText(text))
+            }
+            turnItems.append(contentsOf: result.functionCalls.map(GhostAgentItem.functionCall))
+            serverKnownCount = turnItems.count
+
+            if let terminal = result.functionCalls.first(where: { $0.name == Self.presentAnswerToolName }) {
+                modelAnswer = (try? JSONDecoder().decode(GhostChatPresentAnswer.self, from: Data(terminal.argumentsJSON.utf8)))
+                    ?? result.text.map { GhostChatPresentAnswer(answerMarkdown: $0, confidence: 0.6) }
+                    ?? fallbackAnswer()
+                finalCalls = result.functionCalls
+                finalResponseID = result.responseID
+                break stepLoop
+            }
+            if result.functionCalls.isEmpty {
+                if let text = result.text, !text.isEmpty {
+                    modelAnswer = GhostChatPresentAnswer(answerMarkdown: text, confidence: 0.7)
+                    finalResponseID = result.responseID
+                }
+                break stepLoop
+            }
+
+            var toolImages: [(String, [Data])] = []
+            for call in result.functionCalls {
+                onProgress?(call.name)
+                let output = await executeAgentTool(
+                    toolName: call.name,
+                    arguments: call.arguments,
+                    threadID: threadID,
+                    liveFrames: allLiveFrames,
+                    cameraNames: cameraNames,
+                    now: now
+                )
+                if let clip = output.savedClipID { liveLookClipID = clip }
+                let trimmedOutput = output.outputJSON.count > 12_000 ? String(output.outputJSON.prefix(12_000)) + "…" : output.outputJSON
+                turnItems.append(.functionOutput(callID: call.callID, output: trimmedOutput))
+                if !output.attachedImages.isEmpty { toolImages.append((call.name, output.attachedImages)) }
+            }
+            if !toolImages.isEmpty {
+                let images = Array(toolImages.flatMap(\.1).prefix(4))
+                let names = toolImages.map(\.0).joined(separator: ", ")
+                turnItems.append(.user(text: "Images returned by tools (\(names)), in image_index order. Inspect them before answering.", images: images))
+            }
+        }
+
+        let sanitized = GhostOpSec.sanitizeAnswer(modelAnswer ?? fallbackAnswer())
 
         // 5. Auto-update thread focus with cited identities and bind cited cameras
         for citedID in sanitized.citedIdentityIDs {
@@ -1482,9 +2354,8 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             )
         }
 
-        // 7. Persist assistant message and record `present_answer` call debt for next turn's `previous_response_id`
-        let callID = "call_present_\(UUID().uuidString.prefix(8))"
-        let newRespID = "resp_\(UUID().uuidString.prefix(12))"
+        // 7. Persist assistant message; chain only on a real Responses API id (or deterministic offline response id), owing outputs for every call in it.
+        let presentCall = finalCalls.first { $0.name == Self.presentAnswerToolName }
         _ = try? trackingStore?.appendGhostChatMessage(
             GhostChatMessageRecord(
                 threadID: threadID,
@@ -1492,20 +2363,53 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                 text: sanitized.answerMarkdown,
                 structuredAnswer: sanitized,
                 clipID: liveLookClipID,
-                callID: callID,
+                callID: presentCall?.callID,
                 createdAt: now
             )
         )
-        try? trackingStore?.setGhostThreadChainHead(
-            threadID: threadID,
-            lastResponseID: newRespID,
-            pendingOutputs: [
-                GhostPendingOutputDebt(callID: callID, outputJSON: "{\"status\":\"presented\"}")
-            ],
-            now: now
-        )
+        if modelAnswer != nil, (finalBackend == .openAI || finalBackend == .offline), let finalResponseID {
+            let debt = finalCalls.map { call in
+                GhostPendingOutputDebt(
+                    callID: call.callID,
+                    outputJSON: call.name == Self.presentAnswerToolName ? "{\"status\":\"presented\"}" : "{\"status\":\"skipped\"}"
+                )
+            }
+            try? trackingStore?.setGhostThreadChainHead(threadID: threadID, lastResponseID: finalResponseID, pendingOutputs: debt, now: now)
+        } else {
+            try? trackingStore?.setGhostThreadChainHead(threadID: threadID, lastResponseID: nil, pendingOutputs: [], now: now)
+        }
 
         return sanitized
+    }
+
+    /// Deterministic planner for dry-run mode: retrieve evidence across all memory layers, then present the offline answer.
+    private func offlineAgentStep(
+        step: Int,
+        question: String,
+        hasLiveFrames: Bool,
+        fallback: () -> GhostChatPresentAnswer
+    ) -> GhostAgentTurnResult {
+        func call(_ name: String, _ args: [String: Any]) -> GhostAgentFunctionCall {
+            let data = (try? JSONSerialization.data(withJSONObject: args)) ?? Data("{}".utf8)
+            return GhostAgentFunctionCall(callID: "call_offline_\(step)_\(name)", name: name, argumentsJSON: String(decoding: data, as: UTF8.self))
+        }
+        if step == 0 {
+            var calls = [
+                call("search_identities_by_attributes", ["query": question, "limit": 15]),
+                call("get_timeline", ["limit": 30]),
+                call("search_tracked_objects", ["query": question, "limit": 15]),
+                call("get_operational_events", ["limit": 15])
+            ]
+            if hasLiveFrames { calls.append(call("live_look", [:])) }
+            return GhostAgentTurnResult(responseID: "resp_offline_0", text: nil, functionCalls: calls, backend: .offline)
+        }
+        let answerJSON = (try? JSONEncoder().encode(fallback())).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+        return GhostAgentTurnResult(
+            responseID: "resp_offline_\(step)",
+            text: nil,
+            functionCalls: [GhostAgentFunctionCall(callID: "call_offline_present", name: Self.presentAnswerToolName, argumentsJSON: answerJSON)],
+            backend: .offline
+        )
     }
 
     /// Confirms or rejects a proposed `GhostChatActionRecord` and executes the mutation if confirmed.

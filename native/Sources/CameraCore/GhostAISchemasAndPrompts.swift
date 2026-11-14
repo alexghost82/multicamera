@@ -696,6 +696,37 @@ public struct GhostProposedAction: Codable, Sendable, Equatable, Identifiable {
         self.parameters = parameters
         self.requiresOperatorConfirmation = requiresOperatorConfirmation
     }
+
+    private enum LenientKeys: String, CodingKey {
+        case id, actionID, actionType, title, parameters, requiresOperatorConfirmation
+    }
+
+    /// Model-produced actions frequently omit optional fields or emit non-string parameter values.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: LenientKeys.self)
+        id = (try? c.decodeIfPresent(String.self, forKey: .id))
+            ?? (try? c.decodeIfPresent(String.self, forKey: .actionID))
+            ?? UUID().uuidString
+        actionType = (try? c.decodeIfPresent(String.self, forKey: .actionType)) ?? "note"
+        title = (try? c.decodeIfPresent(String.self, forKey: .title)) ?? actionType
+        if let strings = try? c.decodeIfPresent([String: String].self, forKey: .parameters) {
+            parameters = strings
+        } else if let numbers = try? c.decodeIfPresent([String: Double].self, forKey: .parameters) {
+            parameters = numbers.mapValues { String($0) }
+        } else {
+            parameters = [:]
+        }
+        requiresOperatorConfirmation = (try? c.decodeIfPresent(Bool.self, forKey: .requiresOperatorConfirmation)) ?? true
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: LenientKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(actionType, forKey: .actionType)
+        try c.encode(title, forKey: .title)
+        try c.encode(parameters, forKey: .parameters)
+        try c.encode(requiresOperatorConfirmation, forKey: .requiresOperatorConfirmation)
+    }
 }
 
 public struct GhostChatPresentAnswer: Codable, Sendable, Equatable {
@@ -720,6 +751,20 @@ public struct GhostChatPresentAnswer: Codable, Sendable, Equatable {
         self.confidence = confidence
         self.followUpSuggestions = followUpSuggestions
         self.proposedActions = proposedActions
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case answerMarkdown, citedIdentityIDs, citedCameraIDs, confidence, followUpSuggestions, proposedActions
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        answerMarkdown = try c.decode(String.self, forKey: .answerMarkdown)
+        citedIdentityIDs = (try? c.decodeIfPresent([String].self, forKey: .citedIdentityIDs)) ?? []
+        citedCameraIDs = (try? c.decodeIfPresent([String].self, forKey: .citedCameraIDs)) ?? []
+        confidence = (try? c.decodeIfPresent(Double.self, forKey: .confidence)) ?? 0.75
+        followUpSuggestions = (try? c.decodeIfPresent([String].self, forKey: .followUpSuggestions)) ?? []
+        proposedActions = (try? c.decodeIfPresent([GhostProposedAction].self, forKey: .proposedActions)) ?? []
     }
 }
 
@@ -997,8 +1042,27 @@ public enum GhostPromptLibrary {
     public static func ghostChatSystemPrompt(language: GhostPromptLanguage) -> String {
         """
         You are the GHOST ONWAY Tactical Investigation Agent.
-        You have access to cross-camera identity dossiers, routes, companion graphs, license plate registries, temporal narratives, and live camera lookback tools.
-        Never reveal underlying model names or vendor details. Cite specific identity codes (e.g., `P-001`, `V-004`) and camera names.
+        You have access to all saved memory layers: cross-camera identity dossiers, routes, companion graphs, license plate registries, temporal narratives, 7-day camera memory frames, 30-day per-camera tracked objects & OCR, operational alerts/ISAPI events/scheduled missions, and live camera lookback tools.
+        Never reveal underlying model names or vendor details. Cite specific identity codes (e.g., `P-001`, `V-004`), track IDs, and camera names.
+        Work as a tool-using agent: decide yourself which tools to call, in what order, and when you have enough evidence.
+        - Chronological memory: `get_timeline` gives a merged, time-ordered view (narrative chapters, stored memory frames, critical/VLM alerts, hardware ISAPI events, mission runs); `list_narrative_chapters` / `get_narrative_chapter` read Ghost Memory chapters with event timelines; `list_memory_frames` / `view_memory_frame` list and open archived camera frames (7-day archive) so you can look at what a camera actually showed at a given time.
+        - Tracked objects & scans (30-day archive): `search_tracked_objects` searches per-camera `tracked_objects`, VLM descriptions (`description_json`), vehicle OCR (`vehicle_text_json`), operator identity groups, and `automatic_camera_scans`, and can attach saved track crop images.
+        - Operational memory: `get_operational_events` and `get_camera_alert_history` read persistent VLM alerts (with operator review status/notes), active standing watch rules, hardware ISAPI events, scheduled missions & mission runs, and SQLite Alert Mentor briefs.
+        - Persistent identity knowledge: `search_identities_by_attributes`, `get_identity_dossier`, `get_identity_route`, `who_was_present`, `list_visits`, `find_companions`, and `run_readonly_sql`.
+        - SQLite schema for `run_readonly_sql`:
+          * `tracked_objects(track_id, camera_id, camera_name, label, first_seen, last_seen, observation_count, best_confidence, crop_path, cutout_path, description_json, described_at, vehicle_text_json, crop_quality, upper_color, lower_color, vehicle_color, resolved_sex, identity_state, identity_score, ghost_identity_id, is_best)`
+          * `operator_identity_groups(track_id, group_id, confirmed_at)`
+          * `automatic_camera_scans(scan_id, camera_id, camera_name, observed_at, answer)`
+          * `ghost_identity_dossiers(identity_id, display_name, kind, facets_json, alternatives_json, summary_line, text_blob, updated_at)`
+          * `ghost_attribute_index(track_id, identity_id, camera_id, captured_at, facet, value, confidence, crop_quality, source)`
+          * `ghost_visits(visit_id, identity_id, started_at, ended_at, camera_ids_json, track_ids_json, sighting_count, best_track_id)`
+          * `ghost_narrative_chapters(chapter_id, camera_id, camera_name, started_at, ended_at, chapter_json, ai_summary, operator_text, operator_marked, pinned, frame_count, sighting_count, identity_count, collage_path)`
+          * `ghost_alert_mentor_briefs(alert_id, camera_id, brief_json, created_at)`
+          * `ghost_camera_links(link_key, from_camera_id, to_camera_id, transition_count, mean_transit_sec, min_transit_sec, max_transit_sec, updated_at)`
+          * `ghost_vehicle_registry_cache(plate_number, record_json, fetched_at)`
+        - Live view: `live_look` attaches the current frames of the cameras.
+        Prefer narrow time windows (ISO-8601 `since`/`until`) and look at frames before describing visual details. Never invent sightings that no tool returned.
+        Finish every turn by calling `present_answer` exactly once with the final answer.
         \(languageDirective(language))
         """
     }

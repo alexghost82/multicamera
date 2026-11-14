@@ -199,6 +199,128 @@ final class FallDetectorTests: XCTestCase {
         XCTAssertEqual(update.tracks.first?.state, .standing)
     }
 
+    func testPersonAlreadyLyingAtTrackStartDoesNotRaiseFalseFallEvent() {
+        var detector = FallDetector()
+        var time = 0.0
+        var events: [FallEvent] = []
+        var lastSnapshot: FallTrackSnapshot?
+        for _ in 0..<25 {
+            let update = detector.update([lying()], frameWidth: frame, frameHeight: frame, timestamp: time)
+            events += update.events
+            lastSnapshot = update.tracks.first
+            time += 0.1
+        }
+        XCTAssertTrue(events.isEmpty, "A person already lying on a couch/bed when first seen must not trigger an acute fall alert")
+        XCTAssertEqual(lastSnapshot?.behaviorState, .lying)
+        XCTAssertEqual(lastSnapshot?.phase, .normal)
+    }
+
+    func testWaistBendWithVisibleStandingLegsDoesNotRaiseFall() {
+        var detector = FallDetector()
+        var time = 0.0
+        for _ in 0..<8 {
+            _ = detector.update([standing()], frameWidth: frame, frameHeight: frame, timestamp: time)
+            time += 0.1
+        }
+        // Person bends torso horizontally while standing on upright legs (hips high above ankles, vertical box)
+        var bendKeypoints = keypoints(centerX: 0.5, centerY: 0.45, horizontal: true)
+        bendKeypoints[FallPoseObservation.leftHip] = FallKeypoint(x: 0.52, y: 0.46, confidence: 0.92)
+        bendKeypoints[FallPoseObservation.rightHip] = FallKeypoint(x: 0.54, y: 0.46, confidence: 0.92)
+        bendKeypoints[FallPoseObservation.leftKnee] = FallKeypoint(x: 0.52, y: 0.55, confidence: 0.92)
+        bendKeypoints[FallPoseObservation.rightKnee] = FallKeypoint(x: 0.54, y: 0.55, confidence: 0.92)
+        bendKeypoints[FallPoseObservation.leftAnkle] = FallKeypoint(x: 0.52, y: 0.64, confidence: 0.92)
+        bendKeypoints[FallPoseObservation.rightAnkle] = FallKeypoint(x: 0.54, y: 0.64, confidence: 0.92)
+        let bendingPose = FallPoseObservation(
+            confidence: 0.92,
+            box: FallBoundingBox(x: 0.44, y: 0.40, width: 0.12, height: 0.25),
+            keypoints: bendKeypoints
+        )
+
+        var events: [FallEvent] = []
+        var lastSnapshot: FallTrackSnapshot?
+        for _ in 0..<20 {
+            let update = detector.update([bendingPose], frameWidth: frame, frameHeight: frame, timestamp: time)
+            events += update.events
+            lastSnapshot = update.tracks.first
+            time += 0.1
+        }
+        XCTAssertTrue(events.isEmpty, "Waist bend with visible standing legs must be classified as Bending, not a fall")
+        XCTAssertEqual(lastSnapshot?.behaviorState, .bending)
+    }
+
+    func testControlledSitThenSlowLieDownDoesNotRaiseFall() {
+        var detector = FallDetector()
+        var time = 0.0
+        for _ in 0..<8 {
+            _ = detector.update([standing()], frameWidth: frame, frameHeight: frame, timestamp: time)
+            time += 0.1
+        }
+        // Sit calmly for 2.0 seconds (>= controlledSitBeforeLieSeconds)
+        let sitting = person(centerX: 500, centerY: 550, width: 70, height: 130, horizontalTorso: false)
+        for _ in 0..<20 {
+            let update = detector.update([sitting], frameWidth: frame, frameHeight: frame, timestamp: time)
+            XCTAssertTrue(update.events.isEmpty)
+            time += 0.1
+        }
+        // Slowly recline horizontally at the same sofa height without rapid drop or height collapse
+        let reclining = person(centerX: 500, centerY: 555, width: 160, height: 120, horizontalTorso: true)
+        var events: [FallEvent] = []
+        var lastSnapshot: FallTrackSnapshot?
+        for _ in 0..<15 {
+            let update = detector.update([reclining], frameWidth: frame, frameHeight: frame, timestamp: time)
+            events += update.events
+            lastSnapshot = update.tracks.first
+            time += 0.2
+        }
+        XCTAssertTrue(events.isEmpty, "Controlled slow reclining after sitting must be classified as Lying, not a fall")
+        XCTAssertEqual(lastSnapshot?.behaviorState, .lying)
+    }
+
+    func testFallPhasesAndPersonDownEscalation() {
+        var config = FallDetectorConfiguration()
+        config.personDownSeconds = 3.0
+        var detector = FallDetector(configuration: config)
+        var time = 0.0
+        for _ in 0..<6 {
+            _ = detector.update([standing()], frameWidth: frame, frameHeight: frame, timestamp: time)
+            time += 0.1
+        }
+
+        var observedPhases: [FallIncidentPhase] = []
+        var events: [FallEvent] = []
+        for _ in 0..<45 {
+            let update = detector.update([lying()], frameWidth: frame, frameHeight: frame, timestamp: time)
+            if let phase = update.tracks.first?.phase {
+                observedPhases.append(phase)
+            }
+            events += update.events
+            time += 0.1
+        }
+
+        XCTAssertTrue(observedPhases.contains(.possibleFall))
+        XCTAssertTrue(observedPhases.contains(.fallInProgress))
+        XCTAssertTrue(observedPhases.contains(.fallConfirmed))
+        XCTAssertTrue(observedPhases.contains(.personDown))
+        XCTAssertEqual(events.count, 2)
+        XCTAssertEqual(events.first?.phase, .fallConfirmed)
+        XCTAssertEqual(events.last?.phase, .personDown)
+    }
+
+    func testPartialOcclusionAtFrameBorderMarksUndetermined() {
+        var detector = FallDetector()
+        // Truncated box at bottom border with low-confidence keypoints (no valid torso angle, no baseline)
+        let lowKeypoints = Array(repeating: FallKeypoint(x: 0.5, y: 0.95, confidence: 0.1), count: 17)
+        let occluded = FallPoseObservation(
+            confidence: 0.85,
+            box: FallBoundingBox(x: 0.35, y: 0.90, width: 0.25, height: 0.095),
+            keypoints: lowKeypoints
+        )
+        let update = detector.update([occluded], frameWidth: frame, frameHeight: frame, timestamp: 1.0)
+        XCTAssertTrue(update.events.isEmpty)
+        XCTAssertEqual(update.tracks.first?.phase, .undetermined)
+        XCTAssertEqual(update.tracks.first?.metrics.isPartiallyOccluded, true)
+    }
+
     // MARK: - Fixtures (pixel geometry on a 1000x1000 frame)
 
     private func standing(centerX: Double = 500, confidence: Double = 0.9) -> FallPoseObservation {

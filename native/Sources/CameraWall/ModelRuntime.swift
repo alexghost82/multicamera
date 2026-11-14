@@ -2,13 +2,14 @@ import Foundation
 import Combine
 
 enum LocalModelService: String, CaseIterable, Identifiable, Sendable {
-    case yolo, segmentation, personReID, vehicleReID, qwen
+    case yolo, pose, segmentation, personReID, vehicleReID, qwen
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .yolo: return "YOLO26n"
+        case .pose: return "YOLO26s-Pose"
         case .segmentation: return "Segmentation"
         case .personReID: return "Person ReID"
         case .vehicleReID: return "Vehicle ReID"

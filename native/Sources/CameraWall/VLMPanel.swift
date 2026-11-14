@@ -20,6 +20,7 @@ struct VLMPanel: View {
     @State private var questionBeforeVoice = ""
     @State private var historyQuestion = ""
     @State private var historyError = ""
+    @State private var useUnifiedGhostAgent = true
     @State private var saveError = ""
     @State private var descriptionJobs: [CameraFeatureJob] = []
     @StateObject private var voiceInput = LocalVoiceInput()
@@ -161,42 +162,152 @@ struct VLMPanel: View {
     }
 
     private var historyTab: some View {
-        AnalysisHistoryPage(status: languageSettings.localizedMessage(model.trackResearchStatus), busy: model.trackResearchBusy,
-            persistHistory: Binding(
-                get: { model.featurePreferences.enabledFeatures.contains(.historyResearch) },
-                set: { enabled in
-                    do { try model.setFeatureEnabled(.historyResearch, enabled: enabled); historyError = "" }
-                    catch { historyError = error.localizedDescription }
-                }
-            ), allowActions: Binding(
-                get: { model.featurePreferences.enabledFeatures.contains(.operatorActions) },
-                set: { enabled in
-                    do { try model.setFeatureEnabled(.operatorActions, enabled: enabled); historyError = "" }
-                    catch { historyError = error.localizedDescription }
-                }
-            ), expandTerms: Binding(
-                get: { model.featurePreferences.enabledFeatures.contains(.knowledgeSearch) },
-                set: { enabled in
-                    do { try model.setFeatureEnabled(.knowledgeSearch, enabled: enabled); historyError = "" }
-                    catch { historyError = error.localizedDescription }
-                }
-            ), question: $historyQuestion,
-            sendDisabled: model.trackResearchBusy || historyQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-            errorMessage: languageSettings.localizedMessage(historyError),
-            lastMessageID: model.trackResearchMessages.last?.id,
-            clear: model.clearTrackResearchHistory, submit: submitHistoryQuestion) {
-            if model.trackResearchMessages.isEmpty {
-                AnalysisPanelEmptyState(title: "Ask about local track history", icon: "text.magnifyingglass",
-                    detail: "Answers use saved tracks and automatic camera scans.")
-                    .frame(maxWidth: .infinity, minHeight: 180)
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("Research Mode", selection: $useUnifiedGhostAgent) {
+                Text("Unified Multi-Memory Agent").tag(true)
+                Text("Local Track Research").tag(false)
             }
-            ForEach(model.trackResearchMessages) { message in historyMessageRow(message) }
-            if model.featurePreferences.enabledFeatures.contains(.operatorActions) {
-                ForEach(model.operatorActions) { action in operatorActionRow(action) }
+            .pickerStyle(.segmented)
+
+            if useUnifiedGhostAgent {
+                ghostAgentHistoryView
+            } else {
+                AnalysisHistoryPage(status: languageSettings.localizedMessage(model.trackResearchStatus), busy: model.trackResearchBusy,
+                    persistHistory: Binding(
+                        get: { model.featurePreferences.enabledFeatures.contains(.historyResearch) },
+                        set: { enabled in
+                            do { try model.setFeatureEnabled(.historyResearch, enabled: enabled); historyError = "" }
+                            catch { historyError = error.localizedDescription }
+                        }
+                    ), allowActions: Binding(
+                        get: { model.featurePreferences.enabledFeatures.contains(.operatorActions) },
+                        set: { enabled in
+                            do { try model.setFeatureEnabled(.operatorActions, enabled: enabled); historyError = "" }
+                            catch { historyError = error.localizedDescription }
+                        }
+                    ), expandTerms: Binding(
+                        get: { model.featurePreferences.enabledFeatures.contains(.knowledgeSearch) },
+                        set: { enabled in
+                            do { try model.setFeatureEnabled(.knowledgeSearch, enabled: enabled); historyError = "" }
+                            catch { historyError = error.localizedDescription }
+                        }
+                    ), question: $historyQuestion,
+                    sendDisabled: model.trackResearchBusy || historyQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                    errorMessage: languageSettings.localizedMessage(historyError),
+                    lastMessageID: model.trackResearchMessages.last?.id,
+                    clear: model.clearTrackResearchHistory, submit: submitHistoryQuestion) {
+                    if model.trackResearchMessages.isEmpty {
+                        AnalysisPanelEmptyState(title: "Ask about local track history", icon: "text.magnifyingglass",
+                            detail: "Answers use saved tracks and automatic camera scans.")
+                            .frame(maxWidth: .infinity, minHeight: 180)
+                    }
+                    ForEach(model.trackResearchMessages) { message in historyMessageRow(message) }
+                    if model.featurePreferences.enabledFeatures.contains(.operatorActions) {
+                        ForEach(model.operatorActions) { action in operatorActionRow(action) }
+                    }
+                }
             }
         }
         .padding(.top, 8)
         .onAppear { model.reloadOperatorActions() }
+    }
+
+    private var ghostAgentHistoryView: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label(languageSettings.localizedMessage(model.ghostAgentStatus), systemImage: model.ghostAgentBusy ? "hourglass" : "brain.head.profile")
+                    .font(.caption)
+                    .lineLimit(1)
+                Spacer()
+                if !model.ghostChatThreads.isEmpty {
+                    Menu {
+                        ForEach(model.ghostChatThreads, id: \.threadID) { thread in
+                            Button(thread.title.isEmpty ? thread.threadID : thread.title) {
+                                model.selectGhostChatThread(thread.threadID)
+                            }
+                        }
+                    } label: {
+                        Label(model.activeGhostThreadID, systemImage: "bubble.left.and.bubble.right")
+                            .font(.caption)
+                    }
+                }
+            }
+
+            if !model.ghostThreadFocusEntries.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(model.ghostThreadFocusEntries, id: \.refID) { focus in
+                            Text("\(focus.kind): \(focus.refID)")
+                                .font(.caption2)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .background(Color.accentColor.opacity(0.14), in: Capsule())
+                        }
+                    }
+                }
+            }
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    if model.ghostChatMessages.isEmpty {
+                        AnalysisPanelEmptyState(
+                            title: "Ask the Unified Multi-Memory Agent",
+                            icon: "brain.head.profile",
+                            detail: "Searches chronological memory frames, narrative chapters, identity dossiers, tracked objects, vehicle OCR, and operational alerts."
+                        )
+                        .frame(maxWidth: .infinity, minHeight: 180)
+                    }
+                    ForEach(model.ghostChatMessages, id: \.messageID) { msg in
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack {
+                                Text(msg.role == "user" ? "Operator" : "Ghost Agent")
+                                    .font(.caption.weight(.semibold))
+                                Spacer()
+                                Text(msg.createdAt.formatted(date: .abbreviated, time: .shortened, locale: languageSettings.locale))
+                                    .font(.caption2).foregroundStyle(.tertiary)
+                            }
+                            Text(msg.text)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .padding(10)
+                        .background(msg.role == "user" ? Color.secondary.opacity(0.08) : Color.accentColor.opacity(0.08),
+                                    in: RoundedRectangle(cornerRadius: 6))
+                    }
+                    ForEach(model.ghostChatActions, id: \.actionID) { action in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label(action.title.isEmpty ? "Proposed Action: \(action.actionType)" : action.title, systemImage: "bolt.shield")
+                                .font(.caption.weight(.semibold))
+                            Text(action.actionType)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                            HStack {
+                                Button {
+                                    model.reviewGhostChatAction(action.actionID, confirmed: true)
+                                } label: {
+                                    Label("Confirm", systemImage: "checkmark")
+                                }
+                                Button(role: .destructive) {
+                                    model.reviewGhostChatAction(action.actionID, confirmed: false)
+                                } label: {
+                                    Label("Reject", systemImage: "xmark")
+                                }
+                            }
+                        }
+                        .padding(8)
+                        .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            AnalysisQuestionComposer(
+                question: $historyQuestion,
+                sendDisabled: model.ghostAgentBusy || historyQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                submit: submitHistoryQuestion
+            )
+        }
     }
 
     private func operatorActionRow(_ action: CameraOperatorAction) -> some View {
@@ -277,9 +388,15 @@ struct VLMPanel: View {
     }
 
     private func submitHistoryQuestion() {
-        guard !model.trackResearchBusy,
-              !historyQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        if model.askTrackResearch(question: historyQuestion) { historyQuestion = "" }
+        let trimmed = historyQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if useUnifiedGhostAgent {
+            guard !model.ghostAgentBusy else { return }
+            if model.askGhostAgent(question: trimmed) { historyQuestion = "" }
+        } else {
+            guard !model.trackResearchBusy else { return }
+            if model.askTrackResearch(question: historyQuestion) { historyQuestion = "" }
+        }
     }
 
     private var scheduleTab: some View {

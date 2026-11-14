@@ -76,15 +76,59 @@ final class YOLO26PoseDetector: @unchecked Sendable {
     static let inputSize = 640
     static let keypointCount = 17
 
-    private let modelURL: URL
+    let modelURL: URL
     private let queue = DispatchQueue(label: "CameraWall.YOLO26Pose", qos: .utility)
     private let lock = NSLock()
     private let imageContext = CIContext(options: [.cacheIntermediates: false])
     private var busy = false
     private var model: VNCoreMLModel?
 
+    static var defaultModelURL: URL? {
+        let modelNames = ["yolo26s-pose.mlmodelc", "yolo26s-pose.mlpackage"]
+        let workingDirectory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        let sourceRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let homeCache = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cache/camerawall/models", isDirectory: true)
+
+        var candidates: [URL] = []
+        if let override = ProcessInfo.processInfo.environment["CAMERAWALL_POSE_MODEL"], !override.isEmpty {
+            candidates.append(URL(fileURLWithPath: override, isDirectory: true))
+        }
+        for name in modelNames {
+            if let resources = Bundle.main.resourceURL {
+                candidates.append(resources.appendingPathComponent(name, isDirectory: true))
+            }
+            candidates.append(contentsOf: [
+                Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/\(name)", isDirectory: true),
+                sourceRoot.appendingPathComponent(".build/models/\(name)", isDirectory: true),
+                workingDirectory.appendingPathComponent(".build/models/\(name)", isDirectory: true),
+                workingDirectory.appendingPathComponent("native/.build/models/\(name)", isDirectory: true),
+                homeCache.appendingPathComponent(name, isDirectory: true)
+            ])
+        }
+
+        return candidates.first { url in
+            if url.pathExtension == "mlmodelc" {
+                return FileManager.default.fileExists(atPath: url.appendingPathComponent("coremldata.bin").path)
+            } else if url.pathExtension == "mlpackage" {
+                return FileManager.default.fileExists(
+                    atPath: url.appendingPathComponent("Data/com.apple.CoreML/weights/weight.bin").path
+                )
+            }
+            return FileManager.default.fileExists(atPath: url.path)
+        }
+    }
+
     init(modelURL: URL) {
         self.modelURL = modelURL
+    }
+
+    convenience init?() {
+        guard let url = Self.defaultModelURL else { return nil }
+        self.init(modelURL: url)
     }
 
     func prepare() async throws {
@@ -200,9 +244,15 @@ final class YOLO26PoseDetector: @unchecked Sendable {
         let canvas = source.transformed(by: offset).composited(over: background).cropped(to: target)
         var output: CVPixelBuffer?
         let attributes = [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary
-        guard CVPixelBufferCreate(kCFAllocatorDefault, Self.inputSize, Self.inputSize,
-                                  kCVPixelFormatType_32BGRA, attributes, &output) == kCVReturnSuccess,
-              let output else { throw YOLO26PoseDetectorError.invalidFrame }
+        let status = CVPixelBufferCreate(kCFAllocatorDefault, Self.inputSize, Self.inputSize,
+                                         kCVPixelFormatType_32BGRA, attributes, &output)
+        if status != kCVReturnSuccess || output == nil {
+            guard CVPixelBufferCreate(kCFAllocatorDefault, Self.inputSize, Self.inputSize,
+                                      kCVPixelFormatType_32BGRA, nil, &output) == kCVReturnSuccess else {
+                throw YOLO26PoseDetectorError.invalidFrame
+            }
+        }
+        guard let output else { throw YOLO26PoseDetectorError.invalidFrame }
         imageContext.render(canvas, to: output, bounds: target, colorSpace: CGColorSpaceCreateDeviceRGB())
         return (output, transform)
     }

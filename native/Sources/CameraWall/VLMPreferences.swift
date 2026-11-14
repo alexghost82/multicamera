@@ -17,12 +17,12 @@ struct VLMPreferences: Codable, Equatable {
     var analyzeAllEnabledCameras = true
     var scheduledCameraIDs: Set<UUID> = []
     var alertRules: [VLMAlertRule] = []
-    var ghostBackendMode: GhostAIBackendMode = .hybridAuto
-    var ghostVLLMBaseURL: String = "http://10.0.0.57:8000/v1"
+    var ghostBackendMode: GhostAIBackendMode = .mlxInProcess
+    var ghostVLLMBaseURL: String = "http://127.0.0.1:8000/v1"
     var ghostVLLMModelName: String = "Qwen/Qwen2.5-VL-7B-Instruct"
     var ghostOpenAIBaseURL: String = "https://api.openai.com/v1/responses"
     var ghostPreferredLanguage: GhostPromptLanguage = .ru
-    var ghostSpokenBriefingEnabled: Bool = true
+    var ghostSpokenBriefingEnabled: Bool = false
 
     func validate() throws {
         guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -47,12 +47,12 @@ struct VLMPreferences: Codable, Equatable {
         analyzeAllEnabledCameras = try c.decodeIfPresent(Bool.self, forKey: .analyzeAllEnabledCameras) ?? true
         scheduledCameraIDs = try c.decodeIfPresent(Set<UUID>.self, forKey: .scheduledCameraIDs) ?? []
         alertRules = try c.decodeIfPresent([VLMAlertRule].self, forKey: .alertRules) ?? []
-        ghostBackendMode = try c.decodeIfPresent(GhostAIBackendMode.self, forKey: .ghostBackendMode) ?? .hybridAuto
-        ghostVLLMBaseURL = try c.decodeIfPresent(String.self, forKey: .ghostVLLMBaseURL) ?? "http://10.0.0.57:8000/v1"
+        ghostBackendMode = try c.decodeIfPresent(GhostAIBackendMode.self, forKey: .ghostBackendMode) ?? .mlxInProcess
+        ghostVLLMBaseURL = try c.decodeIfPresent(String.self, forKey: .ghostVLLMBaseURL) ?? "http://127.0.0.1:8000/v1"
         ghostVLLMModelName = try c.decodeIfPresent(String.self, forKey: .ghostVLLMModelName) ?? "Qwen/Qwen2.5-VL-7B-Instruct"
         ghostOpenAIBaseURL = try c.decodeIfPresent(String.self, forKey: .ghostOpenAIBaseURL) ?? "https://api.openai.com/v1/responses"
         ghostPreferredLanguage = try c.decodeIfPresent(GhostPromptLanguage.self, forKey: .ghostPreferredLanguage) ?? .ru
-        ghostSpokenBriefingEnabled = try c.decodeIfPresent(Bool.self, forKey: .ghostSpokenBriefingEnabled) ?? true
+        ghostSpokenBriefingEnabled = try c.decodeIfPresent(Bool.self, forKey: .ghostSpokenBriefingEnabled) ?? false
     }
 }
 

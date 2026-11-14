@@ -870,30 +870,42 @@ public final class LocalTrackingStore: @unchecked Sendable {
             throw LocalTrackingStoreError.invalidDescription
         }
         lock.lock()
-        defer { lock.unlock() }
-        let statement = try prepare("UPDATE tracked_objects SET description_json = ?, described_at = ? WHERE track_id = ?")
-        defer { sqlite3_finalize(statement) }
-        bind(json, at: 1, to: statement)
-        sqlite3_bind_double(statement, 2, time.timeIntervalSince1970)
-        bind(trackID.uuidString, at: 3, to: statement)
-        guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseError() }
-        guard sqlite3_changes(database) > 0 else { throw LocalTrackingStoreError.missingTrack(trackID) }
+        do {
+            let statement = try prepare("UPDATE tracked_objects SET description_json = ?, described_at = ? WHERE track_id = ?")
+            defer { sqlite3_finalize(statement) }
+            bind(json, at: 1, to: statement)
+            sqlite3_bind_double(statement, 2, time.timeIntervalSince1970)
+            bind(trackID.uuidString, at: 3, to: statement)
+            guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseError() }
+            guard sqlite3_changes(database) > 0 else { throw LocalTrackingStoreError.missingTrack(trackID) }
+        } catch {
+            lock.unlock()
+            throw error
+        }
+        lock.unlock()
+        try? syncLocalTrackToGhostKnowledge(trackID: trackID, now: time)
     }
 
     public func saveVehicleTextEvidence(_ evidence: VehicleTextEvidence) throws {
         guard evidence.isValid else { throw LocalTrackingStoreError.invalidVehicleTextEvidence }
         let data = try JSONEncoder().encode(evidence)
         lock.lock()
-        defer { lock.unlock() }
-        guard try category(for: evidence.trackID) == "vehicle" else {
-            throw LocalTrackingStoreError.invalidVehicleTextEvidence
+        do {
+            guard try category(for: evidence.trackID) == "vehicle" else {
+                throw LocalTrackingStoreError.invalidVehicleTextEvidence
+            }
+            let statement = try prepare("UPDATE tracked_objects SET vehicle_text_json=? WHERE track_id=?")
+            defer { sqlite3_finalize(statement) }
+            bind(String(decoding: data, as: UTF8.self), at: 1, to: statement)
+            bind(evidence.trackID.uuidString, at: 2, to: statement)
+            guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseError() }
+            guard sqlite3_changes(database) == 1 else { throw LocalTrackingStoreError.missingTrack(evidence.trackID) }
+        } catch {
+            lock.unlock()
+            throw error
         }
-        let statement = try prepare("UPDATE tracked_objects SET vehicle_text_json=? WHERE track_id=?")
-        defer { sqlite3_finalize(statement) }
-        bind(String(decoding: data, as: UTF8.self), at: 1, to: statement)
-        bind(evidence.trackID.uuidString, at: 2, to: statement)
-        guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseError() }
-        guard sqlite3_changes(database) == 1 else { throw LocalTrackingStoreError.missingTrack(evidence.trackID) }
+        lock.unlock()
+        try? syncLocalTrackToGhostKnowledge(trackID: evidence.trackID, now: evidence.readAt)
     }
 
     public func vehicleTextEvidence(for trackID: UUID) throws -> VehicleTextEvidence? {
@@ -1836,7 +1848,8 @@ public final class LocalTrackingStore: @unchecked Sendable {
             )
             let name = "narrative_\(record.chapterID.lowercased()).jpg"
             let url = cropDirectory.appendingPathComponent(name)
-            try? collageJPEG.write(to: url, options: [.atomic])
+            try collageJPEG.write(to: url, options: [.atomic])
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
             savedCollagePath = name
         }
 
@@ -1915,7 +1928,20 @@ public final class LocalTrackingStore: @unchecked Sendable {
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
     }
 
+    public func loadGhostNarrativeChapterRecord(chapterID: String) throws -> GhostNarrativeChapterRecord? {
+        try loadGhostNarrativeChapterRecords(chapterID: chapterID, limit: 1).first
+    }
+
+    /// Reads the JPEG collage persisted next to a narrative chapter, if any.
+    public func ghostNarrativeCollageData(for record: GhostNarrativeChapterRecord) -> Data? {
+        guard let name = record.collagePath,
+              URL(fileURLWithPath: name).lastPathComponent == name,
+              name.hasSuffix(".jpg") else { return nil }
+        return try? Data(contentsOf: cropDirectory.appendingPathComponent(name))
+    }
+
     public func loadGhostNarrativeChapterRecords(
+        chapterID: String? = nil,
         cameraID: UUID? = nil,
         since: Date? = nil,
         until: Date? = nil,
@@ -1924,6 +1950,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         var clauses: [String] = []
+        if chapterID != nil { clauses.append("chapter_id = ?") }
         if cameraID != nil { clauses.append("camera_id = ?") }
         if since != nil { clauses.append("ended_at >= ?") }
         if until != nil { clauses.append("started_at <= ?") }
@@ -1940,6 +1967,10 @@ public final class LocalTrackingStore: @unchecked Sendable {
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         var bindIdx: Int32 = 1
+        if let chapterID {
+            bind(chapterID, at: bindIdx, to: stmt)
+            bindIdx += 1
+        }
         if let cameraID {
             bind(cameraID.uuidString, at: bindIdx, to: stmt)
             bindIdx += 1
@@ -2626,11 +2657,15 @@ public final class LocalTrackingStore: @unchecked Sendable {
     }
 
     public func executeReadOnlyGhostSQL(_ rawSQL: String, maxLimit: Int = 200) throws -> [[String: String]] {
-        let safeSQL = try GhostReadOnlySQLGuard.validateAndCap(rawSQL, maxLimit: maxLimit)
+        let safeMaxLimit = max(1, min(maxLimit, 1000))
+        let safeSQL = try GhostReadOnlySQLGuard.validateAndCap(rawSQL, maxLimit: safeMaxLimit)
         lock.lock()
         defer { lock.unlock() }
         let stmt = try prepare(safeSQL)
         defer { sqlite3_finalize(stmt) }
+        guard sqlite3_stmt_readonly(stmt) != 0 else {
+            throw NSError(domain: "GhostReadOnlySQLGuard", code: 5, userInfo: [NSLocalizedDescriptionKey: "SQLite statement is not read-only"])
+        }
         let colCount = sqlite3_column_count(stmt)
         var rows: [[String: String]] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
@@ -2640,7 +2675,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
                 row[colName] = sqlite3_column_type(stmt, c) == SQLITE_NULL ? "null" : text(stmt, c)
             }
             rows.append(row)
-            if rows.count >= maxLimit { break }
+            if rows.count >= safeMaxLimit { break }
         }
         return rows
     }
@@ -3211,6 +3246,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         let fileName = "chatclip_\(clipID.lowercased()).\(fileExtension)"
         let fileURL = cropDirectory.appendingPathComponent(fileName)
         try clipData.write(to: fileURL, options: [.atomic])
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
 
         let record = GhostChatClipRecord(
             clipID: clipID,
@@ -3473,5 +3509,276 @@ public final class LocalTrackingStore: @unchecked Sendable {
         guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
         guard let data = text(statement, 0).data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(GhostAlertMentorBrief.self, from: data)
+    }
+
+    public func loadGhostAlertMentorBriefs(
+        cameraID: UUID? = nil,
+        since: Date? = nil,
+        until: Date? = nil,
+        limit: Int = 50
+    ) throws -> [(alertID: String, cameraID: String, brief: GhostAlertMentorBrief, createdAt: Date)] {
+        lock.lock()
+        defer { lock.unlock() }
+        var clauses: [String] = []
+        if cameraID != nil { clauses.append("camera_id = ?") }
+        if since != nil { clauses.append("created_at >= ?") }
+        if until != nil { clauses.append("created_at <= ?") }
+        let whereSQL = clauses.isEmpty ? "" : "WHERE " + clauses.joined(separator: " AND ")
+        let statement = try prepare("""
+            SELECT alert_id, camera_id, brief_json, created_at
+            FROM ghost_alert_mentor_briefs
+            \(whereSQL)
+            ORDER BY created_at DESC
+            LIMIT ?
+            """)
+        defer { sqlite3_finalize(statement) }
+        var idx: Int32 = 1
+        if let cameraID {
+            bind(cameraID.uuidString, at: idx, to: statement)
+            idx += 1
+        }
+        if let since {
+            sqlite3_bind_double(statement, idx, since.timeIntervalSince1970)
+            idx += 1
+        }
+        if let until {
+            sqlite3_bind_double(statement, idx, until.timeIntervalSince1970)
+            idx += 1
+        }
+        sqlite3_bind_int(statement, idx, Int32(max(1, min(500, limit))))
+        var rows: [(alertID: String, cameraID: String, brief: GhostAlertMentorBrief, createdAt: Date)] = []
+        let decoder = JSONDecoder()
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let aid = text(statement, 0)
+            let cid = text(statement, 1)
+            let json = text(statement, 2)
+            let cAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 3))
+            if let data = json.data(using: .utf8),
+               let brief = try? decoder.decode(GhostAlertMentorBrief.self, from: data) {
+                rows.append((alertID: aid, cameraID: cid, brief: brief, createdAt: cAt))
+            }
+        }
+        return rows
+    }
+
+    /// Synchronizes a track's local VLM `description_json` and OCR `vehicle_text_json` into the Ghost knowledge tables
+    /// (`ghost_attribute_index`, `ghost_crop_fts`, `ghost_identity_dossiers`, `ghost_visits`) so that all saved track
+    /// descriptions and vehicle texts are immediately searchable by the Ghost agent tools.
+    public func syncLocalTrackToGhostKnowledge(trackID: UUID, now: Date = Date()) throws {
+        let trackIDStr = trackID.uuidString
+        var cameraIDStr = ""
+        var labelStr = "person"
+        var lastSeenDate = now
+        var cropQuality = 0.75
+        var description: TrackedObjectDescription?
+        var vehicleEvidence: VehicleTextEvidence?
+        var resolvedIdentityID = ""
+
+        lock.lock()
+        do {
+            let stmt = try prepare("""
+                SELECT t.camera_id, t.label, t.last_seen, COALESCE(t.crop_quality, t.best_confidence, 0.75),
+                       t.description_json, t.vehicle_text_json, t.ghost_identity_id, g.group_id
+                FROM tracked_objects t
+                LEFT JOIN operator_identity_groups g ON g.track_id = t.track_id
+                WHERE t.track_id = ?
+                LIMIT 1
+                """)
+            defer { sqlite3_finalize(stmt) }
+            bind(trackIDStr, at: 1, to: stmt)
+            guard sqlite3_step(stmt) == SQLITE_ROW else {
+                lock.unlock()
+                return
+            }
+            cameraIDStr = text(stmt, 0)
+            labelStr = text(stmt, 1)
+            lastSeenDate = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 2))
+            cropQuality = sqlite3_column_double(stmt, 3)
+            if sqlite3_column_type(stmt, 4) != SQLITE_NULL {
+                description = TrackedObjectDescription.parse(text(stmt, 4))
+            }
+            if sqlite3_column_type(stmt, 5) != SQLITE_NULL {
+                let vJSON = text(stmt, 5)
+                vehicleEvidence = try? JSONDecoder().decode(VehicleTextEvidence.self, from: Data(vJSON.utf8))
+            }
+            let ghostID = sqlite3_column_type(stmt, 6) == SQLITE_NULL ? "" : text(stmt, 6)
+            let groupID = sqlite3_column_type(stmt, 7) == SQLITE_NULL ? "" : text(stmt, 7)
+            if !ghostID.isEmpty {
+                resolvedIdentityID = ghostID
+            } else if !groupID.isEmpty {
+                resolvedIdentityID = groupID
+            } else {
+                resolvedIdentityID = trackIDStr
+            }
+
+            if ghostID.isEmpty {
+                let upd = try prepare("UPDATE tracked_objects SET ghost_identity_id = ? WHERE track_id = ?")
+                defer { sqlite3_finalize(upd) }
+                bind(resolvedIdentityID, at: 1, to: upd)
+                bind(trackIDStr, at: 2, to: upd)
+                _ = sqlite3_step(upd)
+            }
+        } catch {
+            lock.unlock()
+            throw error
+        }
+        lock.unlock()
+
+        let kind = (Self.category(labelStr) == "vehicle") ? "vehicle" : "person"
+        var entries: [GhostAttributeIndexEntry] = [
+            GhostAttributeIndexEntry(
+                trackID: trackIDStr,
+                identityID: resolvedIdentityID,
+                cameraID: cameraIDStr,
+                capturedAt: lastSeenDate,
+                facet: "kind",
+                value: kind,
+                confidence: 0.90,
+                cropQuality: cropQuality,
+                source: "local_track"
+            )
+        ]
+
+        func appendFacet(_ facet: String, _ rawValue: String?, confidence: Double) {
+            guard let cleaned = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+                  !cleaned.isEmpty, cleaned != "none", cleaned != "null", cleaned != "unknown" else { return }
+            entries.append(
+                GhostAttributeIndexEntry(
+                    trackID: trackIDStr,
+                    identityID: resolvedIdentityID,
+                    cameraID: cameraIDStr,
+                    capturedAt: lastSeenDate,
+                    facet: facet,
+                    value: cleaned,
+                    confidence: max(0.35, min(1.0, confidence)),
+                    cropQuality: cropQuality,
+                    source: "local_track"
+                )
+            )
+        }
+
+        if let description {
+            for (rawKey, attr) in description.attributes {
+                let key = rawKey.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                let val = attr.value
+                switch key {
+                case "upper_color", "top_color", "shirt_color", "jacket_color":
+                    let norm = GhostColorNormalizer.normalizeColorToken(val) ?? val
+                    appendFacet("upper_color", norm, confidence: attr.confidence)
+                    appendFacet("color", norm, confidence: attr.confidence * 0.9)
+                case "lower_color", "bottom_color", "pants_color":
+                    let norm = GhostColorNormalizer.normalizeColorToken(val) ?? val
+                    appendFacet("lower_color", norm, confidence: attr.confidence)
+                    appendFacet("color", norm, confidence: attr.confidence * 0.85)
+                case "vehicle_color", "car_color", "primary_color":
+                    let norm = GhostColorNormalizer.normalizeColorToken(val) ?? val
+                    appendFacet("vehicle_color", norm, confidence: attr.confidence)
+                    appendFacet("color", norm, confidence: attr.confidence)
+                case "color":
+                    let norm = GhostColorNormalizer.normalizeColorToken(val) ?? val
+                    appendFacet(kind == "vehicle" ? "vehicle_color" : "upper_color", norm, confidence: attr.confidence)
+                    appendFacet("color", norm, confidence: attr.confidence)
+                case "gender", "sex", "apparent_sex":
+                    appendFacet("sex", val, confidence: attr.confidence)
+                case "age", "age_group":
+                    appendFacet("age_group", val, confidence: attr.confidence)
+                case "clothing", "upper_clothing", "upper_wear", "top":
+                    appendFacet("upper_wear", val, confidence: attr.confidence)
+                    if let norm = GhostColorNormalizer.normalizeColorToken(val), norm != val.lowercased() {
+                        appendFacet("upper_color", norm, confidence: attr.confidence * 0.85)
+                        appendFacet("color", norm, confidence: attr.confidence * 0.8)
+                    }
+                case "lower_clothing", "lower_wear", "bottom", "pants":
+                    appendFacet("lower_wear", val, confidence: attr.confidence)
+                case "bag", "bags", "carried_item", "accessory", "accessories":
+                    appendFacet("bag", val, confidence: attr.confidence)
+                case "hat", "headwear":
+                    appendFacet("headwear", val, confidence: attr.confidence)
+                case "make", "brand":
+                    appendFacet("make", val, confidence: attr.confidence)
+                case "model":
+                    appendFacet("model", val, confidence: attr.confidence)
+                case "vehicle_type", "body_type", "type":
+                    appendFacet(kind == "vehicle" ? "vehicle_category" : key, val, confidence: attr.confidence)
+                case "plate", "plate_number", "license_plate":
+                    appendFacet("plate_number", GhostVehicleRegistryRecord.normalizeIsraeliPlate(val) ?? val, confidence: attr.confidence)
+                default:
+                    appendFacet(key, val, confidence: attr.confidence)
+                }
+            }
+        }
+
+        if let vehicleEvidence {
+            for candidate in vehicleEvidence.candidates.prefix(5) {
+                let conf = Double(candidate.confidence)
+                appendFacet("vehicle_text", candidate.text, confidence: conf)
+                if let normPlate = GhostVehicleRegistryRecord.normalizeIsraeliPlate(candidate.text) {
+                    appendFacet("plate_number", normPlate, confidence: conf)
+                } else if candidate.text.count >= 5, candidate.text.count <= 10 {
+                    appendFacet("plate_number", candidate.text, confidence: conf * 0.9)
+                }
+            }
+        }
+
+        var summaryPieces: [String] = []
+        if let descSummary = description?.summary, !descSummary.isEmpty {
+            summaryPieces.append(descSummary)
+        }
+        if let vehicleEvidence, !vehicleEvidence.candidates.isEmpty {
+            let ocrLine = vehicleEvidence.candidates.prefix(5).map(\.text).joined(separator: " ")
+            summaryPieces.append("OCR: \(ocrLine)")
+        }
+        let combinedSummary = summaryPieces.joined(separator: " | ")
+
+        lock.lock()
+        do {
+            let del = try prepare("DELETE FROM ghost_attribute_index WHERE track_id = ? AND source = 'local_track'")
+            defer { sqlite3_finalize(del) }
+            bind(trackIDStr, at: 1, to: del)
+            _ = sqlite3_step(del)
+
+            let ins = try prepare("""
+                INSERT INTO ghost_attribute_index(
+                    track_id, identity_id, camera_id, captured_at, facet, value, confidence, crop_quality, source
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)
+            defer { sqlite3_finalize(ins) }
+            for entry in entries {
+                sqlite3_reset(ins)
+                sqlite3_clear_bindings(ins)
+                bind(entry.trackID, at: 1, to: ins)
+                bind(entry.identityID, at: 2, to: ins)
+                bind(entry.cameraID, at: 3, to: ins)
+                sqlite3_bind_double(ins, 4, entry.capturedAt.timeIntervalSince1970)
+                bind(entry.facet, at: 5, to: ins)
+                bind(entry.value, at: 6, to: ins)
+                sqlite3_bind_double(ins, 7, entry.confidence)
+                sqlite3_bind_double(ins, 8, entry.cropQuality)
+                bind(entry.source, at: 9, to: ins)
+                _ = sqlite3_step(ins)
+            }
+
+            if !combinedSummary.isEmpty {
+                if let delCropFTS = try? prepare("DELETE FROM ghost_crop_fts WHERE track_id = ?") {
+                    defer { sqlite3_finalize(delCropFTS) }
+                    bind(trackIDStr, at: 1, to: delCropFTS)
+                    _ = sqlite3_step(delCropFTS)
+                }
+                if let insCropFTS = try? prepare("INSERT INTO ghost_crop_fts(track_id, identity_id, description_text) VALUES(?, ?, ?)") {
+                    defer { sqlite3_finalize(insCropFTS) }
+                    bind(trackIDStr, at: 1, to: insCropFTS)
+                    bind(resolvedIdentityID, at: 2, to: insCropFTS)
+                    bind(combinedSummary, at: 3, to: insCropFTS)
+                    _ = sqlite3_step(insCropFTS)
+                }
+            }
+        } catch {
+            lock.unlock()
+            throw error
+        }
+        lock.unlock()
+
+        _ = try rebuildGhostIdentityDossier(identityID: resolvedIdentityID, kind: kind, now: lastSeenDate)
+        _ = try rebuildGhostVisits(identityID: resolvedIdentityID)
     }
 }

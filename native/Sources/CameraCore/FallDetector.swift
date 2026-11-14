@@ -1,10 +1,11 @@
 import Foundation
 
-/// Pose-based fall detection (see human-fall-detection-guide.md, sections 2 and 4).
+/// Pose-based fall detection and kinematic posture state machine.
 ///
 /// The detector is a per-camera value type: feed it every pose inference result for one camera
-/// in monotonic time order. It keeps lightweight person tracks, runs a debounced state machine per
-/// track and emits a single `FallEvent` when a track is confirmed `FALLEN`.
+/// in monotonic time order. It keeps person tracks, evaluates velocity/angle/height transitions
+/// against an upright/seated baseline, distinguishes falls from controlled movements (sitting,
+/// bending, crouching, lying down), and emits `FallEvent` transitions (`FALL_CONFIRMED`, `PERSON_DOWN`, `RECOVERED`).
 public enum FallPersonState: String, Codable, Sendable, CaseIterable {
     case standing = "STANDING"
     case walking = "WALKING"
@@ -16,7 +17,7 @@ public enum FallPersonState: String, Codable, Sendable, CaseIterable {
     public var isFallPhase: Bool { self == .falling || self == .fallen }
 }
 
-public struct FallKeypoint: Equatable, Sendable {
+public struct FallKeypoint: Codable, Equatable, Sendable {
     public let x: Double
     public let y: Double
     public let confidence: Double
@@ -44,11 +45,24 @@ public struct FallBoundingBox: Codable, Equatable, Sendable {
 }
 
 /// One person from a COCO-17 pose detector, in normalized frame coordinates.
-public struct FallPoseObservation: Equatable, Sendable {
+public struct FallPoseObservation: Codable, Equatable, Sendable {
+    public static let nose = 0
+    public static let leftEye = 1
+    public static let rightEye = 2
+    public static let leftEar = 3
+    public static let rightEar = 4
     public static let leftShoulder = 5
     public static let rightShoulder = 6
+    public static let leftElbow = 7
+    public static let rightElbow = 8
+    public static let leftWrist = 9
+    public static let rightWrist = 10
     public static let leftHip = 11
     public static let rightHip = 12
+    public static let leftKnee = 13
+    public static let rightKnee = 14
+    public static let leftAnkle = 15
+    public static let rightAnkle = 16
 
     public let confidence: Double
     public let box: FallBoundingBox
@@ -61,13 +75,16 @@ public struct FallPoseObservation: Equatable, Sendable {
     }
 }
 
-public struct FallDetectorConfiguration: Equatable, Sendable {
+public struct FallDetectorConfiguration: Codable, Equatable, Sendable {
     public var torsoAngleThresholdDegrees = 55.0
     public var aspectRatioThreshold = 1.15
     public var heightCollapseThreshold = 0.55
     public var sittingHeightThreshold = 0.75
-    /// T_fall: how long a fall posture must persist before `FALLEN` is confirmed.
+    public var crouchingHeightThreshold = 0.68
+    /// T_fall: how long a fall posture must persist before `FALLEN` (`FALL_CONFIRMED`) is confirmed.
     public var fallPersistenceSeconds = 0.8
+    /// How long a confirmed fallen person remains down before `PERSON_DOWN` escalation is emitted.
+    public var personDownSeconds = 10.0
     /// Streams at or below this rate use `lowFrameRatePersistenceSeconds` instead.
     public var lowFrameRateThreshold = 1.5
     public var lowFrameRatePersistenceSeconds = 2.0
@@ -76,6 +93,10 @@ public struct FallDetectorConfiguration: Equatable, Sendable {
     /// Below this rate centroid velocity is unreliable, so `WALKING` is never inferred.
     public var velocityFeatureMinimumFPS = 5.0
     public var walkingSpeedBodyHeightsPerSecond = 0.3
+    public var runningSpeedBodyHeightsPerSecond = 1.25
+    /// Controlled slow reclining after sitting for at least `controlledSitBeforeLieSeconds` with low vertical speed is classified as `Lying` rather than an acute fall.
+    public var controlledSitBeforeLieSeconds = 1.5
+    public var controlledLieDownMaxDropSpeedBodyHeightsPerSecond = 0.25
     public var emaAlpha = 0.05
     /// The height-collapse rule is ignored until the baseline has this many upright samples.
     public var minimumBaselineSamples = 3
@@ -94,9 +115,10 @@ public struct FallDetectorConfiguration: Equatable, Sendable {
     public init() {}
 
     public var isValid: Bool {
-        let positives = [aspectRatioThreshold, fallPersistenceSeconds, lowFrameRateThreshold,
-                         lowFrameRatePersistenceSeconds, velocityFeatureMinimumFPS,
-                         walkingSpeedBodyHeightsPerSecond, relinkMaximumGapSeconds, relinkMaximumDiagonalRatio]
+        let positives = [aspectRatioThreshold, fallPersistenceSeconds, personDownSeconds,
+                         lowFrameRateThreshold, lowFrameRatePersistenceSeconds, velocityFeatureMinimumFPS,
+                         walkingSpeedBodyHeightsPerSecond, runningSpeedBodyHeightsPerSecond,
+                         relinkMaximumGapSeconds, relinkMaximumDiagonalRatio]
         let unitIntervals = [emaAlpha, primaryConfidence, lowConfidenceFloor, keypointConfidence,
                              matchIoUThreshold, frameIntervalSmoothing]
         return positives.allSatisfy { $0.isFinite && $0 > 0 }
@@ -121,19 +143,76 @@ public struct FallMetrics: Codable, Equatable, Sendable {
     public let aspectRatio: Double
     public let heightRatio: Double?
     public let baselineHeightPixels: Double?
+    public let verticalDropVelocity: Double
+    public let angularVelocityDegreesPerSecond: Double
+    public let visibleKeypointCount: Int
+    public let isPartiallyOccluded: Bool
+
+    public init(
+        torsoAngleDegrees: Double?,
+        aspectRatio: Double,
+        heightRatio: Double?,
+        baselineHeightPixels: Double?,
+        verticalDropVelocity: Double = 0,
+        angularVelocityDegreesPerSecond: Double = 0,
+        visibleKeypointCount: Int = 0,
+        isPartiallyOccluded: Bool = false
+    ) {
+        self.torsoAngleDegrees = torsoAngleDegrees
+        self.aspectRatio = aspectRatio
+        self.heightRatio = heightRatio
+        self.baselineHeightPixels = baselineHeightPixels
+        self.verticalDropVelocity = verticalDropVelocity
+        self.angularVelocityDegreesPerSecond = angularVelocityDegreesPerSecond
+        self.visibleKeypointCount = visibleKeypointCount
+        self.isPartiallyOccluded = isPartiallyOccluded
+    }
 }
 
-public struct FallTrackSnapshot: Equatable, Sendable {
+public struct FallTrackSnapshot: Codable, Equatable, Sendable {
     public let trackID: UUID
     public let state: FallPersonState
+    public let phase: FallIncidentPhase
+    public let behaviorState: HumanBehaviorState
     public let confidence: Double
     public let box: FallBoundingBox
+    public let keypoints: [FallKeypoint]
     public let metrics: FallMetrics
+    public let downDurationSeconds: Double
+    public let speedBodyHeightsPerSecond: Double
     public let relinkCount: Int
+
+    public init(
+        trackID: UUID,
+        state: FallPersonState,
+        phase: FallIncidentPhase = .normal,
+        behaviorState: HumanBehaviorState = .standing,
+        confidence: Double,
+        box: FallBoundingBox,
+        keypoints: [FallKeypoint] = [],
+        metrics: FallMetrics,
+        downDurationSeconds: Double = 0,
+        speedBodyHeightsPerSecond: Double = 0,
+        relinkCount: Int
+    ) {
+        self.trackID = trackID
+        self.state = state
+        self.phase = phase
+        self.behaviorState = behaviorState
+        self.confidence = confidence
+        self.box = box
+        self.keypoints = keypoints
+        self.metrics = metrics
+        self.downDurationSeconds = downDurationSeconds
+        self.speedBodyHeightsPerSecond = speedBodyHeightsPerSecond
+        self.relinkCount = relinkCount
+    }
 }
 
 public struct FallEvent: Codable, Equatable, Sendable {
     public static let eventType = "fall.detected"
+    public static let personDownEventType = "person.down"
+    public static let recoveredEventType = "fall.recovered"
 
     public let id: UUID
     public let trackID: UUID
@@ -141,14 +220,50 @@ public struct FallEvent: Codable, Equatable, Sendable {
     public let occurredAt: TimeInterval
     public let fallStartedAt: TimeInterval
     public let event: String
+    public let phase: FallIncidentPhase
     public let confidence: Double
     public let previousState: FallPersonState
     public let currentState: FallPersonState
     public let box: FallBoundingBox
+    public let keypoints: [FallKeypoint]
     public let metrics: FallMetrics
     public let framesPerSecond: Double?
     public let persistenceSeconds: Double
     public let relinkCount: Int
+
+    public init(
+        id: UUID,
+        trackID: UUID,
+        occurredAt: TimeInterval,
+        fallStartedAt: TimeInterval,
+        event: String,
+        phase: FallIncidentPhase = .fallConfirmed,
+        confidence: Double,
+        previousState: FallPersonState,
+        currentState: FallPersonState,
+        box: FallBoundingBox,
+        keypoints: [FallKeypoint] = [],
+        metrics: FallMetrics,
+        framesPerSecond: Double?,
+        persistenceSeconds: Double,
+        relinkCount: Int
+    ) {
+        self.id = id
+        self.trackID = trackID
+        self.occurredAt = occurredAt
+        self.fallStartedAt = fallStartedAt
+        self.event = event
+        self.phase = phase
+        self.confidence = confidence
+        self.previousState = previousState
+        self.currentState = currentState
+        self.box = box
+        self.keypoints = keypoints
+        self.metrics = metrics
+        self.framesPerSecond = framesPerSecond
+        self.persistenceSeconds = persistenceSeconds
+        self.relinkCount = relinkCount
+    }
 }
 
 public struct FallDetectorUpdate: Equatable, Sendable {
@@ -156,6 +271,11 @@ public struct FallDetectorUpdate: Equatable, Sendable {
     public let events: [FallEvent]
 
     public static let empty = FallDetectorUpdate(tracks: [], events: [])
+
+    public init(tracks: [FallTrackSnapshot], events: [FallEvent]) {
+        self.tracks = tracks
+        self.events = events
+    }
 }
 
 public struct FallDetector: Sendable {
@@ -168,6 +288,12 @@ public struct FallDetector: Sendable {
         let width: Double
         let height: Double
         let torsoAngle: Double?
+        let shoulderMidY: Double?
+        let hipMidY: Double?
+        let kneeMidY: Double?
+        let ankleMidY: Double?
+        let visibleKeypoints: Int
+        let touchesBorder: Bool
 
         var diagonal: Double { (width * width + height * height).squareRoot() }
         var left: Double { centerX - width / 2 }
@@ -181,13 +307,22 @@ public struct FallDetector: Sendable {
         var geometry: Geometry
         var lastSeen: TimeInterval
         var state: FallPersonState = .standing
+        var phase: FallIncidentPhase = .normal
+        var behaviorState: HumanBehaviorState = .standing
+        var hasBeenUprightOrSeated = false
+        var startedInHorizontalPose = false
+        var sittingStartedAt: TimeInterval?
         var baseline: Double?
         var baselineSamples = 0
         var fallStartedAt: TimeInterval?
+        var fallConfirmedAt: TimeInterval?
         var fallSamples = 0
+        var peakVerticalDropSpeed: Double = 0
+        var peakAngularVelocity: Double = 0
         var stateBeforeFall: FallPersonState = .standing
         var recoveryCount = 0
         var alertDispatched = false
+        var personDownDispatched = false
         var relinkCount = 0
     }
 
@@ -206,6 +341,10 @@ public struct FallDetector: Sendable {
 
     public func state(of trackID: UUID) -> FallPersonState? {
         tracks.first { $0.id == trackID }?.state
+    }
+
+    public func phase(of trackID: UUID) -> FallIncidentPhase? {
+        tracks.first { $0.id == trackID }?.phase
     }
 
     public mutating func reset() {
@@ -299,6 +438,7 @@ public struct FallDetector: Sendable {
                                    configuration: configuration, framesPerSecond: fps)
             tracks.append(track)
             snapshots.append(result.snapshot)
+            if let event = result.event { events.append(event) }
         }
         return FallDetectorUpdate(tracks: snapshots, events: events)
     }
@@ -307,71 +447,277 @@ public struct FallDetector: Sendable {
                              isNew: Bool = false, configuration config: FallDetectorConfiguration,
                              framesPerSecond: Double?) -> (snapshot: FallTrackSnapshot, event: FallEvent?) {
         let previousGeometry = track.geometry
-        let elapsedSinceSeen = timestamp - track.lastSeen
+        let elapsedSinceSeen = max(0, timestamp - track.lastSeen)
         track.geometry = detection
         track.lastSeen = timestamp
 
         let aspectRatio = detection.width / detection.height
         let usableBaseline = track.baselineSamples >= config.minimumBaselineSamples ? track.baseline : nil
         let heightRatio = usableBaseline.map { detection.height / $0 }
+        let referenceHeight = max(1.0, usableBaseline ?? detection.height)
+
+        // Kinematic velocities
+        let verticalDropVelocity: Double
+        let angularVelocity: Double
+        let centroidSpeed: Double
+        if !isNew && elapsedSinceSeen > 1e-4 {
+            let dy = detection.centerY - previousGeometry.centerY
+            verticalDropVelocity = dy / elapsedSinceSeen / referenceHeight
+            if let currAngle = detection.torsoAngle, let prevAngle = previousGeometry.torsoAngle {
+                angularVelocity = abs(currAngle - prevAngle) / elapsedSinceSeen
+            } else {
+                angularVelocity = 0
+            }
+            let displacement = hypot(detection.centerX - previousGeometry.centerX,
+                                     detection.centerY - previousGeometry.centerY)
+            centroidSpeed = displacement / elapsedSinceSeen / referenceHeight
+        } else {
+            verticalDropVelocity = 0
+            angularVelocity = 0
+            centroidSpeed = 0
+        }
+
         let horizontalTorso = detection.torsoAngle.map { $0 >= config.torsoAngleThresholdDegrees } ?? false
         let horizontalBox = aspectRatio >= config.aspectRatioThreshold
         let collapsed = heightRatio.map { $0 <= config.heightCollapseThreshold } ?? false
-        let fallPosture = horizontalTorso || horizontalBox || collapsed
-        var event: FallEvent?
 
-        if fallPosture {
+        // Partial occlusion guard: if at frame border and missing core torso keypoints without baseline
+        let isPartiallyOccluded = detection.touchesBorder && detection.torsoAngle == nil && usableBaseline == nil
+
+        // Distinguish waist bending with standing legs from actual fall posture:
+        // If knees/ankles are clearly visible well below hips and box remains vertical & uncollapsed,
+        // the person is bending at the waist (e.g., picking up an object / tying shoes), not lying on the floor.
+        let isStandingWaistBend: Bool = {
+            guard horizontalTorso, !horizontalBox, !collapsed else { return false }
+            guard let hipY = detection.hipMidY, let ankleY = detection.ankleMidY else { return false }
+            let legVerticalSpan = (ankleY - hipY) / max(1.0, detection.height)
+            return legVerticalSpan >= 0.36 && aspectRatio < 0.90
+        }()
+
+        // Distinguish crouching (knees bent, torso upright, vertical aspect ratio, feet supporting body)
+        let isCrouchingPosture: Bool = {
+            guard !horizontalTorso, !horizontalBox else { return false }
+            if let hipY = detection.hipMidY, let kneeY = detection.kneeMidY, let ankleY = detection.ankleMidY {
+                let hipToKnee = abs(kneeY - hipY) / max(1.0, detection.height)
+                let kneeToAnkle = (ankleY - kneeY) / max(1.0, detection.height)
+                if hipToKnee < 0.16 && kneeToAnkle >= 0.15 {
+                    return true
+                }
+            }
+            if let heightRatio, heightRatio > config.heightCollapseThreshold, heightRatio <= config.crouchingHeightThreshold,
+               detection.ankleMidY != nil {
+                return true
+            }
+            return false
+        }()
+
+        let rawFallPosture = (horizontalTorso || horizontalBox || collapsed) && !isStandingWaistBend && !isPartiallyOccluded
+
+        // Section 5 rule: A person who enters the scene ALREADY lying down without any prior upright/seated state
+        // must NOT trigger an acute fall confirmation solely from horizontal posture.
+        if isNew {
+            if rawFallPosture {
+                track.startedInHorizontalPose = true
+                track.hasBeenUprightOrSeated = false
+                track.state = .sitting
+                track.phase = .normal
+                track.behaviorState = .lying
+            } else {
+                track.startedInHorizontalPose = false
+                track.hasBeenUprightOrSeated = true
+                track.state = .standing
+                track.phase = .normal
+                track.behaviorState = isStandingWaistBend ? .bending : (isCrouchingPosture ? .crouching : .standing)
+            }
+        }
+
+        // Check if this is a controlled, slow transition from prolonged sitting into lying on a bed/couch
+        let isControlledLieDownFromSit: Bool = {
+            guard rawFallPosture, !track.state.isFallPhase else { return false }
+            guard track.state == .sitting, let satAt = track.sittingStartedAt else { return false }
+            let satDuration = timestamp - satAt
+            // Only treat as controlled lie-down if the person sat calmly for >= controlledSitBeforeLieSeconds
+            // and reclined at seat level without height collapse or downward drop to the floor
+            return satDuration >= config.controlledSitBeforeLieSeconds
+                && !collapsed
+                && verticalDropVelocity >= 0
+                && verticalDropVelocity < config.controlledLieDownMaxDropSpeedBodyHeightsPerSecond
+                && (detection.centerY - previousGeometry.centerY) / referenceHeight < 0.08
+        }()
+
+        let effectiveFallPosture = rawFallPosture && track.hasBeenUprightOrSeated && !isControlledLieDownFromSit
+        var event: FallEvent?
+        var downDurationSeconds: Double = 0
+
+        if isPartiallyOccluded && !track.state.isFallPhase {
+            track.phase = .undetermined
+            track.behaviorState = .unknown
+        } else if effectiveFallPosture {
             track.recoveryCount = 0
+            track.peakVerticalDropSpeed = max(track.peakVerticalDropSpeed, verticalDropVelocity)
+            track.peakAngularVelocity = max(track.peakAngularVelocity, angularVelocity)
+
             switch track.state {
             case .fallen:
-                break
+                if let confirmedAt = track.fallConfirmedAt {
+                    downDurationSeconds = max(0, timestamp - confirmedAt)
+                } else if let started = track.fallStartedAt {
+                    downDurationSeconds = max(0, timestamp - started)
+                }
+                if downDurationSeconds >= config.personDownSeconds {
+                    track.phase = .personDown
+                    if !track.personDownDispatched {
+                        track.personDownDispatched = true
+                        let persistence = config.persistenceSeconds(framesPerSecond: framesPerSecond)
+                        event = FallEvent(
+                            id: UUID(),
+                            trackID: track.id,
+                            occurredAt: timestamp,
+                            fallStartedAt: track.fallStartedAt ?? timestamp,
+                            event: FallIncidentPhase.personDown.rawValue,
+                            phase: .personDown,
+                            confidence: detection.observation.confidence,
+                            previousState: .fallen,
+                            currentState: .fallen,
+                            box: detection.observation.box,
+                            keypoints: detection.observation.keypoints,
+                            metrics: FallMetrics(
+                                torsoAngleDegrees: detection.torsoAngle,
+                                aspectRatio: aspectRatio,
+                                heightRatio: heightRatio,
+                                baselineHeightPixels: usableBaseline,
+                                verticalDropVelocity: track.peakVerticalDropSpeed,
+                                angularVelocityDegreesPerSecond: track.peakAngularVelocity,
+                                visibleKeypointCount: detection.visibleKeypoints,
+                                isPartiallyOccluded: isPartiallyOccluded
+                            ),
+                            framesPerSecond: framesPerSecond,
+                            persistenceSeconds: persistence,
+                            relinkCount: track.relinkCount
+                        )
+                    }
+                } else {
+                    track.phase = .fallConfirmed
+                }
+                track.behaviorState = .fallen
+
             case .falling:
                 track.fallSamples += 1
+                track.behaviorState = .falling
+
             case .standing, .walking, .sitting:
                 track.stateBeforeFall = track.state
                 track.state = .falling
                 track.fallStartedAt = timestamp
                 track.fallSamples = 1
+                track.peakVerticalDropSpeed = max(0, verticalDropVelocity)
+                track.peakAngularVelocity = angularVelocity
+                track.phase = .possibleFall
+                track.behaviorState = .falling
             }
+
             if track.state == .falling, let started = track.fallStartedAt {
                 let persistence = config.persistenceSeconds(framesPerSecond: framesPerSecond)
-                if track.fallSamples >= config.minimumConfirmingSamples, timestamp - started >= persistence {
+                let elapsedInFall = timestamp - started
+                if track.fallSamples >= config.minimumConfirmingSamples, elapsedInFall >= persistence {
                     track.state = .fallen
+                    track.phase = .fallConfirmed
+                    track.behaviorState = .fallen
+                    track.fallConfirmedAt = timestamp
                     if !track.alertDispatched {
                         track.alertDispatched = true
                         event = FallEvent(
-                            id: UUID(), trackID: track.id, occurredAt: timestamp, fallStartedAt: started,
-                            event: FallPersonState.fallen.rawValue, confidence: detection.observation.confidence,
-                            previousState: .falling, currentState: .fallen, box: detection.observation.box,
-                            metrics: FallMetrics(torsoAngleDegrees: detection.torsoAngle, aspectRatio: aspectRatio,
-                                                 heightRatio: heightRatio, baselineHeightPixels: usableBaseline),
-                            framesPerSecond: framesPerSecond, persistenceSeconds: persistence,
+                            id: UUID(),
+                            trackID: track.id,
+                            occurredAt: timestamp,
+                            fallStartedAt: started,
+                            event: FallPersonState.fallen.rawValue,
+                            phase: .fallConfirmed,
+                            confidence: detection.observation.confidence,
+                            previousState: .falling,
+                            currentState: .fallen,
+                            box: detection.observation.box,
+                            keypoints: detection.observation.keypoints,
+                            metrics: FallMetrics(
+                                torsoAngleDegrees: detection.torsoAngle,
+                                aspectRatio: aspectRatio,
+                                heightRatio: heightRatio,
+                                baselineHeightPixels: usableBaseline,
+                                verticalDropVelocity: track.peakVerticalDropSpeed,
+                                angularVelocityDegreesPerSecond: track.peakAngularVelocity,
+                                visibleKeypointCount: detection.visibleKeypoints,
+                                isPartiallyOccluded: isPartiallyOccluded
+                            ),
+                            framesPerSecond: framesPerSecond,
+                            persistenceSeconds: persistence,
                             relinkCount: track.relinkCount
                         )
                     }
+                } else if track.fallSamples >= 2 || elapsedInFall >= persistence * 0.35 {
+                    track.phase = .fallInProgress
+                } else {
+                    track.phase = .possibleFall
                 }
             }
         } else if track.state == .fallen, track.recoveryCount + 1 < config.recoverySamples {
             track.recoveryCount += 1
+            track.behaviorState = .fallen
         } else {
+            let wasFallen = track.state == .fallen
             track.recoveryCount = 0
             track.fallStartedAt = nil
+            track.fallConfirmedAt = nil
             track.fallSamples = 0
+            track.peakVerticalDropSpeed = 0
+            track.peakAngularVelocity = 0
             track.alertDispatched = false
-            if let heightRatio, heightRatio < config.sittingHeightThreshold {
+            track.personDownDispatched = false
+
+            if rawFallPosture && (track.startedInHorizontalPose || isControlledLieDownFromSit) {
                 track.state = .sitting
-            } else if !isNew, elapsedSinceSeen > 0, let fps = framesPerSecond, fps >= config.velocityFeatureMinimumFPS {
-                let displacement = hypot(detection.centerX - previousGeometry.centerX,
-                                         detection.centerY - previousGeometry.centerY)
-                let speed = displacement / elapsedSinceSeen / max(1, usableBaseline ?? detection.height)
-                track.state = speed >= config.walkingSpeedBodyHeightsPerSecond ? .walking : .standing
+                track.phase = .normal
+                track.behaviorState = .lying
             } else {
-                track.state = .standing
+                track.startedInHorizontalPose = false
+                track.hasBeenUprightOrSeated = true
+                track.phase = wasFallen ? .recovered : .normal
+
+                if isStandingWaistBend {
+                    track.state = .standing
+                    track.behaviorState = .bending
+                    track.sittingStartedAt = nil
+                } else if isCrouchingPosture {
+                    track.state = .sitting
+                    track.behaviorState = .crouching
+                    track.sittingStartedAt = nil
+                } else if let heightRatio, heightRatio < config.sittingHeightThreshold {
+                    if track.state != .sitting {
+                        track.sittingStartedAt = timestamp
+                    }
+                    track.state = .sitting
+                    track.behaviorState = .sitting
+                } else if !isNew, elapsedSinceSeen > 0, let fps = framesPerSecond, fps >= config.velocityFeatureMinimumFPS {
+                    track.sittingStartedAt = nil
+                    if centroidSpeed >= config.runningSpeedBodyHeightsPerSecond {
+                        track.state = .walking
+                        track.behaviorState = .running
+                    } else if centroidSpeed >= config.walkingSpeedBodyHeightsPerSecond {
+                        track.state = .walking
+                        track.behaviorState = .walking
+                    } else {
+                        track.state = .standing
+                        track.behaviorState = .standing
+                    }
+                } else {
+                    track.sittingStartedAt = nil
+                    track.state = .standing
+                    track.behaviorState = .standing
+                }
             }
         }
 
         // The baseline is learned only from confidently upright samples (guide 2.4).
-        if track.state.isUpright, !horizontalTorso, !horizontalBox {
+        if track.state.isUpright, !horizontalTorso, !horizontalBox, !isStandingWaistBend {
             if let baseline = track.baseline, track.baselineSamples >= config.minimumBaselineSamples {
                 track.baseline = config.emaAlpha * detection.height + (1 - config.emaAlpha) * baseline
             } else {
@@ -382,11 +728,25 @@ public struct FallDetector: Sendable {
         }
 
         let snapshot = FallTrackSnapshot(
-            trackID: track.id, state: track.state, confidence: detection.observation.confidence,
+            trackID: track.id,
+            state: track.state,
+            phase: track.phase,
+            behaviorState: track.behaviorState,
+            confidence: detection.observation.confidence,
             box: detection.observation.box,
-            metrics: FallMetrics(torsoAngleDegrees: detection.torsoAngle, aspectRatio: aspectRatio,
-                                 heightRatio: heightRatio,
-                                 baselineHeightPixels: track.baselineSamples >= config.minimumBaselineSamples ? track.baseline : nil),
+            keypoints: detection.observation.keypoints,
+            metrics: FallMetrics(
+                torsoAngleDegrees: detection.torsoAngle,
+                aspectRatio: aspectRatio,
+                heightRatio: heightRatio,
+                baselineHeightPixels: track.baselineSamples >= config.minimumBaselineSamples ? track.baseline : nil,
+                verticalDropVelocity: verticalDropVelocity,
+                angularVelocityDegreesPerSecond: angularVelocity,
+                visibleKeypointCount: detection.visibleKeypoints,
+                isPartiallyOccluded: isPartiallyOccluded
+            ),
+            downDurationSeconds: downDurationSeconds,
+            speedBodyHeightsPerSecond: centroidSpeed,
             relinkCount: track.relinkCount
         )
         return (snapshot, event)
@@ -401,32 +761,54 @@ public struct FallDetector: Sendable {
               box.width > 0, box.height > 0 else { return nil }
         let width = box.width * frameWidth
         let height = box.height * frameHeight
-        return Geometry(observation: observation,
-                        centerX: (box.x + box.width / 2) * frameWidth,
-                        centerY: (box.y + box.height / 2) * frameHeight,
-                        width: width, height: height,
-                        torsoAngle: torsoAngle(observation.keypoints, frameWidth: frameWidth, frameHeight: frameHeight))
+        let visibleCount = observation.keypoints.filter {
+            $0.confidence >= configuration.keypointConfidence && $0.x.isFinite && $0.y.isFinite
+        }.count
+        let touchesBorder = box.x <= 0.01 || box.y <= 0.01 || (box.x + box.width) >= 0.99 || (box.y + box.height) >= 0.985
+        let shoulder = midpoint(observation.keypoints, FallPoseObservation.leftShoulder, FallPoseObservation.rightShoulder,
+                                frameWidth: frameWidth, frameHeight: frameHeight)
+        let hip = midpoint(observation.keypoints, FallPoseObservation.leftHip, FallPoseObservation.rightHip,
+                           frameWidth: frameWidth, frameHeight: frameHeight)
+        let knee = midpoint(observation.keypoints, FallPoseObservation.leftKnee, FallPoseObservation.rightKnee,
+                            frameWidth: frameWidth, frameHeight: frameHeight)
+        let ankle = midpoint(observation.keypoints, FallPoseObservation.leftAnkle, FallPoseObservation.rightAnkle,
+                             frameWidth: frameWidth, frameHeight: frameHeight)
+        var calculatedTorsoAngle: Double?
+        if let shoulder, let hip {
+            let dx = abs(shoulder.x - hip.x)
+            let dy = abs(shoulder.y - hip.y)
+            if dx > 0 || dy > 0 {
+                calculatedTorsoAngle = atan2(dx, dy) * 180 / .pi
+            }
+        }
+        return Geometry(
+            observation: observation,
+            centerX: (box.x + box.width / 2) * frameWidth,
+            centerY: (box.y + box.height / 2) * frameHeight,
+            width: width,
+            height: height,
+            torsoAngle: calculatedTorsoAngle,
+            shoulderMidY: shoulder?.y,
+            hipMidY: hip?.y,
+            kneeMidY: knee?.y,
+            ankleMidY: ankle?.y,
+            visibleKeypoints: visibleCount,
+            touchesBorder: touchesBorder
+        )
     }
 
-    private func torsoAngle(_ keypoints: [FallKeypoint], frameWidth: Double, frameHeight: Double) -> Double? {
-        func midpoint(_ first: Int, _ second: Int) -> (x: Double, y: Double)? {
-            let points = [first, second].compactMap { index -> FallKeypoint? in
-                guard keypoints.indices.contains(index) else { return nil }
-                let point = keypoints[index]
-                guard point.confidence >= configuration.keypointConfidence,
-                      point.x.isFinite, point.y.isFinite else { return nil }
-                return point
-            }
-            guard !points.isEmpty else { return nil }
-            return (points.map(\.x).reduce(0, +) / Double(points.count) * frameWidth,
-                    points.map(\.y).reduce(0, +) / Double(points.count) * frameHeight)
+    private func midpoint(_ keypoints: [FallKeypoint], _ first: Int, _ second: Int,
+                          frameWidth: Double, frameHeight: Double) -> (x: Double, y: Double)? {
+        let points = [first, second].compactMap { index -> FallKeypoint? in
+            guard keypoints.indices.contains(index) else { return nil }
+            let point = keypoints[index]
+            guard point.confidence >= configuration.keypointConfidence,
+                  point.x.isFinite, point.y.isFinite else { return nil }
+            return point
         }
-        guard let shoulder = midpoint(FallPoseObservation.leftShoulder, FallPoseObservation.rightShoulder),
-              let hip = midpoint(FallPoseObservation.leftHip, FallPoseObservation.rightHip) else { return nil }
-        let dx = abs(shoulder.x - hip.x)
-        let dy = abs(shoulder.y - hip.y)
-        guard dx > 0 || dy > 0 else { return nil }
-        return atan2(dx, dy) * 180 / .pi
+        guard !points.isEmpty else { return nil }
+        return (points.map(\.x).reduce(0, +) / Double(points.count) * frameWidth,
+                points.map(\.y).reduce(0, +) / Double(points.count) * frameHeight)
     }
 
     private static func intersectionOverUnion(_ first: Geometry, _ second: Geometry) -> Double {

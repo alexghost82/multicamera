@@ -121,13 +121,15 @@ test: setup model .build/models/bus.jpg
 stress: setup
 	CAMERAWALL_GO2RTC="$(GO2RTC)" CAMERAWALL_TEST_STREAMS=60 swift test
 
-app: build setup model reid-models seg-models icon
+app: build setup model pose-model reid-models seg-models icon
 	test -f "$(VLM_MODEL)/config.json"
 	mkdir -p dist/CameraWall.app/Contents/MacOS dist/CameraWall.app/Contents/Helpers
 	cp .build/release/CameraWall dist/CameraWall.app/Contents/MacOS/CameraWall
 	cp .build/tools/go2rtc dist/CameraWall.app/Contents/Helpers/go2rtc
 	mkdir -p dist/CameraWall.app/Contents/Resources
 	cp -R .build/models/yolo26n.mlmodelc dist/CameraWall.app/Contents/Resources/
+	rm -rf dist/CameraWall.app/Contents/Resources/yolo26s-pose.mlpackage
+	cp -R .build/models/yolo26s-pose.mlpackage dist/CameraWall.app/Contents/Resources/
 	cp .build/models/yolo26m-reid.onnx .build/models/osnet_ain_x1_0_vehicle_reid.onnx dist/CameraWall.app/Contents/Resources/
 	cp .build/models/yolo26n-seg.onnx dist/CameraWall.app/Contents/Resources/
 	rm -rf dist/CameraWall.app/Contents/Resources/qwen3.5-9b

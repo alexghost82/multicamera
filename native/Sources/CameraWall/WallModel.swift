@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import CoreImage
 import NaturalLanguage
@@ -311,6 +312,9 @@ final class TileState: ObservableObject, Identifiable {
     @Published var frame = SessionFrame()
     @Published var stale = true
     @Published var objects: [DetectedObject] = []
+    @Published var poseTracks: [TrackedPersonPose] = []
+    @Published var restrictedZones: [RestrictedZoneRegion] = []
+    @Published var hasCriticalSafetyIncident = false
     var detectionAt: TimeInterval = 0
     var detectionImageSize = CGSize.zero
     var detectionSerial: UInt64 = 0
@@ -324,6 +328,9 @@ final class TileState: ObservableObject, Identifiable {
         frame = SessionFrame()
         stale = true
         objects = []
+        poseTracks = []
+        restrictedZones = []
+        hasCriticalSafetyIncident = false
         detectionAt = 0
         detectionSerial = 0
         inferenceMilliseconds = 0
@@ -397,8 +404,11 @@ final class WallModel: ObservableObject {
     @Published var ghostNarrativeChapters: [GhostNarrativeChapterRecord] = []
     @Published var ghostChatThreads: [GhostChatThreadRecord] = []
     @Published var activeGhostThreadID: String = "default"
+    @Published var ghostChatMessages: [GhostChatMessageRecord] = []
     @Published var ghostThreadFocusEntries: [GhostThreadFocusEntry] = []
     @Published var ghostChatActions: [GhostChatActionRecord] = []
+    @Published private(set) var ghostAgentBusy = false
+    @Published private(set) var ghostAgentStatus = "Unified Ghost Agent ready"
     private(set) var ghostAnalytics: GhostAnalyticsCoordinator!
     private var lastGhostMaintenanceCheck: TimeInterval = -.infinity
     @Published var vlmStatus = "Local VLM not connected"
@@ -488,13 +498,18 @@ final class WallModel: ObservableObject {
     private var localOperationsMonitor = LocalOperationsMonitor()
     private var lastLocalMonitorCheck: TimeInterval = -.infinity
     private var lastOperationsWatchCheck: TimeInterval = -.infinity
+    @Published var localAnalyticsEngine: LocalVideoAnalyticsEngine
+    private var analyticsEngineCancellable: AnyCancellable?
 
     init(configURL: URL = ConfigurationStore.defaultURL, workerMode: Bool = false, poseModelURL: URL? = nil,
          relayFactory: @escaping @MainActor () -> Go2RTC = { Go2RTC() },
          trackingStoreURL: URL = LocalTrackingStore.defaultURL,
          featureCoordinator: CameraFeatureCoordinator = CameraFeatureCoordinator()) {
         self.workerMode = workerMode
-        self.poseDetector = workerMode ? poseModelURL.map(YOLO26PoseDetector.init(modelURL:)) : nil
+        let resolvedPoseURL = workerMode ? poseModelURL : (poseModelURL ?? YOLO26PoseDetector.defaultModelURL)
+        let poseDetectorInstance = resolvedPoseURL.map(YOLO26PoseDetector.init(modelURL:))
+        self.poseDetector = poseDetectorInstance
+        self.localAnalyticsEngine = LocalVideoAnalyticsEngine(poseModelURL: resolvedPoseURL)
         self.workerEventSpool = workerMode ? try? WorkerEventSpool() : nil
         self.featureCoordinator = featureCoordinator
         let detector = YOLO26Detector()
@@ -505,6 +520,9 @@ final class WallModel: ObservableObject {
                 try await LocalVLMClient(model: modelPath).prepare()
             case .yolo:
                 try await detector.prepare()
+            case .pose:
+                guard let poseDetectorInstance else { throw YOLO26PoseDetectorError.modelUnavailable }
+                try await poseDetectorInstance.prepare()
             case .segmentation:
                 try await Task.detached(priority: .utility) { try ONNXSegmentationEncoder.prepare() }.value
             case .personReID, .vehicleReID:
@@ -577,12 +595,9 @@ final class WallModel: ObservableObject {
         } catch {
             notice = "VLM settings could not be loaded; defaults are active"
         }
-        let ghostConfig = GhostAIConfiguration(
-            mode: vlmPreferences.ghostBackendMode,
-            vllmBaseURL: vlmPreferences.ghostVLLMBaseURL,
-            vllmModelName: vlmPreferences.ghostVLLMModelName,
-            openAIBaseURL: vlmPreferences.ghostOpenAIBaseURL,
-            preferredLanguage: vlmPreferences.ghostPreferredLanguage
+        let ghostConfig = Self.makeGhostAIConfiguration(
+            from: vlmPreferences,
+            featurePreferences: featurePreferences
         )
         let ghostClient = GhostAIClient(
             config: ghostConfig,
@@ -590,12 +605,15 @@ final class WallModel: ObservableObject {
         )
         self.ghostAnalytics = GhostAnalyticsCoordinator(
             aiClient: ghostClient,
-            trackingStore: trackingStore
+            trackingStore: trackingStore,
+            memoryFrameStore: cameraMemoryStore
         )
         self.ghostNarrativeChapters = (try? trackingStore?.loadGhostNarrativeChapterRecords(limit: 50)) ?? []
         self.ghostChatThreads = (try? trackingStore?.listGhostChatThreads(limit: 50)) ?? []
+        self.ghostChatMessages = (try? trackingStore?.loadGhostChatMessages(threadID: activeGhostThreadID)) ?? []
         self.ghostThreadFocusEntries = (try? trackingStore?.loadGhostThreadFocusEntries(threadID: activeGhostThreadID, limit: 6)) ?? []
         self.ghostChatActions = (try? trackingStore?.listGhostChatActions(threadID: activeGhostThreadID, status: "proposed")) ?? []
+        syncGhostOperationalMemory()
         if workerMode {
             workerProvisionedCameras = config.cameras.filter {
                 $0.enabled && $0.localDeviceID == nil && $0.screenDisplayID == nil && $0.fileURL == nil
@@ -611,6 +629,23 @@ final class WallModel: ObservableObject {
         if FileManager.default.fileExists(atPath: layoutURL.path) {
             do { layout = try VideoWallLayout.load(from: layoutURL) }
             catch { notice = "Cannot load saved video layout; using the grid" }
+        }
+        analyticsEngineCancellable = localAnalyticsEngine.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        localAnalyticsEngine.configureSecondaryVLMVerifier { [weak self] incident, snapshotJPEG in
+            guard let self, let snapshotJPEG, !snapshotJPEG.isEmpty else { return nil }
+            let client = LocalVLMClient(model: self.vlmPreferences.model, workload: .background)
+            let prompt = """
+            Analyze this security frame for incident type \(incident.type.rawValue) (\(incident.explanation)).
+            Reply with a concise factual confirmation or rejection in 1 sentence.
+            """
+            if let response = try? await client.analyze(image: snapshotJPEG, prompt: prompt) {
+                let lower = response.lowercased()
+                let rejected = lower.contains("no fall") || lower.contains("no fight") || lower.contains("false") || lower.contains("normal")
+                return (confirmed: !rejected, summary: response.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+            return nil
         }
         timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refresh() }
@@ -646,6 +681,7 @@ final class WallModel: ObservableObject {
         guard !applicationServicesStarted else { return }
         applicationServicesStarted = true
         prepareModels()
+        localAnalyticsEngine.startIfEnabled(activeCameraCount: config.cameras.filter(\.enabled).count)
         if error == nil { start() }
     }
 
@@ -1198,19 +1234,28 @@ final class WallModel: ObservableObject {
         catch { notice = "ISAPI events could not be cleared" }
     }
 
+    private static func makeGhostAIConfiguration(
+        from preferences: VLMPreferences,
+        featurePreferences: CameraFeaturePreferences
+    ) -> GhostAIConfiguration {
+        GhostAIConfiguration(
+            mode: preferences.ghostBackendMode,
+            vllmBaseURL: preferences.ghostVLLMBaseURL,
+            vllmModelName: preferences.ghostVLLMModelName,
+            openAIBaseURL: preferences.ghostOpenAIBaseURL,
+            allowExternalAI: featurePreferences.allowExternalAI,
+            allowPlateRegistryLookup: featurePreferences.allowPlateRegistryLookup,
+            preferredLanguage: preferences.ghostPreferredLanguage
+        )
+    }
+
     func saveVLMPreferences(_ draft: VLMPreferences) throws {
         var preferences = draft
         preferences.alertRules.removeAll { $0.condition.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         try VLMStore.save(preferences, to: vlmPreferencesURL)
         vlmPreferences = preferences
         ghostAnalytics?.aiClient.updateConfiguration(
-            GhostAIConfiguration(
-                mode: preferences.ghostBackendMode,
-                vllmBaseURL: preferences.ghostVLLMBaseURL,
-                vllmModelName: preferences.ghostVLLMModelName,
-                openAIBaseURL: preferences.ghostOpenAIBaseURL,
-                preferredLanguage: preferences.ghostPreferredLanguage
-            )
+            Self.makeGhostAIConfiguration(from: preferences, featurePreferences: featurePreferences)
         )
         if applicationServicesStarted { prepareModels() }
         vlmSchedule.reset()
@@ -1244,6 +1289,9 @@ final class WallModel: ObservableObject {
         else { preferences.enabledFeatures.remove(featureID) }
         try featureCoordinator.savePreferences(preferences)
         featurePreferences = preferences
+        ghostAnalytics?.aiClient.updateConfiguration(
+            Self.makeGhostAIConfiguration(from: vlmPreferences, featurePreferences: preferences)
+        )
         if enabled, featureID == .independentWatcher {
             do {
                 localOperationsMonitor = LocalOperationsMonitor(history: try LocalOperationsMonitorStore.load())
@@ -1324,6 +1372,9 @@ final class WallModel: ObservableObject {
         preferences.retainFullFrames = enabled
         try featureCoordinator.savePreferences(preferences)
         featurePreferences = preferences
+        ghostAnalytics?.aiClient.updateConfiguration(
+            Self.makeGhostAIConfiguration(from: vlmPreferences, featurePreferences: preferences)
+        )
         if enabled {
             reloadCameraMemoryFrames()
         } else {
@@ -2805,17 +2856,17 @@ final class WallModel: ObservableObject {
 
     private func processFallDetection(_ people: [PosePerson], camera: Camera, frameWidth: Int, frameHeight: Int,
                                       timestamp: TimeInterval) {
-        let observations = people.map { person in
-            FallPoseObservation(
-                confidence: person.confidence,
-                box: FallBoundingBox(x: person.box.x, y: person.box.y, width: person.box.width, height: person.box.height),
-                keypoints: person.keypoints.map { FallKeypoint(x: $0.x, y: $0.y, confidence: $0.confidence) }
-            )
+        let events = localAnalyticsEngine.processExternalPoseResult(
+            people: people,
+            camera: camera,
+            frameWidth: frameWidth,
+            frameHeight: frameHeight,
+            monotonicTimestamp: timestamp
+        )
+        if let tile = tiles[camera.id] {
+            tile.poseTracks = localAnalyticsEngine.trackedPosesByCamera[camera.id] ?? []
         }
-        var detector = fallDetectors[camera.id] ?? FallDetector()
-        let update = detector.update(observations, frameWidth: frameWidth, frameHeight: frameHeight, timestamp: timestamp)
-        fallDetectors[camera.id] = detector
-        for event in update.events { handleFallEvent(event, camera: camera) }
+        for event in events { handleFallEvent(event, camera: camera) }
     }
 
     private func handleFallEvent(_ event: FallEvent, camera: Camera) {
@@ -3041,6 +3092,8 @@ final class WallModel: ObservableObject {
             recoveryAttempts = 0
             self.stableSince = nil
         }
+        var freshActiveCameras = 0
+        let camerasByID = Dictionary(uniqueKeysWithValues: config.cameras.map { ($0.id, $0) })
         for tile in tiles.values {
             guard let session = tile.session else { continue }
             let frame = session.snapshot()
@@ -3050,11 +3103,33 @@ final class WallModel: ObservableObject {
                 tile.stale = stale
             }
             if !tile.objects.isEmpty && (stale || now - tile.detectionAt > 1.5) { tile.objects = [] }
+            if stale {
+                if !tile.poseTracks.isEmpty { tile.poseTracks = [] }
+            } else if let camera = camerasByID[tile.id], camera.enabled {
+                freshActiveCameras += 1
+                if !workerMode, let pixel = frame.pixel {
+                    localAnalyticsEngine.offerCameraFrame(
+                        camera: camera,
+                        pixelBuffer: pixel,
+                        monotonicTimestamp: frame.receivedAt
+                    )
+                }
+                tile.poseTracks = localAnalyticsEngine.trackedPosesByCamera[camera.id] ?? []
+                tile.restrictedZones = localAnalyticsEngine.settings
+                    .effectiveConfiguration(for: camera.id, cameraYOLOEnabled: camera.yoloEnabled)
+                    .restrictedZones
+                tile.hasCriticalSafetyIncident = localAnalyticsEngine.incidents.contains {
+                    $0.cameraID == camera.id && $0.status.isOpen && ($0.severity == .critical || $0.severity == .high)
+                }
+            }
         }
         if workerMode {
             scheduleDetection(now: now)
             return
         }
+        localAnalyticsEngine.updateRunningState(activeCameraCount: freshActiveCameras)
+        localAnalyticsEngine.drainSchedulerIfNeeded(camerasByID: camerasByID)
+        syncSafetyIncidentsToVLMAlerts()
         sampleAlertLookbackFrames(now: now)
         scheduleDetection(now: now)
         scheduleVLM(now: now)
@@ -3071,15 +3146,50 @@ final class WallModel: ObservableObject {
         }
     }
 
+    private func syncSafetyIncidentsToVLMAlerts() {
+        let safetyIncidents = localAnalyticsEngine.incidents.prefix(25)
+        guard !safetyIncidents.isEmpty else { return }
+        let existingIDs = Set(vlmAlerts.map(\.id))
+        var added = false
+        for inc in safetyIncidents.reversed() where !existingIDs.contains(inc.id) && inc.status.isOpen {
+            let priority: OperationsAlertReview.Priority = (inc.severity == .critical || inc.severity == .high) ? .critical : .normal
+            vlmAlerts.insert(
+                VLMAlert(
+                    id: inc.id,
+                    createdAt: inc.createdAt,
+                    cameraID: inc.cameraID,
+                    cameraName: inc.cameraName,
+                    condition: inc.title,
+                    evidence: inc.explanation,
+                    priority: priority,
+                    clipID: inc.clipID
+                ),
+                at: 0
+            )
+            added = true
+        }
+        if added {
+            if vlmAlerts.count > 100 { vlmAlerts.removeLast(vlmAlerts.count - 100) }
+            try? VLMStore.save(vlmAlerts, to: vlmAlertsURL)
+        }
+    }
+
     private func scheduleGhostAnalyticsTick(now: TimeInterval) {
         guard now - lastGhostMaintenanceCheck >= 4.0, let ghost = ghostAnalytics else { return }
         lastGhostMaintenanceCheck = now
-        let spokenEnabled = vlmPreferences.ghostSpokenBriefingEnabled
+        syncGhostOperationalMemory()
+        let alertsEnabled = featurePreferences.enabledFeatures.contains(.operationalAlerts)
+        let memoryEnabled = featurePreferences.enabledFeatures.contains(.chronologicalMemory)
+        let retainFullFrames = featurePreferences.retainFullFrames
+        let descriptionsEnabled = featurePreferences.enabledFeatures.contains(.visionDescriptions)
+        let platesEnabled = featurePreferences.enabledFeatures.contains(.plateRecognition)
+        let identityEnabled = featurePreferences.enabledFeatures.contains(.crossCameraIdentity)
+        let spokenEnabled = vlmPreferences.ghostSpokenBriefingEnabled && (alertsEnabled || identityEnabled)
         let memEval = ghost.memoryGuard.evaluate()
 
-        // Capture fresh CGImages for active cameras when RAM watchdog allows context frames
+        // Capture fresh CGImages for active cameras only when opt-in features (alerts or memory) are enabled
         var cameraFramePayloads: [(cameraID: UUID, cameraName: String, cgImage: CGImage, labels: [String], trackIDs: [String])] = []
-        if running && !connecting && memEval.allowContextFrames {
+        if running && !connecting && memEval.allowContextFrames && (alertsEnabled || memoryEnabled) {
             for camera in config.cameras where camera.enabled {
                 guard let tile = tiles[camera.id], !tile.stale,
                       let frame = tile.session?.snapshot(),
@@ -3103,10 +3213,23 @@ final class WallModel: ObservableObject {
                     cgImage: item.cgImage,
                     hasActiveObjects: !item.labels.isEmpty,
                     activeLabels: item.labels,
-                    activeTrackIDs: item.trackIDs
+                    activeTrackIDs: item.trackIDs,
+                    evaluateAlerts: alertsEnabled,
+                    sampleNarrative: memoryEnabled,
+                    retainCollageJPEG: retainFullFrames
                 )
             }
-            await ghost.runPeriodicMaintenanceTick()
+            if descriptionsEnabled {
+                await ghost.flushDescribeGateIfNeeded()
+            }
+            if platesEnabled {
+                await ghost.flushPlateBatchIfNeeded()
+            }
+            if identityEnabled {
+                await ghost.runPuritySplitterIfNeeded()
+                await ghost.runContinuitySweeperIfNeeded()
+            }
+            ghost.runStorageJanitorIfNeeded()
             if spokenEnabled {
                 _ = await ghost.generateSpokenBriefingIfDue()
             }
@@ -3138,8 +3261,13 @@ final class WallModel: ObservableObject {
     func forceCloseGhostNarrativeChapter(cameraID: UUID) {
         guard let ghost = ghostAnalytics else { return }
         let camName = config.cameras.first(where: { $0.id == cameraID })?.name ?? cameraID.uuidString
+        let retainCollageJPEG = featurePreferences.retainFullFrames
         Task { @MainActor [weak self] in
-            _ = await ghost.forceCloseNarrativeChapter(cameraID: cameraID, cameraName: camName)
+            _ = await ghost.forceCloseNarrativeChapter(
+                cameraID: cameraID,
+                cameraName: camName,
+                retainCollageJPEG: retainCollageJPEG
+            )
             guard let self, let store = self.trackingStore else { return }
             self.ghostNarrativeChapters = (try? store.loadGhostNarrativeChapterRecords(limit: 50)) ?? self.ghostNarrativeChapters
         }
@@ -3158,6 +3286,7 @@ final class WallModel: ObservableObject {
     func selectGhostChatThread(_ threadID: String) {
         activeGhostThreadID = threadID
         guard let store = trackingStore else { return }
+        ghostChatMessages = (try? store.loadGhostChatMessages(threadID: threadID)) ?? []
         ghostThreadFocusEntries = (try? store.loadGhostThreadFocusEntries(threadID: threadID, limit: 6)) ?? []
         ghostChatActions = (try? store.listGhostChatActions(threadID: threadID, status: "proposed")) ?? []
     }
@@ -3167,6 +3296,7 @@ final class WallModel: ObservableObject {
         try? store.mergeGhostThreads(sourceThreadID: sourceID, intoTargetThreadID: targetID)
         activeGhostThreadID = targetID
         ghostChatThreads = (try? store.listGhostChatThreads(limit: 50)) ?? []
+        ghostChatMessages = (try? store.loadGhostChatMessages(threadID: targetID)) ?? []
         ghostThreadFocusEntries = (try? store.loadGhostThreadFocusEntries(threadID: targetID, limit: 6)) ?? []
         ghostChatActions = (try? store.listGhostChatActions(threadID: targetID, status: "proposed")) ?? []
     }
@@ -3183,6 +3313,79 @@ final class WallModel: ObservableObject {
         guard let store = trackingStore else { return }
         try? store.pushGhostThreadFocus(threadID: activeGhostThreadID, kind: "identity", refID: identityID, label: label, pinned: true)
         ghostThreadFocusEntries = (try? store.loadGhostThreadFocusEntries(threadID: activeGhostThreadID, limit: 6)) ?? []
+    }
+
+    func syncGhostOperationalMemory() {
+        ghostAnalytics?.updateOperationalMemorySnapshot(
+            GhostOperationalMemorySnapshot(
+                vlmAlerts: vlmAlerts,
+                alertReviews: operationsAlertReviews,
+                alertAcknowledgements: operationsAlertAcknowledgements,
+                watchRules: operationsWatchRules,
+                isapiEvents: isapiEvents,
+                missions: cameraMissions,
+                missionRuns: cameraMissionRuns
+            )
+        )
+    }
+
+    @discardableResult
+    func askGhostAgent(question: String, focusedIdentityID: String? = nil) -> Bool {
+        let text = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return false }
+        guard text.count <= 2000 else {
+            ghostAgentStatus = "Agent questions are limited to 2000 characters"
+            return false
+        }
+        guard !ghostAgentBusy, let ghost = ghostAnalytics else { return false }
+        syncGhostOperationalMemory()
+        let threadID = activeGhostThreadID
+        let cameraNames = Dictionary(uniqueKeysWithValues: config.cameras.map { ($0.id, $0.name) })
+        let uptimeNow = ProcessInfo.processInfo.systemUptime
+        var livePixelSnapshots: [(cameraID: UUID, cameraName: String, pixel: IdentityPixelBuffer)] = []
+        if running && !connecting {
+            for camera in config.cameras where camera.enabled && camera.aiChatEnabled {
+                guard let tile = tiles[camera.id], !tile.stale,
+                      let frame = tile.session?.snapshot(),
+                      let pixel = frame.pixel,
+                      uptimeNow - frame.receivedAt < 1.5 else { continue }
+                livePixelSnapshots.append((camera.id, camera.name, IdentityPixelBuffer(value: pixel)))
+            }
+        }
+        ghostAgentBusy = true
+        ghostAgentStatus = "Ghost Agent analyzing multi-memory sources…"
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.ghostAgentBusy = false }
+            var liveFrames: [GhostLiveCameraFrame] = []
+            for snap in livePixelSnapshots.prefix(4) {
+                if let jpeg = try? await VLMFrameEncoder.jpegData(from: snap.pixel.value, maxDimension: 640, quality: 0.45) {
+                    liveFrames.append(GhostLiveCameraFrame(cameraID: snap.cameraID, cameraName: snap.cameraName, jpegData: jpeg))
+                }
+            }
+            let answer = await ghost.askGhostChatAgent(
+                question: text,
+                threadID: threadID,
+                focusedIdentityID: focusedIdentityID,
+                liveFrames: liveFrames,
+                cameraNames: cameraNames,
+                onProgress: { [weak self] progress in
+                    Task { @MainActor [weak self] in
+                        self?.ghostAgentStatus = progress
+                    }
+                }
+            )
+            if let store = self.trackingStore {
+                self.ghostChatThreads = (try? store.listGhostChatThreads(limit: 50)) ?? self.ghostChatThreads
+                self.ghostChatMessages = (try? store.loadGhostChatMessages(threadID: threadID)) ?? self.ghostChatMessages
+                self.ghostThreadFocusEntries = (try? store.loadGhostThreadFocusEntries(threadID: threadID, limit: 6)) ?? self.ghostThreadFocusEntries
+                self.ghostChatActions = (try? store.listGhostChatActions(threadID: threadID, status: "proposed")) ?? self.ghostChatActions
+            }
+            self.ghostAgentStatus = answer.confidence >= 0.4
+                ? "Ghost Agent answer received (\(Int((answer.confidence * 100).rounded()))% confidence)"
+                : "Ghost Agent answer received"
+        }
+        return true
     }
 
     private func sampleAlertLookbackFrames(now: TimeInterval) {
@@ -3432,6 +3635,11 @@ final class WallModel: ObservableObject {
                             let featureCoordinator = self.featureCoordinator
                             let ghost = self.ghostAnalytics
                             let shouldQueueDescriptions = self.featurePreferences.enabledFeatures.contains(.visionDescriptions)
+                            let shouldQueuePlates = self.featurePreferences.enabledFeatures.contains(.plateRecognition)
+                            let shouldRunGhostObservation = shouldQueueDescriptions
+                                || shouldQueuePlates
+                                || self.featurePreferences.enabledFeatures.contains(.crossCameraIdentity)
+                                || self.featurePreferences.enabledFeatures.contains(.knowledgeSearch)
                             let historyObjects = trackedObjects.filter { $0.confidence >= self.detectionThreshold }
                             historyQueue.async { [weak self] in
                                 for object in historyObjects {
@@ -3457,7 +3665,7 @@ final class WallModel: ObservableObject {
                                         let isNewTrack = try store.record(object, cameraID: cameraID, cameraName: cameraName,
                                                                           cropJPEG: crop, cutoutPNG: cutout,
                                                                           reidEmbedding: reidEmbedding, at: observedAt)
-                                        if let ghost {
+                                        if let ghost, shouldRunGhostObservation {
                                             let cgCrop: CGImage?
                                             if let crop, let src = CGImageSourceCreateWithData(crop as CFData, nil) {
                                                 cgCrop = CGImageSourceCreateImageAtIndex(src, 0, nil)
@@ -3490,6 +3698,8 @@ final class WallModel: ObservableObject {
                                                 alphaMask: nil,
                                                 embedding: reidEmbedding,
                                                 neighborBoxes: neighborRects,
+                                                enqueueDescribe: shouldQueueDescriptions,
+                                                enqueuePlate: shouldQueuePlates,
                                                 now: observedAt
                                             )
                                         }

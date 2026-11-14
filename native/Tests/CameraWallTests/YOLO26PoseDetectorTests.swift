@@ -58,9 +58,13 @@ final class YOLO26PoseDetectorTests: XCTestCase {
         let imageSource = try XCTUnwrap(CGImageSourceCreateWithURL(imageURL as CFURL, nil))
         let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(imageSource, 0, nil))
         var pixelBuffer: CVPixelBuffer?
-        XCTAssertEqual(CVPixelBufferCreate(nil, image.width, image.height, kCVPixelFormatType_32BGRA,
-                                           [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary,
-                                           &pixelBuffer), kCVReturnSuccess)
+        var status = CVPixelBufferCreate(nil, image.width, image.height, kCVPixelFormatType_32BGRA,
+                                         [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary,
+                                         &pixelBuffer)
+        if status != kCVReturnSuccess || pixelBuffer == nil {
+            status = CVPixelBufferCreate(nil, image.width, image.height, kCVPixelFormatType_32BGRA, nil, &pixelBuffer)
+        }
+        XCTAssertEqual(status, kCVReturnSuccess)
         let pixel = try XCTUnwrap(pixelBuffer)
         CIContext(options: [.cacheIntermediates: false]).render(CIImage(cgImage: image), to: pixel)
 

@@ -1107,32 +1107,65 @@ public struct GhostChatClipRecord: Codable, Sendable, Equatable, Identifiable {
 public enum GhostReadOnlySQLGuard {
     private static let forbiddenKeywords: Set<String> = [
         "insert", "update", "delete", "drop", "alter", "pragma",
-        "attach", "detach", "create", "replace", "vacuum", "reindex", " begin", "commit", "rollback"
+        "attach", "detach", "create", "replace", "truncate",
+        "vacuum", "reindex", "begin", "commit", "rollback",
+        "savepoint", "release", "load_extension"
     ]
 
+    /// Strips single-quoted and double-quoted literals so structural SQL tokens can be inspected accurately.
+    private static func stripQuotedLiterals(_ sql: String) -> String {
+        var result = ""
+        result.reserveCapacity(sql.count)
+        var inSingle = false
+        var inDouble = false
+        var iterator = sql.makeIterator()
+        while let ch = iterator.next() {
+            if inSingle {
+                if ch == "'" { inSingle = false }
+                continue
+            }
+            if inDouble {
+                if ch == "\"" { inDouble = false }
+                continue
+            }
+            if ch == "'" {
+                inSingle = true
+                result.append(" ")
+            } else if ch == "\"" {
+                inDouble = true
+                result.append(" ")
+            } else {
+                result.append(ch)
+            }
+        }
+        return result
+    }
+
     public static func validateAndCap(_ rawSQL: String, maxLimit: Int = 200) throws -> String {
+        let safeMaxLimit = max(1, min(maxLimit, 1000))
         let trimmed = rawSQL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             throw NSError(domain: "GhostReadOnlySQLGuard", code: 1, userInfo: [NSLocalizedDescriptionKey: "Empty SQL query"])
         }
-        // Disallow multiple statements via semicolon
+        // Disallow SQL comments and multiple statements via semicolon
         let withoutTrailingSemicolon = trimmed.hasSuffix(";") ? String(trimmed.dropLast()).trimmingCharacters(in: .whitespacesAndNewlines) : trimmed
-        if withoutTrailingSemicolon.contains(";") {
-            throw NSError(domain: "GhostReadOnlySQLGuard", code: 2, userInfo: [NSLocalizedDescriptionKey: "Multiple SQL statements are forbidden"])
+        let structural = stripQuotedLiterals(withoutTrailingSemicolon)
+        if structural.contains(";") || structural.contains("--") || structural.contains("/*") {
+            throw NSError(domain: "GhostReadOnlySQLGuard", code: 2, userInfo: [NSLocalizedDescriptionKey: "Multiple SQL statements or comments are forbidden"])
         }
 
-        let lower = withoutTrailingSemicolon.lowercased()
-        guard lower.hasPrefix("select ") || lower.hasPrefix("with ") else {
+        let lowerStructural = structural.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard lowerStructural.hasPrefix("select ") || lowerStructural.hasPrefix("with ") else {
             throw NSError(domain: "GhostReadOnlySQLGuard", code: 3, userInfo: [NSLocalizedDescriptionKey: "Only SELECT or WITH queries are permitted"])
         }
 
-        let tokens = lower.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
+        let tokens = lowerStructural.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
         for token in tokens where forbiddenKeywords.contains(token) {
             throw NSError(domain: "GhostReadOnlySQLGuard", code: 4, userInfo: [NSLocalizedDescriptionKey: "Forbidden keyword '\(token)' in read-only SQL"])
         }
 
         if !tokens.contains("limit") {
-            return "\(withoutTrailingSemicolon) LIMIT \(maxLimit)"
+            return "\(withoutTrailingSemicolon) LIMIT \(safeMaxLimit)"
         }
         return withoutTrailingSemicolon
     }

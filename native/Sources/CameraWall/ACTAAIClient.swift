@@ -597,6 +597,7 @@ public enum ACTAAgentBackend: String, Sendable, Equatable {
 
 public struct ACTAAgentRequest: Sendable {
     public var tier: ACTAAITier
+    public var operatorQuestion: String?
     public var instructions: String
     /// Complete conversation, used by stateless backends or when no chain head is available.
     public var fullInput: [ACTAAgentItem]
@@ -608,6 +609,7 @@ public struct ACTAAgentRequest: Sendable {
 
     public init(
         tier: ACTAAITier = .full,
+        operatorQuestion: String? = nil,
         instructions: String,
         fullInput: [ACTAAgentItem],
         chainedInput: [ACTAAgentItem] = [],
@@ -616,6 +618,7 @@ public struct ACTAAgentRequest: Sendable {
         toolChoice: ACTAAgentToolChoice = .auto
     ) {
         self.tier = tier
+        self.operatorQuestion = operatorQuestion
         self.instructions = instructions
         self.fullInput = fullInput
         self.chainedInput = chainedInput
@@ -1257,6 +1260,7 @@ public final class ACTAAIClient: @unchecked Sendable {
             \(request.instructions)
             Context and operator question:
             \(context)
+            CURRENT OPERATOR QUESTION: \(request.operatorQuestion ?? "Answer the last operator question above.")
             Return ONLY this compact JSON object (no tool_calls wrapper, no Markdown fence):
             {"citedRecordIDs":["S1"],"answerMarkdown":"Your concise answer in the operator's language, at most 180 words, one short paragraph per relevant camera","confidence":0.7}
             Replace S1 with actual supporting aliases from the catalogue. Put source aliases ONLY in citedRecordIDs, not in the answer text. Do not list UUIDs, propose actions, add recommendations, or repeat the JSON field names in answerMarkdown. Never claim that no other events occurred merely because only a sample was retrieved.
@@ -1273,8 +1277,8 @@ public final class ACTAAIClient: @unchecked Sendable {
             raw = try await callLocalVLLM(config: config, prompt: prompt, jpegImages: recentImages, tier: request.tier)
         } else {
             guard let localVLM else { throw ACTAAgentError.noBackendAvailable }
-            if recentImages.isEmpty { raw = try await localVLM.analyze(text: prompt, maxTokens: 2048) }
-            else { raw = try await localVLM.analyze(images: recentImages, prompt: prompt, maxTokens: 2048) }
+            if recentImages.isEmpty { raw = try await localVLM.analyze(text: prompt, maxTokens: 2048, requestWorkload: .interactive) }
+            else { raw = try await localVLM.analyze(images: recentImages, prompt: prompt, maxTokens: 2048, requestWorkload: .interactive) }
         }
         agentTrace?("RAW \(raw)")
         let parsed = Self.parseLocalAgentReply(raw)

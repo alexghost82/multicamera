@@ -15,7 +15,7 @@ final class AgentRetrievalTests: XCTestCase {
         for validCitation in [true, false] {
             let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .localVLLM), transport: { request in
                 let body = String(decoding: request.httpBody ?? Data(), as: UTF8.self)
-                XCTAssertTrue(body.contains(frame.id.uuidString), "Retrieval must precede the first model step")
+                XCTAssertTrue(body.contains(frame.summary) && body.contains("Entrance") && body.contains("cite"), "Retrieved facts and trusted source aliases must precede the first model step")
                 let source = "list_memory_frames:frame:\(frame.id.uuidString)"
                 let reply = ACTAChatPresentAnswer(answerMarkdown: "A person entered", citedRecordIDs: validCitation ? [source] : ["fabricated"])
                 let text = String(decoding: try JSONEncoder().encode(reply), as: UTF8.self)

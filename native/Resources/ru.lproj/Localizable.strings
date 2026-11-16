@@ -1636,3 +1636,29 @@
 "Public network access is not supported. Local showcase uses loopback only." = "Публичный доступ по сети не поддерживается. Локальный показ работает только на этом компьютере.";
 
 "Reserved preference: no runtime control is implemented yet." = "Зарезервированный параметр: управление работой приложения пока не реализовано.";
+
+"Chat" = "Чат";
+
+"Live video and history of all cameras" = "Текущее видео и история всех камер";
+
+"New conversation" = "Новый диалог";
+
+"Cancel request" = "Отменить запрос";
+
+"Ask about live video or history of all cameras…" = "Спросить о текущем видео или истории всех камер…";
+
+"Searching saved history across cameras…" = "Ищу сохранённую историю всех камер…";
+
+"Generating an answer from retrieved evidence…" = "Формирую ответ по найденным данным…";
+
+"Request cancelled" = "Запрос отменён";
+
+"The agent request timed out. Try a narrower period or retry." = "Время ожидания ответа истекло. Повторите запрос или задайте более короткий период.";
+
+"The model returned incomplete answer JSON." = "Модель вернула незавершённый ответ. Повторите запрос.";
+
+"Discuss in unified chat" = "Обсудить в общем чате";
+
+"Review the saved findings of mission %@" = "Разбери сохранённые результаты задачи «%@»";
+
+"Previous mission conversation. Ask new questions in the unified chat." = "Предыдущая переписка по задаче. Новые вопросы задавайте в общем чате.";

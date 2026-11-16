@@ -98,20 +98,24 @@ final class LocalVLMClientTests: XCTestCase {
         }
     }
 
-    func testInstalledQwenRunsInteractiveAndBackgroundRequestsConcurrently() async throws {
+    func testInstalledQwenPrioritizesInteractiveOverBackgroundGeneration() async throws {
         guard let model = ProcessInfo.processInfo.environment["CAMERAWALL_TEST_VLM_MODEL"] else {
-            throw XCTSkip("Set CAMERAWALL_TEST_VLM_MODEL to run the concurrent local model smoke test.")
+            throw XCTSkip("Set CAMERAWALL_TEST_VLM_MODEL to run the local model priority smoke test.")
         }
         let background = LocalVLMClient(model: model, workload: .background)
         let interactive = LocalVLMClient(model: model, workload: .interactive)
         try await background.prepare()
-        let prompt = "Write five short numbered sentences about parking lots."
+        let prompt = "Write a long numbered description of twenty parking lots."
         let started = Date()
-        async let first = background.analyze(text: prompt)
-        async let second = interactive.analyze(text: prompt)
-        let replies = try await [first, second]
-        XCTAssertTrue(replies.allSatisfy { !$0.isEmpty })
-        print("Concurrent background+interactive generation took \(Date().timeIntervalSince(started))s")
+        let first = Task { try await background.analyze(text: prompt) }
+        try await Task.sleep(for: .milliseconds(500))
+        let reply = try await interactive.analyze(text: "Reply with one sentence about a parking lot.")
+        XCTAssertFalse(reply.isEmpty)
+        do {
+            _ = try await first.value
+            XCTFail("Active background generation should yield to the operator")
+        } catch is CancellationError {}
+        print("Interactive priority smoke took \(Date().timeIntervalSince(started))s")
     }
 
     func testBackgroundWorkLeavesAnInstanceForInteractiveRequests() async throws {

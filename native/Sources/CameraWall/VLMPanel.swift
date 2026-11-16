@@ -16,7 +16,6 @@ struct VLMPanel: View {
     @State private var operationsDraft = OperationsPreferences()
     @State private var activeSection = VLMPanelSection.ask
     @State private var questionBeforeVoice = ""
-    @State private var historyQuestion = ""
     @State private var saveError = ""
     @State private var descriptionJobs: [CameraFeatureJob] = []
     @StateObject private var voiceInput = LocalVoiceInput()
@@ -80,6 +79,7 @@ struct VLMPanel: View {
             .frame(height: 40)
             .fixedSize(horizontal: false, vertical: true)
 
+            Button("New conversation", systemImage: "plus.bubble") { model.selectACTAChatThread(UUID().uuidString) }
             if !model.actaThreadFocusEntries.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
@@ -181,22 +181,38 @@ struct VLMPanel: View {
             if model.actaAgentBusy {
                 Button("Cancel request") { model.cancelACTAAgent() }
             }
+            HStack(alignment: .bottom, spacing: 8) {
+            Button {
+                if voiceInput.isRecording { voiceInput.stop() }
+                else if model.featurePreferences.allowVoiceInput {
+                    questionBeforeVoice = model.actaQuestionDraft
+                    Task { await voiceInput.start(localeIdentifier: languageSettings.locale.identifier) }
+                }
+            } label: { Image(systemName: voiceInput.isRecording ? "stop.fill" : "mic") }
+            .disabled(!model.featurePreferences.allowVoiceInput && !voiceInput.isRecording)
+            .help(voiceInput.isRecording ? "Stop local dictation" : "Start local dictation")
             AnalysisQuestionComposer(
-                question: $historyQuestion,
-                sendDisabled: model.actaAgentBusy || historyQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                question: $model.actaQuestionDraft,
+                sendDisabled: model.actaAgentBusy || model.actaQuestionDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                 promptLabel: "Ask about live video or history of all cameras…",
                 inputIdentifier: "acta-question-input", sendIdentifier: "acta-send-question",
                 submit: submitHistoryQuestion
             )
             .fixedSize(horizontal: false, vertical: true)
             .layoutPriority(1)
+            }
+            if let voiceError = voiceInput.errorMessage { Text(languageSettings.localizedMessage(voiceError)).foregroundStyle(ACTATheme.danger) }
         }
+        .onChange(of: voiceInput.transcript) { _, text in
+            if voiceInput.isRecording { model.actaQuestionDraft = [questionBeforeVoice, text].filter { !$0.isEmpty }.joined(separator: " ") }
+        }
+        .onDisappear { voiceInput.stop() }
     }
 
     private func submitHistoryQuestion() {
-        let trimmed = historyQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = model.actaQuestionDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        if model.askACTAAgent(question: trimmed) { historyQuestion = "" }
+        if model.askACTAAgent(question: trimmed) { model.actaQuestionDraft = "" }
     }
 
     private var scheduleTab: some View {

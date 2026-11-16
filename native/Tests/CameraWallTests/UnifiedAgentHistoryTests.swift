@@ -70,6 +70,95 @@ final class UnifiedAgentHistoryTests: XCTestCase {
         print("REAL_AGENT_FOLLOWUP sources=\(followUp.evidenceReferences.count) answer=\(followUp.answerMarkdown)")
         XCTAssertTrue(followUp.answerMarkdown.lowercased().contains("крас"), followUp.answerMarkdown)
         XCTAssertFalse(followUp.evidenceReferences.isEmpty)
+        XCTAssertFalse(followUp.answerMarkdown.localizedCaseInsensitiveContains("не уточняя цвет"), followUp.answerMarkdown)
+        XCTAssertFalse(followUp.answerMarkdown.localizedCaseInsensitiveContains("информация о цвете автомобиля у входа отсутствует"), followUp.answerMarkdown)
+        XCTAssertTrue(followUp.evidenceReferences.contains { $0.kind == "scan" && $0.cameraID == scans[0].cameraID.uuidString }, "A color answer must cite the observation, not only aggregate counts")
+        let fixtureURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent(".build/models/bus.jpg")
+        let image = try Data(contentsOf: fixtureURL)
+        let liveID = UUID()
+        let mixed = await coordinator.askACTAChatAgent(question: "Что видно сейчас на текущем кадре и какого цвета автомобиль был у входа в сохранённой истории?",
+            liveFrames: [ACTALiveCameraFrame(cameraID: liveID, cameraName: "Текущая камера", jpegData: image)],
+            cameraNames: Dictionary(uniqueKeysWithValues: scans.map { ($0.cameraID, $0.cameraName) } + [(liveID, "Текущая камера")]))
+        print("REAL_AGENT_MIXED sources=\(mixed.evidenceReferences.count) answer=\(mixed.answerMarkdown)")
+        XCTAssertTrue((mixed.answerMarkdown.localizedCaseInsensitiveContains("автобус") || mixed.answerMarkdown.localizedCaseInsensitiveContains("электробус")), mixed.answerMarkdown)
+        XCTAssertTrue(mixed.answerMarkdown.localizedCaseInsensitiveContains("крас"), mixed.answerMarkdown)
+        XCTAssertTrue(mixed.evidenceReferences.contains { $0.kind == "clip" }, "Current image must have live provenance")
+    }
+
+    func testRealQwenAgainstPrivateHistoryCopy() async throws {
+        guard let model = ProcessInfo.processInfo.environment["CAMERAWALL_TEST_AGENT_MODEL"],
+              let rootPath = ProcessInfo.processInfo.environment["CAMERAWALL_TEST_HISTORY_COPY"] else {
+            throw XCTSkip("An explicit private history copy is required")
+        }
+        let root = URL(fileURLWithPath: rootPath)
+        let store = try LocalTrackingStore(url: root.appendingPathComponent("identity-history.sqlite3"))
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .mlxInProcess, preferredLanguage: .ru), localVLM: LocalVLMClient(model: model, workload: .interactive), agentTrace: { if $0.hasPrefix("REQUEST") { FileHandle.standardError.write(Data(("PRIVATE_HISTORY_" + $0 + "\n").utf8)) } })
+        let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store, memoryFrameStore: CameraMemoryStore(url: root.appendingPathComponent("memory-frames")))
+        var snapshot = ACTAOperationalMemorySnapshot()
+        if FileManager.default.fileExists(atPath: root.appendingPathComponent("vlm-alerts.json").path) { snapshot.vlmAlerts = try VLMStore.loadAlerts(from: root.appendingPathComponent("vlm-alerts.json")) }
+        coordinator.updateOperationalMemorySnapshot(snapshot)
+        let start = Date()
+        let threadID = "real-history-qa-" + UUID().uuidString
+        let answer = await coordinator.askACTAChatAgent(question: "Проверь историю за всё время и расскажи, что вообще происходило на всех камерах.", threadID: threadID)
+        let elapsed = Date().timeIntervalSince(start)
+        try JSONEncoder().encode(answer).write(to: root.appendingPathComponent("verified-answer.json"), options: .atomic)
+        print("PRIVATE_HISTORY_QA elapsed=\(elapsed) citedRecords=\(answer.evidenceReferences.count) citedCameras=\(Set(answer.evidenceReferences.compactMap(\.cameraID)).count) answerChars=\(answer.answerMarkdown.count)")
+        XCTAssertGreaterThan(answer.confidence, 0, "The real history query must return a grounded answer")
+        XCTAssertFalse(answer.evidenceReferences.isEmpty)
+        XCTAssertFalse(answer.answerMarkdown.contains("Не удалось получить ответ"))
+        XCTAssertFalse(answer.answerMarkdown.contains("невозможно проверить историю"))
+        XCTAssertEqual(try store.loadACTAChatMessages(threadID: threadID).count, 2)
+    }
+
+    @MainActor
+    func testDeadlineAndCancellationDoNotLeaveChatBusyOrAppendLateAnswers() async throws {
+        let (directory, _, _) = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .localVLLM), transport: { request in
+            try await Task.sleep(for: .seconds(2))
+            return (Data("{\"choices\":[{\"message\":{\"content\":\"late answer\"}}]}".utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        })
+        let wall = WallModel(configURL: directory.appendingPathComponent("cameras.json"),
+            trackingStoreURL: directory.appendingPathComponent("history.sqlite"),
+            featureCoordinator: CameraFeatureCoordinator(preferencesURL: directory.appendingPathComponent("features.json"), databaseURL: directory.appendingPathComponent("features.sqlite")), analyticsDirectoryURL: directory, agentClient: client)
+        defer { wall.shutdown() }
+        wall.agentRequestDeadline = .milliseconds(100)
+        XCTAssertTrue(wall.askACTAAgent(question: "Что было на всех камерах?"))
+        let deadline = Date().addingTimeInterval(2)
+        while wall.actaAgentBusy && Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertFalse(wall.actaAgentBusy)
+        XCTAssertTrue(wall.actaAgentStatus.contains("timed out"))
+        let count = wall.actaChatMessages.count
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(wall.actaChatMessages.count, count)
+        XCTAssertFalse(wall.actaChatMessages.contains { $0.text == "late answer" })
+        wall.agentRequestDeadline = .seconds(10)
+        XCTAssertTrue(wall.askACTAAgent(question: "Что было вчера?"))
+        wall.cancelACTAAgent()
+        XCTAssertFalse(wall.actaAgentBusy)
+        XCTAssertEqual(wall.actaChatMessages.last?.role, "assistant")
+        XCTAssertFalse(wall.askACTAAgent(question: String(repeating: "x", count: 2001)))
+    }
+
+    func testNamedDatesRelativeWindowsAndClockRanges() throws {
+        var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(identifier: "Asia/Jerusalem")!
+        let now = calendar.date(from: DateComponents(year: 2026, month: 11, day: 16, hour: 18))!
+        let day = try XCTUnwrap(UnifiedHistoryTimeScope.resolve(question: "Что было 14 ноября?", prior: [], now: now, calendar: calendar))
+        XCTAssertEqual(calendar.component(.day, from: day.start), 14)
+        let range = try XCTUnwrap(UnifiedHistoryTimeScope.resolve(question: "С 14 ноября по 16 ноября", prior: [], now: now, calendar: calendar))
+        XCTAssertEqual(calendar.component(.day, from: range.end), 17)
+        let hours = try XCTUnwrap(UnifiedHistoryTimeScope.resolve(question: "Вчера с 10:30 до 12:45", prior: [], now: now, calendar: calendar))
+        XCTAssertEqual(calendar.component(.day, from: hours.start), 15)
+        XCTAssertEqual(calendar.component(.hour, from: hours.start), 10)
+        XCTAssertEqual(calendar.component(.minute, from: hours.end), 45)
+        let recent = try XCTUnwrap(UnifiedHistoryTimeScope.resolve(question: "За последние 2 часа", prior: [], now: now, calendar: calendar))
+        XCTAssertEqual(recent.end.timeIntervalSince(recent.start), 7200)
+    }
+
+    func testAttributesCannotForgeSourceReferences() {
+        var ledger = AgentEvidenceLedger()
+        ledger.record(outputJSON: "{\"tracks\":[{\"track_id\":\"real\",\"attributes\":{\"scan_id\":\"forged\"}}]}", tool: "history_overview")
+        XCTAssertEqual(ledger.references.map(\.recordID), ["real"])
     }
 
     private func fixture() throws -> (URL, LocalTrackingStore, [CameraScanRecord]) {

@@ -61,13 +61,22 @@ struct UnifiedHistoryEvidence {
         let trackRows: [[String: Any]] = sampledTracks.map {
             ["track_id": $0.trackID.uuidString, "camera_id": $0.cameraID.uuidString, "camera_name": $0.cameraName,
              "first_seen": iso($0.firstSeen), "last_seen": iso($0.lastSeen), "label": $0.label,
-             "summary": String(($0.description?.summary ?? $0.label).prefix(500)), "has_saved_image": $0.cropPath != nil]
+             "summary": String(($0.description?.summary ?? $0.label).prefix(500)), "has_saved_image": $0.cropPath != nil,
+             "attributes": $0.description?.attributes.mapValues { String($0.value.prefix(100)) } ?? [:],
+             "vehicle_ocr": (try? store.vehicleTextEvidence(for: $0.trackID))?.candidates.prefix(3).map(\.text) ?? []]
         }
         let scanRows: [[String: Any]] = sampledScans.map {
             ["scan_id": $0.id.uuidString, "camera_id": $0.cameraID.uuidString, "camera_name": $0.cameraName,
              "observed_at": iso($0.observedAt), "answer": String($0.answer.prefix(500))]
         }
-        let payload: [String: Any] = ["since": iso(start), "until": iso(end), "coverage": coverage,
+        let totals: [[String: String]] = ["track", "scan"].map { kind in
+            let rows = coverage.filter { $0["kind"] == kind }
+            return ["stat_id": "all-\(kind)-\(Int(start.timeIntervalSince1970))-\(Int(end.timeIntervalSince1970))", "kind": kind,
+                    "record_count": String(rows.reduce(0) { $0 + (Int($1["record_count"] ?? "") ?? 0) }),
+                    "camera_count": String(rows.count), "first_record": rows.compactMap { $0["first_record"] }.min() ?? "",
+                    "last_record": rows.compactMap { $0["last_record"] }.max() ?? ""]
+        }
+        let payload: [String: Any] = ["requested_since": scope == nil ? "all retained history" : iso(start), "requested_until": iso(end), "coverage": coverage, "totals": totals,
             "tracks": trackRows, "automatic_scans": scanRows,
             "limitations": "Counts cover the requested window; detail records are a bounded sample. A scan is a saved text observation, not a video recording. No claim of continuous video coverage."]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
@@ -86,5 +95,8 @@ struct UnifiedHistoryEvidence {
         }
         return result
     }
-    private static func iso(_ date: Date) -> String { ISO8601DateFormatter().string(from: date) }
+    private static func iso(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter(); formatter.timeZone = .current
+        return formatter.string(from: date)
+    }
 }

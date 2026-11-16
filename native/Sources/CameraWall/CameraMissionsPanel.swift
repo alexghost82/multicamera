@@ -6,6 +6,7 @@ import CameraCore
 struct CameraMissionsPanel: View {
     @ObservedObject var model: WallModel
     @Environment(\.locale) private var locale
+    @Environment(\.openUnifiedChat) private var openUnifiedChat
     @State private var selectedCameraID: UUID?
     @State private var name = ""
     @State private var brief = ""
@@ -277,7 +278,7 @@ struct CameraMissionsPanel: View {
         .padding(.top, 8)
             DisclosureGroup("Consult saved run history · \(missionConsults(for: mission.id).count)") {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Uses only this mission’s saved text summaries. It does not inspect live frames or change mission settings.")
+                    Text("Previous mission conversation. Ask new questions in the unified chat.")
                         .font(.system(size: ACTAType.metadata))
                         .foregroundStyle(ACTATheme.textSecondary)
                     if missionConsults(for: mission.id).isEmpty {
@@ -308,34 +309,8 @@ struct CameraMissionsPanel: View {
                         }
                         .frame(maxHeight: 180)
                     }
-                    TextField("Ask about this mission’s saved findings…", text: binding(for: mission.id), axis: .vertical)
-                        .lineLimit(2...4)
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityLabel("Question about \(mission.name) saved findings")
-                        .onSubmit { askMissionConsult(mission.id) }
-                    HStack {
-                        if let error = consultErrors[mission.id], !error.isEmpty {
-                            Text(locale.appLanguage.localizedMessage(error))
-                                .font(.system(size: ACTAType.metadata))
-                                .foregroundStyle(ACTATheme.danger)
-                                .accessibilityLabel("Mission consult error: \(error)")
-                        }
-                        Spacer()
-                        Button("Clear thread", role: .destructive) { clearMissionConsult(mission.id) }
-                            .disabled(missionConsults(for: mission.id).isEmpty || model.missionConsultBusy)
-                        Button {
-                            askMissionConsult(mission.id)
-                        } label: {
-                            Label("Ask", systemImage: "paperplane")
-                        }
-                        .disabled(model.missionConsultBusy || consultDrafts[mission.id, default: ""].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        .help("Ask the local assistant about this mission’s saved run summaries")
-                    }
-                    if model.missionConsultBusy {
-                        Label(locale.appLanguage.localizedMessage(model.missionConsultStatus), systemImage: "hourglass")
-                            .font(.system(size: ACTAType.metadata))
-                            .foregroundStyle(ACTATheme.textSecondary)
-                            .accessibilityLabel("Mission consult in progress: \(model.missionConsultStatus)")
+                    Button("Discuss in unified chat", systemImage: "bubble.left.and.bubble.right") {
+                        openUnifiedChat(locale.appLanguage.localized("Review the saved findings of mission %@", arguments: [mission.name]))
                     }
                 }
                 .padding(.vertical, 8)

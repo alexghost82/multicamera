@@ -65,14 +65,14 @@ final class LocalVLMClient {
         return try await NativeVLMEngine.shared.analyze(images: [image], prompt: prompt, model: model, workload: workload)
     }
 
-    func analyze(images: [Data], prompt: String, maxTokens: Int? = nil) async throws -> String {
+    func analyze(images: [Data], prompt: String, maxTokens: Int? = nil, requestWorkload: VLMWorkload? = nil) async throws -> String {
         try ModelSelectionRegistry.require(.qwen)
-        return try await NativeVLMEngine.shared.analyze(images: images, prompt: prompt, model: model, workload: workload, maxTokens: maxTokens)
+        return try await NativeVLMEngine.shared.analyze(images: images, prompt: prompt, model: model, workload: requestWorkload ?? workload, maxTokens: maxTokens)
     }
 
-    func analyze(text: String, maxTokens: Int? = nil) async throws -> String {
+    func analyze(text: String, maxTokens: Int? = nil, requestWorkload: VLMWorkload? = nil) async throws -> String {
         try ModelSelectionRegistry.require(.qwen)
-        return try await NativeVLMEngine.shared.analyze(images: [], prompt: text, model: model, workload: workload, maxTokens: maxTokens)
+        return try await NativeVLMEngine.shared.analyze(images: [], prompt: text, model: model, workload: requestWorkload ?? workload, maxTokens: maxTokens)
     }
 }
 
@@ -198,14 +198,16 @@ private actor NativeVLMEngine {
     static let shared = NativeVLMEngine()
     static let extraInstanceIdleSeconds = 180
 
-    /// Each Qwen3.5-9B 4-bit instance needs roughly 7 GB including runtime buffers; keep about
-    /// 10 GB for macOS, video decoding and detection models.
+    /// Reserve 12 GB per instance including visual context/KV buffers and 10 GB for
+    /// macOS, video decoding and detection. A 24 GB machine must not load two copies.
     static var instanceCapacity: Int {
         let gigabytes = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
-        return min(3, max(1, Int((gigabytes - 10) / 7)))
+        return min(3, max(1, Int((gigabytes - 10) / 12)))
     }
 
     private var pools: [String: VLMInstancePool<ModelContainer>] = [:]
+    private var interactiveRequests = 0
+    private var backgroundRequests: [UUID: Task<String, Error>] = [:]
 
     func unloadModels() { pools.removeAll() }
 
@@ -220,10 +222,25 @@ private actor NativeVLMEngine {
               images.allSatisfy({ $0.count <= LocalVLMClient.maximumEvidenceImageBytes }) else {
             throw LocalVLMError.invalidResponse
         }
+        if workload == .interactive {
+            interactiveRequests += 1
+            for task in backgroundRequests.values { task.cancel() }
+        } else if interactiveRequests > 0 {
+            throw CancellationError()
+        }
+        defer { if workload == .interactive { interactiveRequests -= 1 } }
         let pool = try pool(for: model)
         let lease = try await pool.acquire(workload)
+        let requestID = UUID()
+        let generation = Task {
+            try await Self.generate(images: images, prompt: prompt, container: lease.resource, maxTokens: maxTokens)
+        }
+        if workload == .background { backgroundRequests[requestID] = generation }
+        defer { backgroundRequests.removeValue(forKey: requestID) }
         do {
-            let response = try await Self.generate(images: images, prompt: prompt, container: lease.resource, maxTokens: maxTokens)
+            let response = try await withTaskCancellationHandler {
+                try await generation.value
+            } onCancel: { generation.cancel() }
             await pool.release(lease.slot)
             return response
         } catch {

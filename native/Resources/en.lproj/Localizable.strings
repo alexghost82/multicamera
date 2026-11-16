@@ -593,3 +593,29 @@
 "Public network access is not supported. Local showcase uses loopback only." = "Public network access is not supported. Local showcase uses loopback only.";
 
 "Reserved preference: no runtime control is implemented yet." = "Reserved preference: no runtime control is implemented yet.";
+
+"Chat" = "Chat";
+
+"Live video and history of all cameras" = "Live video and history of all cameras";
+
+"New conversation" = "New conversation";
+
+"Cancel request" = "Cancel request";
+
+"Ask about live video or history of all cameras…" = "Ask about live video or history of all cameras…";
+
+"Searching saved history across cameras…" = "Searching saved history across cameras…";
+
+"Generating an answer from retrieved evidence…" = "Generating an answer from retrieved evidence…";
+
+"Request cancelled" = "Request cancelled";
+
+"The agent request timed out. Try a narrower period or retry." = "The agent request timed out. Try a narrower period or retry.";
+
+"The model returned incomplete answer JSON." = "The model returned incomplete answer JSON.";
+
+"Discuss in unified chat" = "Discuss in unified chat";
+
+"Review the saved findings of mission %@" = "Review the saved findings of mission %@";
+
+"Previous mission conversation. Ask new questions in the unified chat." = "Previous mission conversation. Ask new questions in the unified chat.";

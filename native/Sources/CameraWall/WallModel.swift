@@ -411,7 +411,9 @@ final class WallModel: ObservableObject {
     @Published var actaChatActions: [ACTAChatActionRecord] = []
     private var actaAgentTask: Task<Void, Never>?
     private var actaAgentWatchdog: Task<Void, Never>?
+    var agentRequestDeadline: Duration = .seconds(120)
     private var actaAgentGeneration = UUID()
+    @Published var actaQuestionDraft = ""
     @Published private(set) var actaAgentBusy = false
     @Published private(set) var actaAgentStatus = "Unified ACTA Agent ready"
     private(set) var actaAnalytics: ACTAAnalyticsCoordinator!
@@ -512,7 +514,7 @@ final class WallModel: ObservableObject {
          relayFactory: @escaping @MainActor () -> Go2RTC = { Go2RTC() },
          trackingStoreURL: URL = LocalTrackingStore.defaultURL,
          featureCoordinator: CameraFeatureCoordinator = CameraFeatureCoordinator(),
-         analyticsDirectoryURL: URL? = nil) {
+         analyticsDirectoryURL: URL? = nil, agentClient: ACTAAIClient? = nil) {
         self.workerMode = workerMode
         let resolvedPoseURL = workerMode ? poseModelURL : (poseModelURL ?? YOLO26PoseDetector.defaultModelURL)
         let poseDetectorInstance = resolvedPoseURL.map(YOLO26PoseDetector.init(modelURL:))
@@ -620,9 +622,9 @@ final class WallModel: ObservableObject {
             from: vlmPreferences,
             featurePreferences: featurePreferences
         )
-        let actaClient = ACTAAIClient(
+        let actaClient = agentClient ?? ACTAAIClient(
             config: actaConfig,
-            localVLM: LocalVLMClient(model: vlmPreferences.model)
+            localVLM: LocalVLMClient(model: vlmPreferences.model, workload: .interactive)
         )
         self.actaAnalytics = ACTAAnalyticsCoordinator(
             aiClient: actaClient,
@@ -2640,6 +2642,7 @@ final class WallModel: ObservableObject {
     }
 
     private func scheduleVLM(now: TimeInterval) {
+        guard !actaAgentBusy else { return }
         guard vlmPreferences.scheduleEnabled, running, !connecting, !vlmBusy else { return }
         let cameras = config.cameras.filter { camera in
             guard camera.enabled else { return false }
@@ -2659,6 +2662,7 @@ final class WallModel: ObservableObject {
     }
 
     private func scheduleMissions(now: TimeInterval) {
+        guard !actaAgentBusy else { return }
           guard now - lastMissionCheck >= 5 else { return }
         lastMissionCheck = now
         guard let mission = CameraMissionScheduler.next(
@@ -2810,6 +2814,7 @@ final class WallModel: ObservableObject {
     }
 
     private func scheduleQueuedTrackDescription(now: TimeInterval) {
+        guard !actaAgentBusy else { return }
         guard featurePreferences.enabledFeatures.contains(.visionDescriptions), running,
               !connecting, !vlmBusy, now - lastFeatureQueueCheck >= 1 else { return }
         lastFeatureQueueCheck = now
@@ -3043,6 +3048,7 @@ final class WallModel: ObservableObject {
     }
 
     private func scheduleChronologicalMemory(now: TimeInterval) {
+        guard !actaAgentBusy else { return }
         guard now - lastMemoryCheck >= 1 else { return }
         lastMemoryCheck = now
         guard !vlmBusy, memorySampleTask == nil else { return }
@@ -3419,6 +3425,7 @@ final class WallModel: ObservableObject {
     func syncACTAOperationalMemory() {
         actaAnalytics?.updateOperationalMemorySnapshot(
             ACTAOperationalMemorySnapshot(
+                safetyIncidents: localAnalyticsEngine.incidents,
                 vlmAlerts: vlmAlerts,
                 alertReviews: operationsAlertReviews,
                 alertAcknowledgements: operationsAlertAcknowledgements,
@@ -3478,8 +3485,11 @@ final class WallModel: ObservableObject {
         let generation = UUID()
         actaAgentGeneration = generation
         actaAgentBusy = true
+        // Return the GPU to the operator; automatic jobs resume on the next scheduler tick.
+        vlmTask?.cancel()
+        memorySampleTask?.cancel()
         actaAgentWatchdog = Task { @MainActor [weak self] in
-            do { try await Task.sleep(for: .seconds(120)) } catch { return }
+            do { try await Task.sleep(for: self?.agentRequestDeadline ?? .seconds(120)) } catch { return }
             guard let self, self.actaAgentGeneration == generation else { return }
             self.cancelACTAAgent(reason: "The agent request timed out. Try a narrower period or retry.")
         }

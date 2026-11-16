@@ -235,6 +235,10 @@ struct ACTASecurityCenterView: View {
             .animation(reduceMotion ? nil : Animation.snappy(duration: 0.24), value: cameraPickerPresented)
             .animation(reduceMotion ? nil : Animation.snappy(duration: 0.24), value: aiChatPresented)
         }
+        .environment(\.openUnifiedChat, { context in
+            if model.actaQuestionDraft.isEmpty { model.actaQuestionDraft = context }
+            openAIChat()
+        })
         .environment(\.openACTASettings, { target in
             requestedSettings = target
             openSettings()

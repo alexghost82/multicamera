@@ -25,7 +25,7 @@ public struct AgentEvidenceLedger: Sendable {
         if let rows = value as? [Any] {
             for row in rows { walk(row, tool: tool) }
         } else if let row = value as? [String: Any] {
-            let keys = ["scan_id", "stat_id", "frame_id", "clip_id", "chapter_id", "track_id", "event_id", "alert_id", "run_id", "mission_id", "identity_id"]
+            let keys = ["scan_id", "stat_id", "incident_id", "watch_id", "frame_id", "clip_id", "chapter_id", "track_id", "event_id", "alert_id", "run_id", "mission_id", "identity_id"]
             if let key = keys.first(where: { row[$0] is String }), let recordID = row[key] as? String, !recordID.isEmpty {
                 let kind = row["type"] as? String ?? String(key.dropLast(3))
                 let id = "\(tool):\(kind):\(recordID)"
@@ -35,7 +35,17 @@ public struct AgentEvidenceLedger: Sendable {
                         occurredAt: (row["captured_at"] ?? row["at"] ?? row["started_at"] ?? row["created_at"] ?? row["occurred_at"] ?? row["observed_at"] ?? row["last_seen"]) as? String))
                 }
             }
-            for child in row.values where child is [Any] || child is [String: Any] { walk(child, tool: tool) }
+            for (key, child) in row where !["attributes", "facets", "parameters", "description"].contains(key) && (child is [Any] || child is [String: Any]) { walk(child, tool: tool) }
+        }
+    }
+
+    public mutating func prioritizeObservations() {
+        references.sort {
+            let lhs = $0.kind == "stat" ? 1 : 0, rhs = $1.kind == "stat" ? 1 : 0
+            if lhs != rhs { return lhs < rhs }
+            if $0.cameraName != $1.cameraName { return ($0.cameraName ?? "") < ($1.cameraName ?? "") }
+            if $0.recordID != $1.recordID { return $0.recordID < $1.recordID }
+            return $0.sourceTool < $1.sourceTool
         }
     }
 

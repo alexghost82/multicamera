@@ -81,11 +81,13 @@ final class SettingsTests: XCTestCase {
         let observation = draft.$configuration.filter { abs($0.detectionThreshold - 0.7) < 0.0001 }
             .first().sink { _ in changed.fulfill() }
         defer { observation.cancel() }
-        let host = NSHostingView(rootView: SettingsForm(draft: draft, save: { saved = $0; didSave.fulfill() })
+        var controlFrames: [String: CGRect] = [:]
+        let host = NSHostingView(rootView: SettingsForm(draft: draft, save: { saved = $0; didSave.fulfill() }, onControlLayout: { controlFrames = $0 })
             .preferredColorScheme(.dark).background(Color(nsColor: .windowBackgroundColor)))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 360), styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentView = host
+        window.setContentSize(host.fittingSize)
         let previousPolicy = NSApp.activationPolicy()
         NSApp.setActivationPolicy(.accessory)
         window.title = "CameraWall Settings Test"
@@ -108,13 +110,21 @@ final class SettingsTests: XCTestCase {
             let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
             try png.write(to: url.appendingPathComponent("settings-before.png"))
         }
-        let sliderStart = host.convert(NSPoint(x: 328, y: host.isFlipped ? 159 : host.bounds.height - 159), to: nil)
-        let sliderEnd = host.convert(NSPoint(x: 482, y: host.isFlipped ? 159 : host.bounds.height - 159), to: nil)
+        let sliderFrame = try XCTUnwrap(controlFrames["confidence"])
+        let inset: CGFloat = 8
+        let currentFraction = (draft.configuration.detectionThreshold - 0.1) / 0.8
+        let targetFraction = (0.7 - 0.1) / 0.8
+        func point(x: CGFloat, y: CGFloat) -> NSPoint {
+            host.convert(NSPoint(x: x, y: host.isFlipped ? y : host.bounds.height - y), to: nil)
+        }
+        let sliderStart = point(x: sliderFrame.minX + inset + currentFraction * (sliderFrame.width - 2 * inset), y: sliderFrame.midY)
+        let sliderEnd = point(x: sliderFrame.minX + inset + targetFraction * (sliderFrame.width - 2 * inset), y: sliderFrame.midY)
         try sendMouseEvents([(.leftMouseDown, sliderStart), (.leftMouseDragged, sliderEnd), (.leftMouseUp, sliderEnd)], to: window)
         await fulfillment(of: [changed], timeout: 2)
         XCTAssertEqual(draft.configuration.detectionThreshold, 0.7, accuracy: 0.0001)
         XCTAssertEqual(draft.confidencePercent, 70)
-        let savePoint = host.convert(NSPoint(x: 548, y: host.isFlipped ? host.bounds.height - 35 : 35), to: nil)
+        let saveFrame = try XCTUnwrap(controlFrames["save"])
+        let savePoint = point(x: saveFrame.midX, y: saveFrame.midY)
         try sendMouseEvents([(.leftMouseDown, savePoint), (.leftMouseUp, savePoint)], to: window)
         await fulfillment(of: [didSave], timeout: 2)
         XCTAssertEqual(saved?.detectionThreshold, 0.7)

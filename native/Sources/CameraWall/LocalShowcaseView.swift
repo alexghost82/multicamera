@@ -4,6 +4,7 @@ import CameraCore
 
 struct LocalShowcaseView: View {
     @ObservedObject var model: WallModel
+    var settingsMode = false
     @Environment(\.locale) private var locale
     @State private var errorMessage = ""
 
@@ -15,12 +16,13 @@ struct LocalShowcaseView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Local Showcase")
-                        .font(.system(size: 22, weight: .semibold))
+                        .font(.system(size: ACTAType.title, weight: .semibold))
                     Text("Loopback only · ephemeral token · no frame storage")
-                        .font(.system(size: 12))
+                        .font(.system(size: ACTAType.caption))
                         .foregroundStyle(ACTATheme.textSecondary)
                 }
                 Spacer()
+                if settingsMode {
                 Toggle("Enable local showcase", isOn: Binding(
                     get: { enabled },
                     set: { value in
@@ -29,14 +31,16 @@ struct LocalShowcaseView: View {
                     }
                 ))
                 .toggleStyle(.switch)
+                } else { OpenSettingsButton(section: .showcase) }
             }
 
             Text("The server binds to 127.0.0.1 and is not reachable from other devices or networks. The link contains a temporary bearer token. Only enabled cameras with AI chat enabled are exposed.")
-                .font(.system(size: 12))
+                .font(.system(size: ACTAType.caption))
                 .foregroundStyle(ACTATheme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             if enabled {
+                if settingsMode {
                 ForEach(model.config.cameras.filter(\.enabled)) { camera in
                     Toggle(camera.name, isOn: Binding(
                         get: { camera.aiChatEnabled },
@@ -45,7 +49,8 @@ struct LocalShowcaseView: View {
                     .toggleStyle(.switch)
                 }
 
-                HStack(spacing: 10) {
+                }
+                HStack(spacing: ACTASpacing.regular) {
                     Button {
                         do { try model.startLocalShowcase() }
                         catch { errorMessage = "Local showcase could not start" }
@@ -62,7 +67,7 @@ struct LocalShowcaseView: View {
                     .disabled(model.localShowcaseURL == nil && model.localShowcaseStatus == "Stopped")
 
                     Text(locale.appLanguage.localizedMessage(model.localShowcaseStatus))
-                        .font(.system(size: 12))
+                        .font(.system(size: ACTAType.caption))
                         .foregroundStyle(ACTATheme.textSecondary)
                     Spacer()
                 }
@@ -83,11 +88,11 @@ struct LocalShowcaseView: View {
             }
 
             if !errorMessage.isEmpty {
-                Text(locale.appLanguage.localizedMessage(errorMessage)).font(.system(size: 12)).foregroundStyle(ACTATheme.danger)
+                Text(locale.appLanguage.localizedMessage(errorMessage)).font(.system(size: ACTAType.caption)).foregroundStyle(ACTATheme.danger)
             }
             Spacer()
         }
-        .padding(20)
+        .padding(ACTASpacing.section)
         .onDisappear { model.stopLocalShowcase() }
     }
 }

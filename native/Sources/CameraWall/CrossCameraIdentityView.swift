@@ -59,20 +59,15 @@ struct CrossCameraIdentityView: View {
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Cross-camera identity")
-                        .font(.system(size: 22, weight: .semibold))
+                        .font(.system(size: ACTAType.title, weight: .semibold))
                     Text("Local appearance matches · operator decisions required")
-                        .font(.system(size: 12))
+                        .font(.system(size: ACTAType.caption))
                         .foregroundStyle(ACTATheme.textSecondary)
                 }
                 Spacer()
-                Toggle("Enable identity review", isOn: Binding(
-                    get: { isEnabled },
-                    set: { setEnabled($0) }
-                ))
-                .toggleStyle(.switch)
-                .disabled(isLoading)
+                OpenSettingsButton(section: .features)
             }
-            .padding(20)
+            .padding(ACTASpacing.section)
 
             if !isEnabled {
                 ContentUnavailableView {
@@ -91,15 +86,15 @@ struct CrossCameraIdentityView: View {
                     }
                     .disabled(isLoading)
                 }
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: ACTAType.metadata, weight: .medium))
                 .foregroundStyle(ACTATheme.textSecondary)
-                .padding(.horizontal, 20)
+                .padding(.horizontal, ACTASpacing.section)
                 .padding(.bottom, 10)
                 Text("Automatic suggestions require at least 20 operator-confirmed Same and 100 Different pairs. Calibration uses those same labels, not a held-out set; every suggestion still requires operator review.")
-                    .font(.system(size: 11))
+                    .font(.system(size: ACTAType.metadata))
                     .foregroundStyle(ACTATheme.textMuted)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 20)
+                    .padding(.horizontal, ACTASpacing.section)
                     .padding(.bottom, 8)
 
                 if isLoading {
@@ -111,9 +106,9 @@ struct CrossCameraIdentityView: View {
                             sectionHeader("PENDING OPERATOR REVIEW", count: proposals.count)
                             if proposals.isEmpty {
                                 Text("No identity proposals awaiting review.")
-                                    .font(.system(size: 12))
+                                    .font(.system(size: ACTAType.caption))
                                     .foregroundStyle(ACTATheme.textMuted)
-                                    .padding(.horizontal, 20)
+                                    .padding(.horizontal, ACTASpacing.section)
                                     .padding(.vertical, 12)
                             }
                             ForEach(proposals) { proposal in
@@ -124,9 +119,9 @@ struct CrossCameraIdentityView: View {
                             sectionHeader("ACCEPTED SIDECAR LINKS", count: acceptedProposals.count)
                             if acceptedProposals.isEmpty {
                                 Text("No accepted cross-camera links.")
-                                    .font(.system(size: 12))
+                                    .font(.system(size: ACTAType.caption))
                                     .foregroundStyle(ACTATheme.textMuted)
-                                    .padding(.horizontal, 20)
+                                    .padding(.horizontal, ACTASpacing.section)
                                     .padding(.vertical, 12)
                             }
                             ForEach(acceptedProposals) { proposal in
@@ -138,15 +133,15 @@ struct CrossCameraIdentityView: View {
                             presenceFilters
                             if visitGroups.isEmpty {
                                 Text("No cross-camera history from accepted links.")
-                                    .font(.system(size: 12))
+                                    .font(.system(size: ACTAType.caption))
                                     .foregroundStyle(ACTATheme.textMuted)
-                                    .padding(.horizontal, 20)
+                                    .padding(.horizontal, ACTASpacing.section)
                                     .padding(.vertical, 12)
                             } else if filteredVisitGroups.isEmpty {
                                 Text("No history matches the selected filters.")
-                                    .font(.system(size: 12))
+                                    .font(.system(size: ACTAType.caption))
                                     .foregroundStyle(ACTATheme.textSecondary)
-                                    .padding(.horizontal, 20)
+                                    .padding(.horizontal, ACTASpacing.section)
                                     .padding(.vertical, 12)
                             }
                             ForEach(filteredVisitGroups) { group in
@@ -157,9 +152,9 @@ struct CrossCameraIdentityView: View {
                             sectionHeader("UNREVIEWED APPEARANCE MATCHES", count: visibleCandidates.count)
                             if visibleCandidates.isEmpty {
                                 Text("No unreviewed candidates. New candidates require saved ReID embeddings from different cameras.")
-                                    .font(.system(size: 12))
+                                    .font(.system(size: ACTAType.caption))
                                     .foregroundStyle(ACTATheme.textMuted)
-                                    .padding(.horizontal, 20)
+                                    .padding(.horizontal, ACTASpacing.section)
                                     .padding(.vertical, 12)
                             }
                             ForEach(visibleCandidates) { candidate in
@@ -171,10 +166,10 @@ struct CrossCameraIdentityView: View {
                 }
             }
             Text(locale.appLanguage.localizedMessage(message))
-                .font(.system(size: 11))
+                .font(.system(size: ACTAType.metadata))
                 .foregroundStyle(ACTATheme.textMuted)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 20)
+                .padding(.horizontal, ACTASpacing.section)
                 .padding(.vertical, 10)
         }
         .background(ACTATheme.background)
@@ -184,14 +179,14 @@ struct CrossCameraIdentityView: View {
     private func sectionHeader(_ title: String, count: Int) -> some View {
         HStack {
             Text(LocalizedStringKey(title))
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: ACTAType.metadata, weight: .semibold))
                 .foregroundStyle(ACTATheme.textMuted)
             Spacer()
             Text("\(count)")
-                .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                .font(.system(size: ACTAType.metadata, weight: .semibold).monospacedDigit())
                 .foregroundStyle(ACTATheme.textSecondary)
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, ACTASpacing.section)
         .padding(.top, 14)
         .padding(.bottom, 6)
     }
@@ -202,17 +197,17 @@ struct CrossCameraIdentityView: View {
             evidence(candidate.trackB)
             VStack(alignment: .leading, spacing: 4) {
                 Text("Appearance distance")
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: ACTAType.metadata, weight: .medium))
                     .foregroundStyle(ACTATheme.textMuted)
                 Text(candidate.distance.formatted(.number.precision(.fractionLength(3))))
-                    .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                    .font(.system(size: ACTAType.body, weight: .semibold).monospacedDigit())
                     .foregroundStyle(ACTATheme.textPrimary)
                 temporalEvidence(candidate)
                 if candidate.trackA.operatorGroupID != nil,
                    candidate.trackB.operatorGroupID != nil,
                    candidate.trackA.operatorGroupID != candidate.trackB.operatorGroupID {
                     Label("Different operator groups", systemImage: "exclamationmark.triangle")
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: ACTAType.metadata, weight: .medium))
                         .foregroundStyle(ACTATheme.warning)
                 }
             }
@@ -225,7 +220,7 @@ struct CrossCameraIdentityView: View {
             .disabled(isLoading)
             .help("Add this appearance match to operator review")
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, ACTASpacing.section)
         .padding(.vertical, 10)
     }
 
@@ -235,10 +230,10 @@ struct CrossCameraIdentityView: View {
             if let record = recordsByID[proposal.trackB] { evidence(record) }
             VStack(alignment: .leading, spacing: 4) {
                 Text("Proposed appearance match")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: ACTAType.caption, weight: .semibold))
                     .foregroundStyle(ACTATheme.textPrimary)
                     Text("Cosine distance \(proposal.cosineDistance.formatted(.number.precision(.fractionLength(3)))) · \(locale.appLanguage.localized(proposal.category))")
-                    .font(.system(size: 10).monospacedDigit())
+                    .font(.system(size: ACTAType.metadata).monospacedDigit())
                     .foregroundStyle(ACTATheme.textSecondary)
                 if let recordA = recordsByID[proposal.trackA], let recordB = recordsByID[proposal.trackB] {
                     temporalEvidence(ReIDValidationCandidate(trackA: recordA, trackB: recordB, distance: proposal.cosineDistance))
@@ -249,7 +244,7 @@ struct CrossCameraIdentityView: View {
                    recordB.operatorGroupID != nil,
                    recordA.operatorGroupID != recordB.operatorGroupID {
                     Label("Conflicts with separate operator groups", systemImage: "exclamationmark.triangle")
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: ACTAType.metadata, weight: .medium))
                         .foregroundStyle(ACTATheme.warning)
                 }
             }
@@ -261,7 +256,7 @@ struct CrossCameraIdentityView: View {
                 .disabled(isLoading || recordsByID[proposal.trackA] == nil || recordsByID[proposal.trackB] == nil)
                 .help("Reject and prevent this pair from being proposed again")
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, ACTASpacing.section)
         .padding(.vertical, 10)
     }
 
@@ -271,10 +266,10 @@ struct CrossCameraIdentityView: View {
             if let record = recordsByID[proposal.trackB] { evidence(record) }
             VStack(alignment: .leading, spacing: 4) {
                 Text("Operator accepted appearance link")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: ACTAType.caption, weight: .semibold))
                     .foregroundStyle(ACTATheme.textPrimary)
                 Text("\(locale.appLanguage.localized(proposal.category)) · distance \(proposal.cosineDistance.formatted(.number.precision(.fractionLength(3))))")
-                    .font(.system(size: 10).monospacedDigit())
+                    .font(.system(size: ACTAType.metadata).monospacedDigit())
                     .foregroundStyle(ACTATheme.textSecondary)
             }
             Spacer(minLength: 4)
@@ -282,7 +277,7 @@ struct CrossCameraIdentityView: View {
                 .disabled(isLoading)
                 .help("Undo this sidecar identity link and recompute its related groups")
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, ACTASpacing.section)
         .padding(.vertical, 10)
     }
 
@@ -291,29 +286,29 @@ struct CrossCameraIdentityView: View {
         if let evidence = CrossCameraIdentityCandidateSelector.evidence(for: candidate) {
             if let gap = evidence.gapSeconds {
                 Label("Observation gap: \(gap.formatted(.number.precision(.fractionLength(1)))) s", systemImage: "clock")
-                    .font(.system(size: 11).monospacedDigit())
+                    .font(.system(size: ACTAType.metadata).monospacedDigit())
                     .foregroundStyle(ACTATheme.textSecondary)
             } else {
                 Label("Overlapping observations: \(evidence.overlapSeconds.formatted(.number.precision(.fractionLength(1)))) s", systemImage: "clock.badge.exclamationmark")
-                    .font(.system(size: 11).monospacedDigit())
+                    .font(.system(size: ACTAType.metadata).monospacedDigit())
                     .foregroundStyle(ACTATheme.warning)
             }
         } else {
             Label("Observation evidence unavailable", systemImage: "exclamationmark.triangle")
-                .font(.system(size: 11))
+                .font(.system(size: ACTAType.metadata))
                 .foregroundStyle(ACTATheme.warning)
         }
     }
 
     private func visitGroupRow(_ group: CrossCameraVisitGroup) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Label("Operator-reviewed appearance history", systemImage: "point.topleft.down.curvedto.point.bottomright.up")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: ACTAType.metadata, weight: .semibold))
                     .foregroundStyle(ACTATheme.textPrimary)
                 Spacer()
                 Text("\(group.cameraCount) cameras")
-                    .font(.system(size: 10, weight: .medium).monospacedDigit())
+                    .font(.system(size: ACTAType.metadata, weight: .medium).monospacedDigit())
                     .foregroundStyle(ACTATheme.textSecondary)
             }
             DisclosureGroup("Dossier · \(group.identityID.uuidString)") {
@@ -334,7 +329,7 @@ struct CrossCameraIdentityView: View {
                         }
                     }
                 }
-                .font(.system(size: 12))
+                .font(.system(size: ACTAType.caption))
                 .foregroundStyle(ACTATheme.textSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.vertical, 8)
@@ -342,17 +337,17 @@ struct CrossCameraIdentityView: View {
             ForEach(group.visits) { record in
                 HStack(spacing: 8) {
                     Text(record.firstSeen.formatted(date: .abbreviated, time: .shortened, locale: locale))
-                        .font(.system(size: 10).monospacedDigit())
+                        .font(.system(size: ACTAType.metadata).monospacedDigit())
                         .foregroundStyle(ACTATheme.textMuted)
                     Text(record.cameraName)
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(size: ACTAType.metadata, weight: .medium))
                         .foregroundStyle(ACTATheme.textSecondary)
                     Text(record.label)
-                        .font(.system(size: 10))
+                        .font(.system(size: ACTAType.metadata))
                         .foregroundStyle(ACTATheme.textMuted)
                     if let description = record.description {
                         Text(description.summary)
-                            .font(.system(size: 10))
+                            .font(.system(size: ACTAType.metadata))
                             .foregroundStyle(ACTATheme.textMuted)
                             .lineLimit(1)
                     }
@@ -360,7 +355,7 @@ struct CrossCameraIdentityView: View {
                 }
             }
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, ACTASpacing.section)
         .padding(.vertical, 10)
     }
 
@@ -418,7 +413,7 @@ struct CrossCameraIdentityView: View {
             .controlSize(.small)
             .padding(.vertical, 12)
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, ACTASpacing.section)
         .padding(.vertical, 8)
     }
 
@@ -440,18 +435,18 @@ struct CrossCameraIdentityView: View {
                     .overlay { Image(systemName: "photo").foregroundStyle(ACTATheme.textMuted) }
                     .accessibilityLabel("No crop image saved")
             }
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(record.cameraName)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: ACTAType.metadata, weight: .medium))
                     .foregroundStyle(ACTATheme.textPrimary)
                     .lineLimit(1)
                 Text("\(locale.appLanguage.localized(record.label)) · \(record.firstSeen.formatted(date: .abbreviated, time: .shortened, locale: locale))")
-                    .font(.system(size: 9))
+                    .font(.system(size: ACTAType.metadata))
                     .foregroundStyle(ACTATheme.textMuted)
                     .lineLimit(1)
                 if record.operatorGroupID != nil {
                     Text("Operator grouped")
-                        .font(.system(size: 9, weight: .medium))
+                        .font(.system(size: ACTAType.metadata, weight: .medium))
                         .foregroundStyle(ACTATheme.primary)
                 }
             }

@@ -59,6 +59,8 @@ final class LanguageSettings: ObservableObject {
         language = AppLanguage(rawValue: defaults.string(forKey: Self.storageKey) ?? "") ?? .english
     }
 
+    func setLanguage(_ value: AppLanguage) { language = value }
+
     func toggle() {
         language = language.next
     }

@@ -25,9 +25,9 @@ struct IdentityHistoryView: View {
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Tracked objects")
-                        .font(.system(size: 22, weight: .semibold))
+                        .font(.system(size: ACTAType.title, weight: .semibold))
                     Text("Local per-camera tracks · evidence retained for 30 days")
-                        .font(.system(size: 12))
+                        .font(.system(size: ACTAType.caption))
                         .foregroundStyle(ACTATheme.textSecondary)
                 }
                 Spacer()
@@ -58,29 +58,12 @@ struct IdentityHistoryView: View {
                 .help("Detach selected tracks from their operator-confirmed groups")
                 .accessibilityLabel("Detach selected tracks")
                 Text(appLanguage.localized("%lld recent", arguments: [model.recentTracks.count]))
-                    .font(.system(size: 12, weight: .medium).monospacedDigit())
+                    .font(.system(size: ACTAType.caption, weight: .medium).monospacedDigit())
                     .foregroundStyle(ACTATheme.textSecondary)
             }
-            .padding(20)
+            .padding(ACTASpacing.section)
 
-            HStack {
-                Toggle("Motion-aware tracking", isOn: Binding(
-                    get: { model.featurePreferences.enabledFeatures.contains(.enhancedDetection) },
-                    set: { enabled in
-                        do { try model.setFeatureEnabled(.enhancedDetection, enabled: enabled) }
-                        catch { model.notice = error.localizedDescription }
-                    }
-                ))
-                Toggle("Save vehicle text locally", isOn: Binding(
-                    get: { model.featurePreferences.enabledFeatures.contains(.plateRecognition) },
-                    set: { enabled in
-                        do { try model.setFeatureEnabled(.plateRecognition, enabled: enabled) }
-                        catch { model.notice = error.localizedDescription }
-                    }
-                ))
-            }
-            .padding(.horizontal, 20)
-            .padding(.bottom, 12)
+            OpenSettingsButton(section: .features).padding(.horizontal, ACTASpacing.section)
 
             HStack(spacing: 8) {
                 TextField("Search labels, descriptions, attributes or evidence", text: $searchText)
@@ -103,11 +86,11 @@ struct IdentityHistoryView: View {
                    !model.trackHistorySearchInProgress,
                    model.trackHistorySearchResults != nil {
                     Text("Showing \(displayedTracks.count) of \(model.trackHistorySearchMatchCount)")
-                        .font(.system(size: 10).monospacedDigit())
+                        .font(.system(size: ACTAType.metadata).monospacedDigit())
                         .foregroundStyle(ACTATheme.textMuted)
                 }
             }
-                .padding(.horizontal, 20)
+                .padding(.horizontal, ACTASpacing.section)
                 .padding(.bottom, 10)
                 .onChange(of: searchText) { _, value in
                     if model.trackHistorySearchQuery != value { model.clearTrackHistorySearch() }
@@ -130,22 +113,22 @@ struct IdentityHistoryView: View {
                         cropImage(for: record)
                         VStack(alignment: .leading, spacing: 4) {
                             Text(appLanguage.localized(record.label).capitalized(with: locale))
-                                .font(.system(size: 14, weight: .semibold))
+                                .font(.system(size: ACTAType.body, weight: .semibold))
                                 .foregroundStyle(ACTATheme.textPrimary)
                             Text(record.cameraName)
-                                .font(.system(size: 12, weight: .medium))
+                                .font(.system(size: ACTAType.caption, weight: .medium))
                                 .foregroundStyle(ACTATheme.textSecondary)
                             if let groupID = record.operatorGroupID {
                                 Label(appLanguage.localized("Operator group · %@", arguments: [String(groupID.uuidString.prefix(6))]), systemImage: "person.2.fill")
-                                    .font(.system(size: 10, weight: .medium).monospaced())
+                                    .font(.system(size: ACTAType.metadata, weight: .medium).monospaced())
                                     .foregroundStyle(ACTATheme.primary)
                             }
                             Text("\(record.firstSeen.formatted(date: .abbreviated, time: .shortened, locale: locale)) – \(record.lastSeen.formatted(date: .omitted, time: .shortened, locale: locale))")
-                                .font(.system(size: 11).monospacedDigit())
+                                .font(.system(size: ACTAType.metadata).monospacedDigit())
                                 .foregroundStyle(ACTATheme.textMuted)
                             if let description = record.description {
                                 DisclosureGroup(appLanguage.localized("AI description · %lld%%", arguments: [Int(description.overallConfidence * 100)])) {
-                                    VStack(alignment: .leading, spacing: 5) {
+                                    VStack(alignment: .leading, spacing: 4) {
                                         Text(description.summary)
                                             .foregroundStyle(ACTATheme.textPrimary)
                                         ForEach(description.attributes.keys.sorted(), id: \.self) { key in
@@ -159,19 +142,19 @@ struct IdentityHistoryView: View {
                                             }
                                         }
                                     }
-                                    .font(.system(size: 11))
+                                    .font(.system(size: ACTAType.metadata))
                                     .padding(.top, 4)
                                 }
-                                .font(.system(size: 11, weight: .medium))
+                                .font(.system(size: ACTAType.metadata, weight: .medium))
                                 .tint(ACTATheme.primary)
                             }
                             if let textCandidates = model.vehicleTextCandidates[record.trackID] {
                                 DisclosureGroup("Unverified text candidates · \(textCandidates.count)") {
                                     if let saved = model.savedVehicleTextEvidence[record.trackID] {
                                         Text("Saved OCR: \(saved.readAt.formatted(date: .abbreviated, time: .shortened, locale: locale))")
-                                            .font(.system(size: 11))
+                                            .font(.system(size: ACTAType.metadata))
                                         Text("Crop SHA-256: \(saved.cropSHA256)")
-                                            .font(.system(size: 11).monospaced())
+                                            .font(.system(size: ACTAType.metadata).monospaced())
                                             .textSelection(.enabled)
                                             .fixedSize(horizontal: false, vertical: true)
                                         Button(role: .destructive) {
@@ -182,24 +165,24 @@ struct IdentityHistoryView: View {
                                     }
                                     if textCandidates.isEmpty {
                                         Text("No readable text was found in this vehicle crop.")
-                                            .font(.system(size: 11))
+                                            .font(.system(size: ACTAType.metadata))
                                             .foregroundStyle(ACTATheme.textSecondary)
                                     }
                                     ForEach(textCandidates) { candidate in
                                         Text("\(candidate.text) · \(Int(candidate.confidence * 100))%")
-                                            .font(.system(size: 11).monospaced())
+                                            .font(.system(size: ACTAType.metadata).monospaced())
                                             .foregroundStyle(ACTATheme.textSecondary)
                                             .textSelection(.enabled)
                                     }
                                 }
-                                .font(.system(size: 11, weight: .medium))
+                                .font(.system(size: ACTAType.metadata, weight: .medium))
                                 .tint(ACTATheme.primary)
                             }
                             if let matches = model.similarTracksByTrack[record.trackID] {
                                 DisclosureGroup("Closest crops · visual distance only") {
                                     if matches.isEmpty {
                                         Text("No comparable crops from other cameras were found.")
-                                            .font(.system(size: 11))
+                                            .font(.system(size: ACTAType.metadata))
                                             .foregroundStyle(ACTATheme.textSecondary)
                                     }
                                     ForEach(matches) { match in
@@ -207,15 +190,15 @@ struct IdentityHistoryView: View {
                                             if let candidate = model.recentTracks.first(where: { $0.trackID == match.trackID }) {
                                                 cropImage(for: candidate)
                                             }
-                                            VStack(alignment: .leading, spacing: 3) {
+                                            VStack(alignment: .leading, spacing: 4) {
                                                 Text("\(match.cameraName) · \(match.label)")
-                                                    .font(.system(size: 11, weight: .medium))
+                                                    .font(.system(size: ACTAType.metadata, weight: .medium))
                                                     .foregroundStyle(ACTATheme.textPrimary)
                                                 Text(appLanguage.localized(
                                                     "%@ %@ · lower is closer · review only",
                                                     arguments: [match.metric, match.distance.formatted(.number.precision(.fractionLength(2)))]
                                                 ))
-                                                    .font(.system(size: 10).monospacedDigit())
+                                                    .font(.system(size: ACTAType.metadata).monospacedDigit())
                                                     .foregroundStyle(ACTATheme.textMuted)
                                             }
                                             Spacer(minLength: 4)
@@ -227,7 +210,7 @@ struct IdentityHistoryView: View {
                                         }
                                     }
                                 }
-                                .font(.system(size: 11, weight: .medium))
+                                .font(.system(size: ACTAType.metadata, weight: .medium))
                                 .tint(ACTATheme.primary)
                             }
                         }
@@ -236,7 +219,7 @@ struct IdentityHistoryView: View {
                             Text(appLanguage.localized("%lld samples", arguments: [record.observationCount]))
                             Text(appLanguage.localized("Best %lld%%", arguments: [Int(record.bestConfidence * 100)]))
                         }
-                        .font(.system(size: 11, weight: .medium).monospacedDigit())
+                        .font(.system(size: ACTAType.metadata, weight: .medium).monospacedDigit())
                         .foregroundStyle(ACTATheme.textSecondary)
                         Button {
                             model.describeTrackedObject(record)
@@ -337,7 +320,7 @@ struct IdentityHistoryView: View {
     }
 }
 
-private struct ReIDCalibrationView: View {
+struct ReIDCalibrationView: View {
     @ObservedObject var model: WallModel
     @Environment(\.locale) private var locale
     @State private var targetPrecision = ReIDThresholdCalibrator.defaultTargetPrecision
@@ -352,7 +335,7 @@ private struct ReIDCalibrationView: View {
                     Text("ReID validation")
                         .font(.system(size: 21, weight: .semibold))
                     Text("Human-labeled cross-camera pairs · local only")
-                        .font(.system(size: 12))
+                        .font(.system(size: ACTAType.caption))
                         .foregroundStyle(ACTATheme.textSecondary)
                 }
                 Spacer()
@@ -368,14 +351,14 @@ private struct ReIDCalibrationView: View {
             }
 
             HStack(alignment: .top, spacing: 28) {
-                VStack(alignment: .leading, spacing: 7) {
+                VStack(alignment: .leading, spacing: 8) {
                     Text("TARGET PRECISION")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.system(size: ACTAType.metadata, weight: .semibold))
                         .foregroundStyle(ACTATheme.textMuted)
                     Slider(value: $targetPrecision, in: 0.90...1.0, step: 0.005)
                         .accessibilityLabel("Target precision")
                     Text(targetPrecision.formatted(.percent.precision(.fractionLength(1))))
-                        .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                        .font(.system(size: ACTAType.body, weight: .semibold).monospacedDigit())
                         .foregroundStyle(ACTATheme.textPrimary)
                 }
                 .frame(width: 210)
@@ -383,9 +366,9 @@ private struct ReIDCalibrationView: View {
                 if let result = model.reidCalibrationResult {
                     metric("Same pairs", value: "\(result.positivePairs) / \(ReIDThresholdCalibrator.minimumPositivePairs)")
                     metric("Different pairs", value: "\(result.negativePairs) / \(ReIDThresholdCalibrator.minimumNegativePairs)")
-                    VStack(alignment: .leading, spacing: 5) {
+                    VStack(alignment: .leading, spacing: 4) {
                         Text("THRESHOLD")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.system(size: ACTAType.metadata, weight: .semibold))
                             .foregroundStyle(ACTATheme.textMuted)
                         Group {
                             if let distance = result.recommendedDistance {
@@ -394,7 +377,7 @@ private struct ReIDCalibrationView: View {
                                 Text("Not ready")
                             }
                         }
-                            .font(.system(size: 14, weight: .semibold).monospacedDigit())
+                            .font(.system(size: ACTAType.body, weight: .semibold).monospacedDigit())
                             .foregroundStyle(ACTATheme.textPrimary)
                     }
                 }
@@ -402,7 +385,7 @@ private struct ReIDCalibrationView: View {
 
             if let result = model.reidCalibrationResult {
                 if result.isReady {
-                    HStack(spacing: 20) {
+                    HStack(spacing: 24) {
                         metric("Empirical precision", value: result.precision?.formatted(.percent.precision(.fractionLength(2))) ?? "—")
                         metric("Recall", value: result.recall?.formatted(.percent.precision(.fractionLength(1))) ?? "—")
                         metric("False-match rate", value: result.falsePositives.map {
@@ -411,17 +394,17 @@ private struct ReIDCalibrationView: View {
                     }
                 } else {
                     Text("Need at least 20 operator-confirmed Same pairs and 100 explicit Different pairs before recommending a threshold.")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: ACTAType.caption, weight: .medium))
                         .foregroundStyle(ACTATheme.warning)
                 }
                 Text("Pair-level rates are measured on the same labels used to choose the threshold, not on a held-out test set. Repeated tracks can be correlated. Do not treat this recommendation as an identity decision or guarantee.")
-                    .font(.system(size: 11))
+                    .font(.system(size: ACTAType.metadata))
                     .foregroundStyle(ACTATheme.textSecondary)
 
                 if let candidate = lastDifferentCandidate {
                     HStack(spacing: 8) {
                         Text(appLanguage.localized("Last pair labeled Different: %@ / %@", arguments: [candidate.trackA.cameraName, candidate.trackB.cameraName]))
-                            .font(.system(size: 11))
+                            .font(.system(size: ACTAType.metadata))
                             .foregroundStyle(ACTATheme.textSecondary)
                         Button("Undo") {
                             model.removeReIDDifferentLabel(candidate, targetPrecision: targetPrecision)
@@ -441,7 +424,7 @@ private struct ReIDCalibrationView: View {
                                 Text("Recall")
                                 Text("False-match")
                             }
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.system(size: ACTAType.metadata, weight: .semibold))
                             .foregroundStyle(ACTATheme.textMuted)
                             ForEach(result.sweep.suffix(8)) { point in
                                 HStack {
@@ -451,13 +434,13 @@ private struct ReIDCalibrationView: View {
                                     Text(point.recall.formatted(.percent.precision(.fractionLength(1))))
                                     Text(point.falseMatchRate?.formatted(.percent.precision(.fractionLength(2))) ?? "—")
                                 }
-                                .font(.system(size: 10).monospacedDigit())
+                                .font(.system(size: ACTAType.metadata).monospacedDigit())
                                 .foregroundStyle(ACTATheme.textSecondary)
                             }
                         }
                         .padding(.top, 6)
                     }
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: ACTAType.metadata, weight: .medium))
                     .tint(ACTATheme.primary)
                 }
             }
@@ -466,11 +449,11 @@ private struct ReIDCalibrationView: View {
 
             HStack {
                 Text("UNLABELED CANDIDATES")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: ACTAType.metadata, weight: .semibold))
                     .foregroundStyle(ACTATheme.textMuted)
                 Spacer()
                 Text("Lower cosine distance is closer · review only")
-                    .font(.system(size: 10))
+                    .font(.system(size: ACTAType.metadata))
                     .foregroundStyle(ACTATheme.textMuted)
             }
 
@@ -492,7 +475,7 @@ private struct ReIDCalibrationView: View {
                 }
             }
         }
-        .padding(20)
+        .padding(ACTASpacing.section)
         .background(ACTATheme.background)
         .onAppear {
             model.refreshReIDValidation(targetPrecision: targetPrecision, includeCandidates: true)
@@ -503,12 +486,12 @@ private struct ReIDCalibrationView: View {
     }
 
     private func metric(_ title: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: 4) {
             Text(appLanguage.localized(title).uppercased())
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: ACTAType.metadata, weight: .semibold))
                 .foregroundStyle(ACTATheme.textMuted)
             Text(value)
-                .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                .font(.system(size: ACTAType.body, weight: .semibold).monospacedDigit())
                 .foregroundStyle(ACTATheme.textPrimary)
         }
     }
@@ -519,10 +502,10 @@ private struct ReIDCalibrationView: View {
             evidence(candidate.trackB)
             VStack(alignment: .leading, spacing: 4) {
                 Text("Distance")
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: ACTAType.metadata, weight: .medium))
                     .foregroundStyle(ACTATheme.textMuted)
                 Text(candidate.distance.formatted(.number.precision(.fractionLength(3))))
-                    .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                    .font(.system(size: ACTAType.body, weight: .semibold).monospacedDigit())
                     .foregroundStyle(ACTATheme.textPrimary)
             }
             Spacer(minLength: 4)
@@ -564,12 +547,12 @@ private struct ReIDCalibrationView: View {
                     .overlay { Image(systemName: "photo").foregroundStyle(ACTATheme.textMuted) }
                     .accessibilityLabel("No crop image saved")
             }
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(record.cameraName)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: ACTAType.metadata, weight: .semibold))
                     .lineLimit(1)
                 Text("\(record.label) · \(record.lastSeen.formatted(date: .abbreviated, time: .shortened, locale: locale))")
-                    .font(.system(size: 10))
+                    .font(.system(size: ACTAType.metadata))
                     .foregroundStyle(ACTATheme.textSecondary)
                     .lineLimit(1)
             }

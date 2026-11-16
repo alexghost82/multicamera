@@ -26,9 +26,9 @@ struct CameraMemoryView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Chronological memory")
-                        .font(.system(size: 22, weight: .semibold))
+                        .font(.system(size: ACTAType.title, weight: .semibold))
                     Text("Sampled local frames · expires after 7 days")
-                        .font(.system(size: 12))
+                        .font(.system(size: ACTAType.caption))
                         .foregroundStyle(ACTATheme.textSecondary)
                 }
                 Spacer()
@@ -38,32 +38,15 @@ struct CameraMemoryView: View {
                 .disabled(model.cameraMemoryFrames.isEmpty)
             }
 
-            Toggle("Enable chronological memory", isOn: Binding(
-                get: { memoryEnabled },
-                set: { enabled in
-                    do { try model.setFeatureEnabled(.chronologicalMemory, enabled: enabled) }
-                    catch { loadError = "Could not save memory setting" }
-                }
-            ))
-            .toggleStyle(.switch)
-
-            Toggle("Retain sampled camera frames", isOn: Binding(
-                get: { model.featurePreferences.retainFullFrames },
-                set: { enabled in
-                    do { try model.setMemoryFrameRetentionEnabled(enabled) }
-                    catch { loadError = "Could not save frame-retention setting" }
-                }
-            ))
-            .toggleStyle(.switch)
-            .disabled(!memoryEnabled)
+            OpenSettingsButton(section: .memory)
 
             Text("Sampling starts only when both switches are on. One frame per camera is sampled at most every 15 minutes; storage is capped at 256 frames or 128 MB, and all frames expire within 7 days.")
-                .font(.system(size: 12))
+                .font(.system(size: ACTAType.caption))
                 .foregroundStyle(ACTATheme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             if !loadError.isEmpty {
-                Text(locale.appLanguage.localizedMessage(loadError)).font(.system(size: 12)).foregroundStyle(ACTATheme.danger)
+                Text(locale.appLanguage.localizedMessage(loadError)).font(.system(size: ACTAType.caption)).foregroundStyle(ACTATheme.danger)
             }
 
             actaMemorySection
@@ -80,15 +63,16 @@ struct CameraMemoryView: View {
                     HStack(spacing: 12) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(frame.cameraName)
-                                .font(.system(size: 13, weight: .semibold))
+                                .font(.system(size: ACTAType.body, weight: .semibold))
                             Text(frame.capturedAt.formatted(date: .abbreviated, time: .shortened, locale: locale))
-                                .font(.system(size: 11).monospacedDigit())
+                                .font(.system(size: ACTAType.metadata).monospacedDigit())
                                 .foregroundStyle(ACTATheme.textMuted)
                             Text(frame.summary)
-                                .font(.system(size: 12))
+                                .font(.system(size: ACTAType.body))
+                                .lineSpacing(4)
                                 .foregroundStyle(ACTATheme.textSecondary)
                             Text("\(ByteCountFormatter.string(fromByteCount: Int64(frame.fileSize), countStyle: .file)) · expires \(frame.capturedAt.addingTimeInterval(Double(CameraMemoryStore.retentionDays) * 86_400).formatted(date: .abbreviated, time: .shortened, locale: locale))")
-                                .font(.system(size: 10).monospacedDigit())
+                                .font(.system(size: ACTAType.metadata).monospacedDigit())
                                 .foregroundStyle(ACTATheme.textMuted)
                         }
                         Spacer(minLength: 8)
@@ -107,12 +91,15 @@ struct CameraMemoryView: View {
                         .help("Delete sampled frame")
                         .accessibilityLabel("Delete sampled frame from \(frame.cameraName)")
                     }
-                    .padding(.vertical, 6)
+                    .padding(.vertical, 8)
+                    .listRowBackground(ACTATheme.surface)
                 }
                 .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .background(ACTATheme.background)
             }
         }
-        .padding(20)
+        .padding(ACTASpacing.section)
         .onAppear { model.reloadCameraMemoryFrames() }
         .sheet(item: $selectedFrame) { frame in
             VStack(alignment: .leading, spacing: 12) {
@@ -125,9 +112,9 @@ struct CameraMemoryView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .accessibilityLabel("Sampled camera frame")
                 }
-                Text(frame.summary).font(.callout).foregroundStyle(.secondary)
+                Text(frame.summary).font(.system(size: ACTAType.body)).lineSpacing(4).foregroundStyle(.secondary)
             }
-            .padding(20)
+            .padding(ACTASpacing.section)
             .frame(minWidth: 520, minHeight: 360)
         }
         .sheet(item: $editingChapter) { chapter in
@@ -135,10 +122,10 @@ struct CameraMemoryView: View {
                 Text("Edit ACTA Memory Chapter · \(chapter.cameraName)")
                     .font(.headline)
                 Text("Original AI summary: \(chapter.aiSummary)")
-                    .font(.caption)
+                    .font(.system(size: ACTAType.caption))
                     .foregroundStyle(.secondary)
                 TextEditor(text: $operatorTextDraft)
-                    .font(.body)
+                    .font(.system(size: ACTAType.body))
                     .frame(minHeight: 100)
                 HStack {
                     Button("Restore AI Summary") {
@@ -153,10 +140,10 @@ struct CameraMemoryView: View {
                         model.saveACTANarrativeOperatorText(chapter, text: operatorTextDraft)
                         editingChapter = nil
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.borderedProminent).tint(ACTATheme.actionFill)
                 }
             }
-            .padding(20)
+            .padding(ACTASpacing.section)
             .frame(minWidth: 460, minHeight: 240)
         }
         .confirmationDialog("Delete all sampled memory frames?", isPresented: $confirmsClear) {
@@ -173,26 +160,26 @@ struct CameraMemoryView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Label("ACTA Memory · Narrative Chapters (\(filteredChapters.count))", systemImage: "book.pages")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(size: ACTAType.body, weight: .semibold))
                 Spacer()
                 Toggle("Pinned only", isOn: $showPinnedOnly)
                     .toggleStyle(.checkbox)
-                    .font(.system(size: 11))
+                    .font(.system(size: ACTAType.metadata))
                 if let firstCam = model.config.cameras.first(where: \.enabled) {
                     Button("Close chapter now") {
                         model.forceCloseACTANarrativeChapter(cameraID: firstCam.id)
                     }
-                    .font(.system(size: 11))
+                    .font(.system(size: ACTAType.metadata))
                 }
                 Button("Rebuild Knowledge") {
                     model.rebuildACTAKnowledgeLayer()
                 }
-                .font(.system(size: 11))
+                .font(.system(size: ACTAType.metadata))
             }
 
             if !filteredChapters.isEmpty {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: 8) {
                         ForEach(Array(filteredChapters.prefix(15))) { chapter in
                             actaChapterRow(chapter)
                         }
@@ -205,16 +192,16 @@ struct CameraMemoryView: View {
 
     @ViewBuilder
     private func actaChapterRow(_ chapter: ACTANarrativeChapterRecord) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
                     Text(chapter.cameraName)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.system(size: ACTAType.caption, weight: .semibold))
                     Text(chapter.narrative.chapterTitle)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: ACTAType.caption, weight: .medium))
                     if chapter.operatorMarked {
                         Text("OPERATOR")
-                            .font(.system(size: 9, weight: .bold))
+                            .font(.system(size: ACTAType.metadata, weight: .bold))
                             .padding(.horizontal, 4)
                             .padding(.vertical, 1)
                             .background(ACTATheme.primary.opacity(0.2))
@@ -222,14 +209,15 @@ struct CameraMemoryView: View {
                     }
                 }
                 Text("\(chapter.startedAt.formatted(date: .abbreviated, time: .shortened, locale: locale)) – \(chapter.endedAt.formatted(date: .omitted, time: .shortened, locale: locale)) · frames: \(chapter.frameCount) · sightings: \(chapter.sightingCount)")
-                    .font(.system(size: 10).monospacedDigit())
+                    .font(.system(size: ACTAType.metadata).monospacedDigit())
                     .foregroundStyle(ACTATheme.textMuted)
                 Text(chapter.effectiveSummary)
-                    .font(.system(size: 12))
+                    .font(.system(size: ACTAType.body))
+                    .lineSpacing(4)
                     .foregroundStyle(ACTATheme.textSecondary)
                 if let delta = chapter.narrative.deltaFromPrevious, !delta.isEmpty {
                     Text("Δ \(delta)")
-                        .font(.system(size: 11))
+                        .font(.system(size: ACTAType.metadata))
                         .foregroundStyle(ACTATheme.textMuted)
                 }
             }

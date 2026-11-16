@@ -560,6 +560,25 @@ public struct VideoAnalyticsSettings: Codable, Equatable, Sendable {
     }
 
     public func validate() throws {
+        guard idleCameraSamplingFPS.isFinite, idleCameraSamplingFPS >= 0.5, idleCameraSamplingFPS <= analyticsSamplingFPS,
+              activeFallBoostFPS.isFinite, activeFallBoostFPS >= analyticsSamplingFPS, activeFallBoostFPS <= 30 else {
+            throw ConfigurationError.invalid("Check idle and boosted analytics sampling rates.")
+        }
+        for (id, override) in cameraOverrides {
+            guard id == override.cameraID,
+                  override.customSamplingFPS.map({ $0.isFinite && (0.5...15).contains($0) }) ?? true,
+                  override.customAlertCooldownSeconds.map({ $0.isFinite && (2...3600).contains($0) }) ?? true else {
+                throw ConfigurationError.invalid("Check per-camera sampling and cooldown overrides.")
+            }
+            for zone in override.restrictedZones {
+                guard !zone.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      (3...64).contains(zone.points.count), zone.holdSeconds.isFinite, zone.holdSeconds >= 0,
+                      zone.points.allSatisfy({ $0.x.isFinite && $0.y.isFinite && (0...1).contains($0.x) && (0...1).contains($0.y) }) else {
+                    throw ConfigurationError.invalid("Check zone names, polygon coordinates and hold time.")
+                }
+            }
+        }
+
         guard personConfidenceThreshold.isFinite, (0.15...0.95).contains(personConfidenceThreshold) else {
             throw VideoAnalyticsSettingsValidationError.invalidPersonConfidence(personConfidenceThreshold)
         }

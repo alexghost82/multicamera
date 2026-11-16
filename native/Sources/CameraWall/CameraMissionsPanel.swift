@@ -25,11 +25,11 @@ struct CameraMissionsPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text("Scheduled local missions")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.system(size: ACTAType.body, weight: .semibold))
                     Text("Up to four fresh frames per run · local VLM · no retained frames")
-                        .font(.system(size: 11))
+                        .font(.system(size: ACTAType.metadata))
                         .foregroundStyle(ACTATheme.textSecondary)
                 }
                 Spacer()
@@ -47,9 +47,9 @@ struct CameraMissionsPanel: View {
             if enabled {
                 if availableCameras.isEmpty {
                     Text("Enable a camera to create a mission.")
-                        .font(.system(size: 12))
+                        .font(.system(size: ACTAType.caption))
                         .foregroundStyle(ACTATheme.textMuted)
-                                    .font(.system(size: 11))
+                                    .font(.system(size: ACTAType.metadata))
                                     .foregroundStyle(ACTATheme.textSecondary)
                     Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 8) {
                         GridRow {
@@ -126,13 +126,13 @@ struct CameraMissionsPanel: View {
                             }
                         }
                     }
-                    .font(.system(size: 12))
+                    .font(.system(size: ACTAType.caption))
                     .foregroundStyle(ACTATheme.textSecondary)
 
                     HStack {
                         if !errorMessage.isEmpty {
                             Text(locale.appLanguage.localizedMessage(errorMessage))
-                                .font(.system(size: 11))
+                                .font(.system(size: ACTAType.metadata))
                                 .foregroundStyle(ACTATheme.danger)
                                 .accessibilityLabel("Mission error: \(errorMessage)")
                         }
@@ -163,14 +163,14 @@ struct CameraMissionsPanel: View {
                 if !model.cameraMissionRuns.isEmpty {
                     HStack {
                         Text("RECENT RUNS")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.system(size: ACTAType.metadata, weight: .semibold))
                             .foregroundStyle(ACTATheme.textMuted)
                         Spacer()
                         Button("Export HTML report", action: exportReport)
-                            .font(.system(size: 11, weight: .medium))
+                            .font(.system(size: ACTAType.metadata, weight: .medium))
                             .help("Save a local report with mission summaries only; no images are included")
                         Button("Export PDF", action: exportPDFReport)
-                            .font(.system(size: 11, weight: .medium))
+                            .font(.system(size: ACTAType.metadata, weight: .medium))
                             .help("Save a private PDF with mission summaries only; no images are included")
                     }
                     .padding(.top, 8)
@@ -179,21 +179,21 @@ struct CameraMissionsPanel: View {
                             Image(systemName: run.status == .completed ? "checkmark.circle" : "exclamationmark.circle")
                                 .foregroundStyle(run.status == .completed ? ACTATheme.success : ACTATheme.warning)
                                 .accessibilityHidden(true)
-                            VStack(alignment: .leading, spacing: 3) {
+                            VStack(alignment: .leading, spacing: 4) {
                                 Text("\(run.missionName) · \(cameraName(for: run.cameraID))")
-                                    .font(.system(size: 11, weight: .medium))
+                                    .font(.system(size: ACTAType.metadata, weight: .medium))
                                     .foregroundStyle(ACTATheme.textPrimary)
                                 Text(run.summary)
-                                    .font(.system(size: 11))
+                                    .font(.system(size: ACTAType.metadata))
                                     .foregroundStyle(ACTATheme.textSecondary)
                                     .textSelection(.enabled)
                                 if let score = run.sceneChangeScore {
                                     Text("Pixel change: \(score.formatted(.percent.precision(.fractionLength(1))))")
-                                        .font(.system(size: 11).monospacedDigit())
+                                        .font(.system(size: ACTAType.metadata).monospacedDigit())
                                         .foregroundStyle(ACTATheme.textSecondary)
                                 }
                                 Text(run.occurredAt.formatted(date: .abbreviated, time: .shortened, locale: locale))
-                                    .font(.system(size: 10).monospacedDigit())
+                                    .font(.system(size: ACTAType.metadata).monospacedDigit())
                                     .foregroundStyle(ACTATheme.textMuted)
                             }
                             Spacer(minLength: 0)
@@ -214,33 +214,33 @@ struct CameraMissionsPanel: View {
 
     private func missionRow(_ mission: CameraMission) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-        HStack(spacing: 10) {
+        HStack(spacing: ACTASpacing.regular) {
             Toggle(mission.name, isOn: Binding(
                 get: { model.cameraMissions.first(where: { $0.id == mission.id })?.enabled ?? false },
                 set: { updateMission(mission, enabled: $0) }
             ))
             .toggleStyle(.switch)
             .accessibilityLabel("Enable mission \(mission.name)")
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text("\(cameraName(for: mission.cameraID)) · every \(mission.intervalSeconds / 60) min")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: ACTAType.metadata, weight: .medium))
                     .foregroundStyle(ACTATheme.textSecondary)
                 Text(mission.brief)
-                    .font(.system(size: 11))
+                    .font(.system(size: ACTAType.metadata))
                     .foregroundStyle(ACTATheme.textMuted)
                     .lineLimit(2)
                 if let lastRunAt = mission.lastRunAt {
                     Text("Last run \(lastRunAt.formatted(date: .abbreviated, time: .shortened, locale: locale)) · next \(mission.nextRunAt.formatted(date: .omitted, time: .shortened, locale: locale))")
-                        .font(.system(size: 10).monospacedDigit())
+                        .font(.system(size: ACTAType.metadata).monospacedDigit())
                         .foregroundStyle(ACTATheme.textMuted)
                 } else {
                     Text("First run \(mission.nextRunAt.formatted(date: .abbreviated, time: .shortened, locale: locale))")
-                        .font(.system(size: 10).monospacedDigit())
+                        .font(.system(size: ACTAType.metadata).monospacedDigit())
                         .foregroundStyle(ACTATheme.textMuted)
                 }
                 if let lastResult = mission.lastResult {
                     Text(lastResult)
-                        .font(.system(size: 11))
+                        .font(.system(size: ACTAType.metadata))
                         .foregroundStyle(ACTATheme.textPrimary)
                         .textSelection(.enabled)
                 }
@@ -276,28 +276,28 @@ struct CameraMissionsPanel: View {
         }
         .padding(.top, 8)
             DisclosureGroup("Consult saved run history · \(missionConsults(for: mission.id).count)") {
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 12) {
                     Text("Uses only this mission’s saved text summaries. It does not inspect live frames or change mission settings.")
-                        .font(.system(size: 11))
+                        .font(.system(size: ACTAType.metadata))
                         .foregroundStyle(ACTATheme.textSecondary)
                     if missionConsults(for: mission.id).isEmpty {
                         Text("No consult messages yet.")
-                            .font(.system(size: 11))
+                            .font(.system(size: ACTAType.metadata))
                             .foregroundStyle(ACTATheme.textMuted)
                     } else {
                         ScrollView {
                             LazyVStack(alignment: .leading, spacing: 8) {
                                 ForEach(missionConsults(for: mission.id)) { message in
-                                    VStack(alignment: .leading, spacing: 3) {
+                                    VStack(alignment: .leading, spacing: 4) {
                                         Text(LocalizedStringKey(message.role == .operatorMessage ? "Operator" : "Local assistant"))
-                                            .font(.system(size: 10, weight: .semibold))
+                                            .font(.system(size: ACTAType.metadata, weight: .semibold))
                                             .foregroundStyle(ACTATheme.textMuted)
                                         Text(message.text)
-                                            .font(.system(size: 12))
+                                            .font(.system(size: ACTAType.caption))
                                             .foregroundStyle(ACTATheme.textPrimary)
                                             .textSelection(.enabled)
                                         Text(message.createdAt.formatted(date: .abbreviated, time: .shortened, locale: locale))
-                                            .font(.system(size: 10).monospacedDigit())
+                                            .font(.system(size: ACTAType.metadata).monospacedDigit())
                                             .foregroundStyle(ACTATheme.textMuted)
                                     }
                                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -316,7 +316,7 @@ struct CameraMissionsPanel: View {
                     HStack {
                         if let error = consultErrors[mission.id], !error.isEmpty {
                             Text(locale.appLanguage.localizedMessage(error))
-                                .font(.system(size: 11))
+                                .font(.system(size: ACTAType.metadata))
                                 .foregroundStyle(ACTATheme.danger)
                                 .accessibilityLabel("Mission consult error: \(error)")
                         }
@@ -333,14 +333,14 @@ struct CameraMissionsPanel: View {
                     }
                     if model.missionConsultBusy {
                         Label(locale.appLanguage.localizedMessage(model.missionConsultStatus), systemImage: "hourglass")
-                            .font(.system(size: 11))
+                            .font(.system(size: ACTAType.metadata))
                             .foregroundStyle(ACTATheme.textSecondary)
                             .accessibilityLabel("Mission consult in progress: \(model.missionConsultStatus)")
                     }
                 }
                 .padding(.vertical, 8)
             }
-            .font(.system(size: 11, weight: .medium))
+            .font(.system(size: ACTAType.metadata, weight: .medium))
             .padding(.horizontal, 4)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

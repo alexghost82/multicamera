@@ -6,6 +6,7 @@ struct VideoCanvas: View {
     @ObservedObject var model: WallModel
     var cameras: [Camera]? = nil
     var arrangeCameras = false
+    var preferredColumns: Int? = nil
     var edit: (Camera) -> Void
     var remove: (Camera) -> Void
     @State private var order: [UUID] = []
@@ -16,9 +17,9 @@ struct VideoCanvas: View {
             let visibleCameras = model.expanded.flatMap { expandedID in
                 candidates.first { $0.id == expandedID }
             }.map { [$0] } ?? candidates
-            let columns = VideoWallLayout.columnCount(configured: model.config.columns,
+            let columns = model.expanded != nil ? 1 : preferredColumns ?? VideoWallLayout.columnCount(configured: model.config.columns,
                 cameraCount: visibleCameras.count, expanded: model.expanded != nil)
-            let gridGap = 7.0
+            let gridGap = 12.0
             let frames = Dictionary(uniqueKeysWithValues: visibleCameras.enumerated().map { index, camera in
                 let initial = VideoWallLayout.gridTileFrame(index: index, columns: columns,
                     availableWidth: geometry.size.width, gap: gridGap)
@@ -101,7 +102,7 @@ struct MovableVideoTile: View {
                 if !expanded && rearrangeEnabled {
                     grip(edges: [.bottom, .right], label: "Resize bottom right")
                         .frame(width: 14, height: 14)
-                        .overlay { Image(systemName: "arrow.up.left.and.arrow.down.right").font(.system(size: 9)).foregroundStyle(.white).allowsHitTesting(false) }
+                        .overlay { Image(systemName: "arrow.up.left.and.arrow.down.right").font(.system(size: ACTAType.metadata)).foregroundStyle(.white).allowsHitTesting(false) }
                 }
             }
             .focusable()

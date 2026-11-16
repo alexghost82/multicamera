@@ -47,6 +47,7 @@ public enum ACTAAITier: String, Codable, Sendable {
 }
 
 public struct ACTAAIConfiguration: Codable, Sendable, Equatable {
+    public var tierModelNames: [String: String]
     public var mode: ACTAAIBackendMode
     public var vllmBaseURL: String
     public var vllmModelName: String
@@ -62,6 +63,7 @@ public struct ACTAAIConfiguration: Codable, Sendable, Equatable {
 
     public init(
         mode: ACTAAIBackendMode = .mlxInProcess,
+        tierModelNames: [String: String] = [:],
         vllmBaseURL: String = "http://127.0.0.1:8000/v1",
         vllmModelName: String = "Qwen/Qwen2.5-VL-7B-Instruct",
         openAIBaseURL: String = "https://api.openai.com/v1/responses",
@@ -74,6 +76,7 @@ public struct ACTAAIConfiguration: Codable, Sendable, Equatable {
         monthlyBudgetLimitUSD: Double = 400.0,
         preferredLanguage: ACTAPromptLanguage = .ru
     ) {
+        self.tierModelNames = tierModelNames
         self.mode = mode
         self.vllmBaseURL = vllmBaseURL
         self.vllmModelName = vllmModelName
@@ -659,15 +662,18 @@ public final class ACTAAIClient: @unchecked Sendable {
     private let chatLane = ACTAAsyncLaneLimiter(limit: ACTAAILane.chat.maxConcurrentRequests)
     private let alertLane = ACTAAsyncLaneLimiter(limit: ACTAAILane.alert.maxConcurrentRequests)
     private let backgroundLane = ACTAAsyncLaneLimiter(limit: ACTAAILane.background.maxConcurrentRequests)
+    private let agentTrace: (@Sendable (String) -> Void)?
     private let transport: ACTAHTTPTransport
 
     init(
         config: ACTAAIConfiguration = ACTAAIConfiguration(),
         localVLM: LocalVLMClient? = nil,
         cacheStore: LocalTrackingStore? = nil,
-        transport: ACTAHTTPTransport? = nil
+        transport: ACTAHTTPTransport? = nil,
+        agentTrace: (@Sendable (String) -> Void)? = nil
     ) {
         self.config = config
+        self.agentTrace = agentTrace
         self.localVLM = localVLM
         self.cacheStore = cacheStore
         if let transport {
@@ -1068,7 +1074,7 @@ public final class ACTAAIClient: @unchecked Sendable {
         previousResponseID: String? = nil,
         owedOutputs: [ACTAPendingOutputDebt] = []
     ) async throws -> String {
-        let body = Self.buildOpenAIResponsesBody(
+        var body = Self.buildOpenAIResponsesBody(
             tier: tier,
             prompt: prompt,
             jpegImages: jpegImages,
@@ -1076,6 +1082,7 @@ public final class ACTAAIClient: @unchecked Sendable {
             owedOutputs: owedOutputs,
             store: true
         )
+        body["model"] = config.tierModelNames[tier.rawValue] ?? tier.rawValue
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -1173,7 +1180,8 @@ public final class ACTAAIClient: @unchecked Sendable {
         let preferredAccount = (lane == .alert) ? ACTAKeychainStore.alertKeyAccount : ACTAKeychainStore.primaryKeyAccount
         let apiKey = ACTAKeychainStore.loadKey(account: preferredAccount)
             ?? ACTAKeychainStore.loadKey(account: ACTAKeychainStore.primaryKeyAccount)
-        let body = Self.buildOpenAIAgentBody(request: redactedRequest)
+        var body = Self.buildOpenAIAgentBody(request: redactedRequest)
+        body["model"] = config.tierModelNames[request.tier.rawValue] ?? request.tier.rawValue
         let chained = body["previous_response_id"] != nil
 
         var urls: [(URL, String)] = []
@@ -1233,7 +1241,28 @@ public final class ACTAAIClient: @unchecked Sendable {
         backend: ACTAAgentBackend,
         request: ACTAAgentRequest
     ) async throws -> ACTAAgentTurnResult {
-        let prompt = Self.renderLocalAgentPrompt(request: request)
+        let forceAnswer: Bool
+        if case .function("present_answer") = request.toolChoice { forceAnswer = true } else { forceAnswer = false }
+        let prompt: String
+        if forceAnswer {
+            let context = request.fullInput.map { item -> String in
+                switch item {
+                case .user(let text, _): return text
+                case .assistantText(let text): return "Earlier assistant: " + String(text.prefix(700))
+                case .functionOutput(_, let output): return output
+                case .functionCall: return ""
+                }
+            }.joined(separator: "\n")
+            prompt = """
+            \(request.instructions)
+            Context and operator question:
+            \(context)
+            Return ONLY this compact JSON object (no tool_calls wrapper, no Markdown fence):
+            {"citedRecordIDs":["S1"],"answerMarkdown":"Your concise answer in the operator's language, at most 180 words, one short paragraph per relevant camera","confidence":0.7}
+            Replace S1 with actual supporting aliases from the catalogue. Put source aliases ONLY in citedRecordIDs, not in the answer text. Do not list UUIDs, propose actions, add recommendations, or repeat the JSON field names in answerMarkdown. Never claim that no other events occurred merely because only a sample was retrieved.
+            """
+        } else { prompt = Self.renderLocalAgentPrompt(request: request) }
+        agentTrace?("REQUEST chars=\(prompt.count) backend=\(backend)")
         var images: [Data] = []
         for item in request.fullInput {
             if case .user(_, let imgs) = item { images.append(contentsOf: imgs) }
@@ -1243,8 +1272,11 @@ public final class ACTAAIClient: @unchecked Sendable {
         if backend == .vllm {
             raw = try await callLocalVLLM(config: config, prompt: prompt, jpegImages: recentImages, tier: request.tier)
         } else {
-            raw = try await callMLX(prompt: prompt, jpegImages: recentImages, tier: request.tier)
+            guard let localVLM else { throw ACTAAgentError.noBackendAvailable }
+            if recentImages.isEmpty { raw = try await localVLM.analyze(text: prompt, maxTokens: 2048) }
+            else { raw = try await localVLM.analyze(images: recentImages, prompt: prompt, maxTokens: 2048) }
         }
+        agentTrace?("RAW \(raw)")
         let parsed = Self.parseLocalAgentReply(raw)
         return ACTAAgentTurnResult(responseID: nil, text: parsed.text, functionCalls: parsed.calls, backend: backend)
     }

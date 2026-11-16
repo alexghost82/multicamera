@@ -25,18 +25,32 @@ public struct AgentEvidenceLedger: Sendable {
         if let rows = value as? [Any] {
             for row in rows { walk(row, tool: tool) }
         } else if let row = value as? [String: Any] {
-            let keys = ["frame_id", "clip_id", "chapter_id", "track_id", "event_id", "alert_id", "run_id", "mission_id", "identity_id"]
+            let keys = ["scan_id", "stat_id", "frame_id", "clip_id", "chapter_id", "track_id", "event_id", "alert_id", "run_id", "mission_id", "identity_id"]
             if let key = keys.first(where: { row[$0] is String }), let recordID = row[key] as? String, !recordID.isEmpty {
                 let kind = row["type"] as? String ?? String(key.dropLast(3))
                 let id = "\(tool):\(kind):\(recordID)"
                 if !references.contains(where: { $0.id == id }), references.count < 200 {
                     references.append(ACTAEvidenceReference(id: id, recordID: recordID, kind: kind, sourceTool: tool,
                         cameraID: row["camera_id"] as? String, cameraName: row["camera_name"] as? String,
-                        occurredAt: (row["captured_at"] ?? row["at"] ?? row["started_at"] ?? row["created_at"] ?? row["occurred_at"]) as? String))
+                        occurredAt: (row["captured_at"] ?? row["at"] ?? row["started_at"] ?? row["created_at"] ?? row["occurred_at"] ?? row["observed_at"] ?? row["last_seen"]) as? String))
                 }
             }
             for child in row.values where child is [Any] || child is [String: Any] { walk(child, tool: tool) }
         }
+    }
+
+    public func aliasCatalogueJSON() -> String {
+        let rows = references.enumerated().map { index, ref in
+            ["cite": "S\(index + 1)", "record": ref.recordID, "kind": ref.kind, "camera": ref.cameraName ?? ref.cameraID ?? "", "at": ref.occurredAt ?? ""]
+        }
+        return (try? JSONSerialization.data(withJSONObject: rows, options: [.sortedKeys])).map { String(decoding: $0, as: UTF8.self) } ?? "[]"
+    }
+
+    public func resolvingAliases(_ answer: ACTAChatPresentAnswer) -> ACTAChatPresentAnswer {
+        var result = answer
+        let aliases = Dictionary(uniqueKeysWithValues: references.enumerated().map { ("S\($0.offset + 1)", $0.element.id) })
+        result.citedRecordIDs = answer.citedRecordIDs.map { aliases[$0] ?? $0 }
+        return result
     }
 
     public func catalogueJSON() -> String {

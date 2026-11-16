@@ -77,7 +77,7 @@ final class UIStringVisitor: SyntaxVisitor {
             if let call = ancestor.as(FunctionCallExprSyntax.self) {
                 let name = call.calledExpression.as(DeclReferenceExprSyntax.self)?.baseName.text
                     ?? call.calledExpression.as(MemberAccessExprSyntax.self)?.declName.baseName.text
-                if let name, ["accessibilityIdentifier", "CTFontCreateWithName", "NSClassFromString"].contains(name) { return nil }
+                if let name, ["accessibilityIdentifier", "anchorPreference", "CTFontCreateWithName", "NSClassFromString"].contains(name) { return nil }
                 if let name, calls.contains(name) { return name }
                 if let name, ["systemName", "Image", "imageNamed", "appendingPathComponent", "URL", "NSImage"].contains(name) { return nil }
             }

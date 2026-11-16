@@ -23,8 +23,30 @@ struct VLMPreferences: Codable, Equatable {
     var actaOpenAIBaseURL: String = "https://api.openai.com/v1/responses"
     var actaPreferredLanguage: ACTAPromptLanguage = .ru
     var actaSpokenBriefingEnabled: Bool = false
+    var cloudNanoModel = ACTAAITier.nano.rawValue
+    var cloudMiniModel = ACTAAITier.mini.rawValue
+    var cloudFullModel = ACTAAITier.full.rawValue
+    var actaBackupRelayURL = "http://127.0.0.1:8018/api/backup/responses"
+    var privacyBlurFacesInCloud = true
+    var privacyBlurPlatesInCloud = true
+    var dailyBudgetLimitUSD = 80.0
+    var monthlyBudgetLimitUSD = 400.0
+
 
     func validate() throws {
+        for value in [actaVLLMBaseURL, actaOpenAIBaseURL, actaBackupRelayURL] {
+            guard let url = URLComponents(string: value), ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                  url.host?.isEmpty == false, url.user == nil, url.password == nil, url.fragment == nil else {
+                throw ConfigurationError.invalid("Enter an HTTP or HTTPS endpoint without credentials or fragments.")
+            }
+        }
+        guard [cloudNanoModel, cloudMiniModel, cloudFullModel, actaVLLMModelName].allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }),
+              alertRules.allSatisfy({ (15...86400).contains($0.cooldownSeconds) }) else {
+            throw ConfigurationError.invalid("Check model names and alert cooldowns.")
+        }
+        guard dailyBudgetLimitUSD.isFinite, monthlyBudgetLimitUSD.isFinite, dailyBudgetLimitUSD >= 0, monthlyBudgetLimitUSD >= dailyBudgetLimitUSD else {
+            throw ConfigurationError.invalid("Check the daily and monthly AI budget limits.")
+        }
         guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               (15...3600).contains(intervalSeconds), alertRules.count <= 20,
               alertRules.allSatisfy({ !$0.condition.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.condition.count <= 500 }) else {
@@ -35,6 +57,8 @@ struct VLMPreferences: Codable, Equatable {
     init() {}
 
     private enum CodingKeys: String, CodingKey {
+        case cloudNanoModel, cloudMiniModel, cloudFullModel
+        case actaBackupRelayURL, privacyBlurFacesInCloud, privacyBlurPlatesInCloud, dailyBudgetLimitUSD, monthlyBudgetLimitUSD
         case model, scheduleEnabled, intervalSeconds, analyzeAllEnabledCameras, scheduledCameraIDs, alertRules
         case actaBackendMode = "ghostBackendMode"
         case actaVLLMBaseURL = "ghostVLLMBaseURL"
@@ -46,6 +70,14 @@ struct VLMPreferences: Codable, Equatable {
 
     init(from decoder: Swift.Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        cloudNanoModel = try c.decodeIfPresent(String.self, forKey: .cloudNanoModel) ?? ACTAAITier.nano.rawValue
+        cloudMiniModel = try c.decodeIfPresent(String.self, forKey: .cloudMiniModel) ?? ACTAAITier.mini.rawValue
+        cloudFullModel = try c.decodeIfPresent(String.self, forKey: .cloudFullModel) ?? ACTAAITier.full.rawValue
+        actaBackupRelayURL = try c.decodeIfPresent(String.self, forKey: .actaBackupRelayURL) ?? "http://127.0.0.1:8018/api/backup/responses"
+        privacyBlurFacesInCloud = try c.decodeIfPresent(Bool.self, forKey: .privacyBlurFacesInCloud) ?? true
+        privacyBlurPlatesInCloud = try c.decodeIfPresent(Bool.self, forKey: .privacyBlurPlatesInCloud) ?? true
+        dailyBudgetLimitUSD = try c.decodeIfPresent(Double.self, forKey: .dailyBudgetLimitUSD) ?? 80
+        monthlyBudgetLimitUSD = try c.decodeIfPresent(Double.self, forKey: .monthlyBudgetLimitUSD) ?? 400
         model = try c.decodeIfPresent(String.self, forKey: .model) ?? VLMPreferences.defaultModelPath
         scheduleEnabled = try c.decodeIfPresent(Bool.self, forKey: .scheduleEnabled) ?? false
         intervalSeconds = try c.decodeIfPresent(Int.self, forKey: .intervalSeconds) ?? 15

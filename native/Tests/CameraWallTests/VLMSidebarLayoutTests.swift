@@ -187,7 +187,7 @@ final class VLMSidebarLayoutTests: XCTestCase {
         defer { NSApp.setActivationPolicy(policy) }
         for width in [280, 320, 420, 600] {
             let content = AnalysisPanelViewport {
-                AnalysisPanelTabs(selection: .constant(.history), alertCount: 2)
+                AnalysisPanelTabs(selection: .constant(.ask), alertCount: 2)
                 AnalysisHistoryPage(status: AppLanguage.russian.localized("Local VLM not connected"), busy: false,
                     persistHistory: .constant(false), allowActions: .constant(false), expandTerms: .constant(false),
                     question: .constant(""), sendDisabled: true, clear: {}, submit: {}) {
@@ -212,8 +212,8 @@ final class VLMSidebarLayoutTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(200))
             host.layoutSubtreeIfNeeded()
             window.displayIfNeeded()
-            let labels = ["Спросить", "История", "Расписание", "Оповещения (2)",
-                          "Сохранять локальную историю запросов", "Разрешить предложения действий", "Локально расширять поисковые термины",
+            let labels = ["Чат", "Расписание", "Оповещения (2)",
+                          "Настройки",
                           "Спросить о сохранённой истории камер"]
             let image = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
             host.cacheDisplay(in: host.bounds, to: image)
@@ -263,7 +263,7 @@ final class VLMSidebarLayoutTests: XCTestCase {
         for (width, height) in [(280, 420), (420, 540)] {
             var submissions = 0
             let content = AnalysisPanelViewport {
-                AnalysisPanelTabs(selection: .constant(.history), alertCount: 2)
+                AnalysisPanelTabs(selection: .constant(.ask), alertCount: 2)
                 AnalysisHistoryPage(status: AppLanguage.russian.localized("Local VLM not connected"), busy: false,
                     persistHistory: .constant(false), allowActions: .constant(false), expandTerms: .constant(false),
                     question: .constant("Что было вчера?"), sendDisabled: false, clear: {}, submit: { submissions += 1 }) {

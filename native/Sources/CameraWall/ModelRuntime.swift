@@ -1,7 +1,7 @@
 import Foundation
 import Combine
 
-enum LocalModelService: String, CaseIterable, Identifiable, Sendable {
+enum LocalModelService: String, CaseIterable, Identifiable, Codable, Sendable {
     case yolo, pose, segmentation, personReID, vehicleReID, qwen
 
     var id: String { rawValue }
@@ -20,6 +20,7 @@ enum LocalModelService: String, CaseIterable, Identifiable, Sendable {
 
 enum LocalModelState: Equatable, Sendable {
     case waiting
+    case disabled
     case loading
     case ready
     case failed(String)
@@ -27,6 +28,7 @@ enum LocalModelState: Equatable, Sendable {
     var label: String {
         switch self {
         case .waiting: return "Waiting"
+        case .disabled: return "Disabled"
         case .loading: return "Loading"
         case .ready: return "Ready"
         case .failed: return "Error"
@@ -51,7 +53,7 @@ final class LocalModelRuntime: ObservableObject {
     }
 
     @discardableResult
-    func start(modelPath: String) -> Task<Void, Never> {
+    func start(modelPath: String, enabled: Set<LocalModelService> = Set(LocalModelService.allCases)) -> Task<Void, Never> {
         if let preparation, qwenModelPath == modelPath { return preparation }
         if qwenModelPath != modelPath {
             cancel()
@@ -66,6 +68,7 @@ final class LocalModelRuntime: ObservableObject {
             defer { if self.generation == token { self.preparation = nil } }
             for service in LocalModelService.allCases {
                 guard !Task.isCancelled, self.generation == token else { return }
+                guard enabled.contains(service) else { self.states[service] = .disabled; continue }
                 guard self.states[service] != .ready else { continue }
                 self.states[service] = .loading
                 do {
@@ -84,6 +87,11 @@ final class LocalModelRuntime: ObservableObject {
         }
         preparation = task
         return task
+    }
+
+    func invalidate() {
+        cancel()
+        states = Dictionary(uniqueKeysWithValues: LocalModelService.allCases.map { ($0, .waiting) })
     }
 
     func cancel() {

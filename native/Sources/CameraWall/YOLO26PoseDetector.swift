@@ -131,6 +131,8 @@ final class YOLO26PoseDetector: @unchecked Sendable {
         self.init(modelURL: url)
     }
 
+    func resetModel() { queue.async { [self] in model = nil } }
+
     func prepare() async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             queue.async { [self] in
@@ -162,6 +164,7 @@ final class YOLO26PoseDetector: @unchecked Sendable {
     }
 
     func detect(pixel: CVPixelBuffer, threshold: Double) throws -> PoseInferenceResult {
+        try ModelSelectionRegistry.require(.pose)
         guard threshold.isFinite, (0...1).contains(threshold) else { throw ConfigurationError.invalid("Invalid pose confidence threshold.") }
         let started = ProcessInfo.processInfo.systemUptime
         let prepared = try letterbox(pixel)
@@ -208,7 +211,8 @@ final class YOLO26PoseDetector: @unchecked Sendable {
 
     private func loadedModel() throws -> VNCoreMLModel {
         if let model { return model }
-        let compiledURL = try Self.compiledModelURL(for: modelURL)
+        try ModelSelectionRegistry.require(.pose)
+        let compiledURL = try Self.compiledModelURL(for: ModelSelectionRegistry.path(.pose) ?? modelURL)
         let configuration = MLModelConfiguration()
         configuration.computeUnits = .cpuAndNeuralEngine
         let coreModel = try MLModel(contentsOf: compiledURL, configuration: configuration)

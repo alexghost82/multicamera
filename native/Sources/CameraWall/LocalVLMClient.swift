@@ -44,28 +44,35 @@ final class LocalVLMClient {
     static let maximumEvidenceImageBytes = 1_000_000
     static let maximumBatchImages = 4
 
-    private let model: String
+    private let requestedModel: String
+    private var model: String { ModelSelectionRegistry.path(.qwen)?.path ?? requestedModel }
     private let workload: VLMWorkload
 
     init(model: String, workload: VLMWorkload = .background) {
-        self.model = model
+        self.requestedModel = model
         self.workload = workload
     }
 
+    static func unloadModels() async { await NativeVLMEngine.shared.unloadModels() }
+
     func prepare() async throws {
-        try await NativeVLMEngine.shared.prepare(model: model)
+        try ModelSelectionRegistry.require(.qwen)
+        return try await NativeVLMEngine.shared.prepare(model: model)
     }
 
     func analyze(image: Data, prompt: String) async throws -> String {
-        try await NativeVLMEngine.shared.analyze(images: [image], prompt: prompt, model: model, workload: workload)
+        try ModelSelectionRegistry.require(.qwen)
+        return try await NativeVLMEngine.shared.analyze(images: [image], prompt: prompt, model: model, workload: workload)
     }
 
-    func analyze(images: [Data], prompt: String) async throws -> String {
-        try await NativeVLMEngine.shared.analyze(images: images, prompt: prompt, model: model, workload: workload)
+    func analyze(images: [Data], prompt: String, maxTokens: Int? = nil) async throws -> String {
+        try ModelSelectionRegistry.require(.qwen)
+        return try await NativeVLMEngine.shared.analyze(images: images, prompt: prompt, model: model, workload: workload, maxTokens: maxTokens)
     }
 
-    func analyze(text: String) async throws -> String {
-        try await NativeVLMEngine.shared.analyze(images: [], prompt: text, model: model, workload: workload)
+    func analyze(text: String, maxTokens: Int? = nil) async throws -> String {
+        try ModelSelectionRegistry.require(.qwen)
+        return try await NativeVLMEngine.shared.analyze(images: [], prompt: text, model: model, workload: workload, maxTokens: maxTokens)
     }
 }
 
@@ -200,13 +207,15 @@ private actor NativeVLMEngine {
 
     private var pools: [String: VLMInstancePool<ModelContainer>] = [:]
 
+    func unloadModels() { pools.removeAll() }
+
     func prepare(model: String) async throws {
         let pool = try pool(for: model)
         let lease = try await pool.acquire(.interactive)
         await pool.release(lease.slot)
     }
 
-    func analyze(images: [Data], prompt: String, model: String, workload: VLMWorkload) async throws -> String {
+    func analyze(images: [Data], prompt: String, model: String, workload: VLMWorkload, maxTokens: Int? = nil) async throws -> String {
         guard images.count <= LocalVLMClient.maximumBatchImages,
               images.allSatisfy({ $0.count <= LocalVLMClient.maximumEvidenceImageBytes }) else {
             throw LocalVLMError.invalidResponse
@@ -214,7 +223,7 @@ private actor NativeVLMEngine {
         let pool = try pool(for: model)
         let lease = try await pool.acquire(workload)
         do {
-            let response = try await Self.generate(images: images, prompt: prompt, container: lease.resource)
+            let response = try await Self.generate(images: images, prompt: prompt, container: lease.resource, maxTokens: maxTokens)
             await pool.release(lease.slot)
             return response
         } catch {
@@ -223,14 +232,14 @@ private actor NativeVLMEngine {
         }
     }
 
-    private static func generate(images: [Data], prompt: String, container: ModelContainer) async throws -> String {
+    private static func generate(images: [Data], prompt: String, container: ModelContainer, maxTokens: Int? = nil) async throws -> String {
         try Task.checkCancellation()
         var imageURLs: [URL] = []
         defer { imageURLs.forEach { try? FileManager.default.removeItem(at: $0) } }
         for image in images { imageURLs.append(try writeTemporaryImage(image)) }
         let inputImageURLs = imageURLs
 
-        let parameters = GenerateParameters(maxTokens: images.count > 1 ? 1536 : 1024, temperature: 0.1)
+        let parameters = GenerateParameters(maxTokens: maxTokens ?? (images.count > 1 ? 1536 : 1024), temperature: 0.1)
         // A private GPU stream per request lets concurrent instances interleave on the GPU.
         let response = try await MLX.Stream.withNewDefaultStream(device: .gpu) {
             try await container.perform { context in

@@ -38,22 +38,24 @@ struct SafetyIncidentCenterView: View {
             }
             if let error = engine.persistenceError {
                 Label(languageSettings.localizedMessage(error), systemImage: "exclamationmark.triangle")
-                    .foregroundStyle(.red).font(.callout).textSelection(.enabled)
+                    .foregroundStyle(.red).font(.system(size: ACTAType.caption)).textSelection(.enabled)
             }
             HSplitView {
                 List(selection: $selectedID) {
                     ForEach(filtered) { incident in
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(languageSettings.localizedMessage(incident.title)).font(.system(size: 13, weight: .semibold))
-                            Text(incident.cameraName).font(.system(size: 12))
+                            Text(languageSettings.localizedMessage(incident.title)).font(.system(size: ACTAType.body, weight: .semibold))
+                            Text(incident.cameraName).font(.system(size: ACTAType.caption))
                             Text(languageSettings.localized(incident.status.rawValue))
-                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                                .font(.system(size: ACTAType.metadata)).foregroundStyle(.secondary)
                         }
                         .padding(.vertical, 4)
                         .tag(incident.id)
                     }
                 }
-                .frame(minWidth: 220, idealWidth: 280, maxWidth: 360)
+                .scrollContentBackground(.hidden)
+                .background(ACTATheme.sidebar)
+                .frame(minWidth: 240, idealWidth: 300, maxWidth: 360)
                 if let incident = engine.incidents.first(where: { $0.id == selectedID }) {
                     SafetyIncidentDetailView(engine: engine, languageSettings: languageSettings, incident: incident)
                         .id(incident.id)
@@ -65,9 +67,9 @@ struct SafetyIncidentCenterView: View {
                 }
             }
         }
-        .padding(20)
+        .padding(ACTASpacing.section)
         .frame(minWidth: 920, minHeight: 620)
-        .font(.system(size: 13))
+        .actaAppearance()
         .environment(\.locale, languageSettings.locale)
         .onAppear { selectedID = filtered.first?.id }
         .onChange(of: filtered.map(\.id)) { _, ids in

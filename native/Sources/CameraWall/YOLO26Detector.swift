@@ -30,7 +30,12 @@ final class YOLO26Detector: @unchecked Sendable {
         }
     }
 
+    func resetModel() {
+        queue.async { [self] in model = nil }
+    }
+
     static var defaultModelURL: URL? {
+        if let selected = ModelSelectionRegistry.path(.yolo) { return selected }
         let modelDirectory = "yolo26n.mlmodelc"
         let workingDirectory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
         let sourceRoot = URL(fileURLWithPath: #filePath)
@@ -74,6 +79,7 @@ final class YOLO26Detector: @unchecked Sendable {
     }
 
     func detect(pixel: CVPixelBuffer, threshold: Double) throws -> DetectionResult {
+        try ModelSelectionRegistry.require(.yolo)
         let visionModel = try loadedModel()
         let started = ProcessInfo.processInfo.systemUptime
         let request = VNCoreMLRequest(model: visionModel)

@@ -64,11 +64,20 @@ final class ONNXReIDEncoder: @unchecked Sendable {
         environment = try ORTEnv(loggingLevel: .error)
     }
 
+    func resetModels() {
+        sessionLock.lock(); sessions.removeAll(); sessionLock.unlock()
+        cacheLock.lock(); embeddingCache.removeAll(); cacheLock.unlock()
+    }
+
     func prepare(_ kind: ReIDModelKind) throws {
+        try ModelSelectionRegistry.require(kind == .person ? .personReID : .vehicleReID)
         _ = try session(for: kind)
     }
 
     static func modelURL(for kind: ReIDModelKind) -> URL? {
+        let service: LocalModelService = kind == .person ? .personReID : .vehicleReID
+        guard ModelSelectionRegistry.isEnabled(service) else { return nil }
+        if let selected = ModelSelectionRegistry.path(service) { return selected }
         var candidates: [URL] = []
         if let override = ProcessInfo.processInfo.environment[kind.environmentKey], !override.isEmpty {
             candidates.append(URL(fileURLWithPath: override))
@@ -136,6 +145,7 @@ final class ONNXReIDEncoder: @unchecked Sendable {
 
     func embedding(jpeg: Data, trackID: UUID, label: String) throws -> [Float] {
         guard let kind = ReIDModelKind.forLabel(label) else { throw ONNXReIDError.invalidImage }
+        try ModelSelectionRegistry.require(kind == .person ? .personReID : .vehicleReID)
         cacheLock.lock()
         if let cached = embeddingCache[trackID] {
             cacheLock.unlock()
@@ -168,6 +178,7 @@ final class ONNXReIDEncoder: @unchecked Sendable {
     }
 
     private func session(for kind: ReIDModelKind) throws -> ONNXModelSession {
+        try ModelSelectionRegistry.require(kind == .person ? .personReID : .vehicleReID)
         sessionLock.lock()
         defer { sessionLock.unlock() }
         if let existing = sessions[kind] { return existing }

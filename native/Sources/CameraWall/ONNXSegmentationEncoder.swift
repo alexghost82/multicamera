@@ -36,11 +36,16 @@ enum ONNXSegmentationEncoder {
     private static let lock = NSLock()
     private static var loadedSession: SegmentationModelSession?
 
+    static func resetModel() { lock.lock(); defer { lock.unlock() }; loadedSession = nil }
+
     static func prepare() throws {
+        try ModelSelectionRegistry.require(.segmentation)
         _ = try session()
     }
 
     static var modelURL: URL? {
+        guard ModelSelectionRegistry.isEnabled(.segmentation) else { return nil }
+        if let selected = ModelSelectionRegistry.path(.segmentation) { return selected }
         if let override = ProcessInfo.processInfo.environment["CAMERAWALL_SEG_MODEL"], !override.isEmpty {
             let url = URL(fileURLWithPath: override)
             if FileManager.default.fileExists(atPath: url.path) { return url }
@@ -261,6 +266,7 @@ enum ONNXSegmentationEncoder {
     }
 
     private static func session() throws -> SegmentationModelSession {
+        try ModelSelectionRegistry.require(.segmentation)
         lock.lock()
         defer { lock.unlock() }
         if let loadedSession { return loadedSession }

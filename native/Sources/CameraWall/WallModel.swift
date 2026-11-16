@@ -361,6 +361,8 @@ final class WallModel: ObservableObject {
         set { config.detectionFPS = newValue }
     }
     @Published var detectionStatus = "YOLO26 off"
+    @Published var runtimePreferences = AdvancedRuntimePreferences()
+    @Published var modelPreferences = ModelSelectionPreferences()
     @Published var vlmPreferences = VLMPreferences()
     @Published var featurePreferences = CameraFeaturePreferences()
     @Published var operationsPreferences = OperationsPreferences()
@@ -408,6 +410,8 @@ final class WallModel: ObservableObject {
     @Published var actaThreadFocusEntries: [ACTAThreadFocusEntry] = []
     @Published var actaChatActions: [ACTAChatActionRecord] = []
     private var actaAgentTask: Task<Void, Never>?
+    private var actaAgentWatchdog: Task<Void, Never>?
+    private var actaAgentGeneration = UUID()
     @Published private(set) var actaAgentBusy = false
     @Published private(set) var actaAgentStatus = "Unified ACTA Agent ready"
     private(set) var actaAnalytics: ACTAAnalyticsCoordinator!
@@ -545,6 +549,10 @@ final class WallModel: ObservableObject {
         self.configURL = configURL
         self.relayFactory = relayFactory
         self.relay = relayFactory()
+        do { modelPreferences = try ModelSelectionPreferences.load(from: configURL.deletingLastPathComponent().appendingPathComponent("model-preferences.json")) }
+        catch { notice = "Model settings could not be loaded; defaults are active" }
+        ModelSelectionRegistry.update(modelPreferences)
+
         do {
             trackingStore = try LocalTrackingStore(url: trackingStoreURL)
             recentTracks = try trackingStore?.recentTracks() ?? []
@@ -605,6 +613,9 @@ final class WallModel: ObservableObject {
         } catch {
             notice = "VLM settings could not be loaded; defaults are active"
         }
+        do { runtimePreferences = try AdvancedRuntimePreferences.load(from: configURL.deletingLastPathComponent().appendingPathComponent("runtime-preferences.json")) }
+        catch { notice = "Runtime settings could not be loaded; defaults are active" }
+        localAnalyticsEngine.configureFallDetector(runtimePreferences.fall)
         let actaConfig = Self.makeACTAAIConfiguration(
             from: vlmPreferences,
             featurePreferences: featurePreferences
@@ -618,6 +629,7 @@ final class WallModel: ObservableObject {
             trackingStore: trackingStore,
             memoryFrameStore: cameraMemoryStore
         )
+        self.actaAnalytics.configureRuntime(runtimePreferences)
         self.actaNarrativeChapters = (try? trackingStore?.loadACTANarrativeChapterRecords(limit: 50)) ?? []
         self.actaChatThreads = (try? trackingStore?.listACTAChatThreads(limit: 50)) ?? []
         self.actaChatMessages = (try? trackingStore?.loadACTAChatMessages(threadID: activeACTAThreadID)) ?? []
@@ -742,7 +754,7 @@ final class WallModel: ObservableObject {
     }
 
     func prepareModels() {
-        modelRuntime.start(modelPath: vlmPreferences.model)
+        modelRuntime.start(modelPath: ModelSelectionRegistry.path(.qwen)?.path ?? vlmPreferences.model, enabled: modelPreferences.enabled)
     }
 
     private func launch(recovering: Bool) {
@@ -854,6 +866,9 @@ final class WallModel: ObservableObject {
         missionConsultTask?.cancel()
         missionConsultTask = nil
         actaAgentTask?.cancel()
+        actaAgentWatchdog?.cancel()
+        actaAgentGeneration = UUID()
+        actaAgentBusy = false
         actaAgentTask = nil
         stop()
         timer?.invalidate()
@@ -1273,13 +1288,72 @@ final class WallModel: ObservableObject {
     ) -> ACTAAIConfiguration {
         ACTAAIConfiguration(
             mode: preferences.actaBackendMode,
+            tierModelNames: [ACTAAITier.nano.rawValue: preferences.cloudNanoModel, ACTAAITier.mini.rawValue: preferences.cloudMiniModel, ACTAAITier.full.rawValue: preferences.cloudFullModel],
             vllmBaseURL: preferences.actaVLLMBaseURL,
             vllmModelName: preferences.actaVLLMModelName,
             openAIBaseURL: preferences.actaOpenAIBaseURL,
+            backupRelayURL: preferences.actaBackupRelayURL,
+            privacyBlurFacesInCloud: preferences.privacyBlurFacesInCloud,
+            privacyBlurPlatesInCloud: preferences.privacyBlurPlatesInCloud,
             allowExternalAI: featurePreferences.allowExternalAI,
             allowPlateRegistryLookup: featurePreferences.allowPlateRegistryLookup,
+            dailyBudgetLimitUSD: preferences.dailyBudgetLimitUSD,
+            monthlyBudgetLimitUSD: preferences.monthlyBudgetLimitUSD,
             preferredLanguage: preferences.actaPreferredLanguage
         )
+    }
+
+    func saveRuntimePreferences(_ preferences: AdvancedRuntimePreferences) throws {
+        try preferences.save(to: configURL.deletingLastPathComponent().appendingPathComponent("runtime-preferences.json"))
+        runtimePreferences = preferences
+        localAnalyticsEngine.configureFallDetector(preferences.fall)
+        actaAnalytics.configureRuntime(preferences)
+        if running { localAnalyticsEngine.startIfEnabled(activeCameraCount: config.cameras.filter(\.enabled).count) }
+    }
+
+    func saveModelPreferences(_ preferences: ModelSelectionPreferences) throws {
+        try preferences.save(to: configURL.deletingLastPathComponent().appendingPathComponent("model-preferences.json"))
+        detectionGeneration = UUID()
+        vlmTask?.cancel()
+        manualVLMTask?.cancel()
+        modelRuntime.invalidate()
+        modelPreferences = preferences
+        ModelSelectionRegistry.update(preferences)
+        detector.resetModel()
+        poseDetector?.resetModel()
+        ONNXSegmentationEncoder.resetModel()
+        ONNXReIDEncoder.shared?.resetModels()
+        localAnalyticsEngine.reloadPoseModel(customPath: ModelSelectionRegistry.path(.pose), replaceCustomPath: true)
+        for tile in tiles.values { tile.objects = []; tile.detectionAt = 0 }
+        let selection = preferences
+        Task { [weak self] in
+            await LocalVLMClient.unloadModels()
+            guard let self, self.modelPreferences == selection, self.applicationServicesStarted else { return }
+            self.prepareModels()
+        }
+    }
+
+    func saveSystemSettings(_ draft: WallConfiguration) throws {
+        var next = try config.applyingSettings(from: draft)
+        next.apiPort = draft.apiPort
+        next.rtspPort = draft.rtspPort
+        try next.validate()
+        let restart = running && (next.apiPort != config.apiPort || next.rtspPort != config.rtspPort || next.go2rtcPath != config.go2rtcPath)
+        try ConfigurationStore.save(next, to: configURL)
+        config = next
+        detectionGeneration = UUID()
+        for tile in tiles.values { tile.detectionAt = 0; tile.objects = tile.objects.filter { $0.confidence >= next.detectionThreshold } }
+        if restart { start() }
+    }
+
+    func saveFeaturePolicy(_ preferences: CameraFeaturePreferences) throws {
+        // Feature lifecycle changes go through setFeatureEnabled; this method changes only permissions and retention.
+        var next = preferences
+        next.enabledFeatures = featurePreferences.enabledFeatures
+        try featureCoordinator.savePreferences(next)
+        featurePreferences = next
+        actaAnalytics?.aiClient.updateConfiguration(Self.makeACTAAIConfiguration(from: vlmPreferences, featurePreferences: next))
+        if !next.retainFullFrames { stopMemorySampling() }
     }
 
     func saveVLMPreferences(_ draft: VLMPreferences) throws {
@@ -1671,27 +1745,8 @@ final class WallModel: ObservableObject {
 
     @discardableResult
     func askVLM(question: String, cameraIDs: Set<UUID>) -> Bool {
-        let text = question.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return false }
-        guard text.count <= 2000 else {
-            vlmStatus = "Research questions are limited to 2000 characters"
-            return false
-        }
-        let cameras = config.cameras.filter { $0.enabled && cameraIDs.contains($0.id) }
-        guard !cameras.isEmpty else {
-            vlmStatus = "Select at least one enabled camera"
-            return false
-        }
-        guard running else {
-            vlmStatus = "Connect cameras before asking about frames"
-            return false
-        }
-        if manualVLMBusy {
-            let accepted = manualQuestionQueue.enqueue(question: text, cameraIDs: Set(cameras.map(\.id)))
-            vlmStatus = accepted ? "Question queued after the current analysis" : "A question is already queued"
-            return accepted
-        }
-        return startVLMAnalysis(question: text, cameras: cameras, scheduled: false)
+        // Compatibility entry point: manual questions always use the same multi-source agent.
+        askACTAAgent(question: question)
     }
 
     private func startPendingVLMQuestion() {
@@ -3326,6 +3381,8 @@ final class WallModel: ObservableObject {
     }
 
     func selectACTAChatThread(_ threadID: String) {
+        if actaAgentBusy { cancelACTAAgent() }
+        actaAgentStatus = "ACTA Agent ready"
         activeACTAThreadID = threadID
         guard let store = trackingStore else { return }
         actaChatMessages = (try? store.loadACTAChatMessages(threadID: threadID)) ?? []
@@ -3373,6 +3430,22 @@ final class WallModel: ObservableObject {
         )
     }
 
+    func cancelACTAAgent(reason: String = "Request cancelled") {
+        guard actaAgentBusy else { return }
+        actaAgentGeneration = UUID()
+        actaAgentTask?.cancel(); actaAgentTask = nil
+        actaAgentWatchdog?.cancel(); actaAgentWatchdog = nil
+        actaAgentBusy = false
+        actaAgentStatus = reason
+        if let store = trackingStore {
+            let text = AppLanguage.current.localizedMessage(reason)
+            do {
+                _ = try store.appendACTAChatMessage(ACTAChatMessageRecord(threadID: activeACTAThreadID, role: "assistant", text: text))
+                actaChatMessages = try store.loadACTAChatMessages(threadID: activeACTAThreadID)
+            } catch { notice = error.localizedDescription }
+        }
+    }
+
     @discardableResult
     func askACTAAgent(question: String, focusedIdentityID: String? = nil) -> Bool {
         let text = question.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3388,7 +3461,7 @@ final class WallModel: ObservableObject {
         let uptimeNow = ProcessInfo.processInfo.systemUptime
         var livePixelSnapshots: [(cameraID: UUID, cameraName: String, pixel: IdentityPixelBuffer)] = []
         if running && !connecting {
-            for camera in config.cameras where camera.enabled && camera.aiChatEnabled {
+            for camera in config.cameras where camera.enabled {
                 guard let tile = tiles[camera.id], !tile.stale,
                       let frame = tile.session?.snapshot(),
                       let pixel = frame.pixel,
@@ -3396,11 +3469,29 @@ final class WallModel: ObservableObject {
                 livePixelSnapshots.append((camera.id, camera.name, IdentityPixelBuffer(value: pixel)))
             }
         }
+        guard let store = trackingStore else { actaAgentStatus = "Local tracking store is unavailable"; return false }
+        do {
+            _ = try store.ensureACTAChatThread(threadID: threadID, title: String(text.prefix(60)))
+            _ = try store.appendACTAChatMessage(ACTAChatMessageRecord(threadID: threadID, role: "user", text: text))
+            actaChatMessages = try store.loadACTAChatMessages(threadID: threadID)
+        } catch { actaAgentStatus = "Agent memory storage failed"; notice = error.localizedDescription; return false }
+        let generation = UUID()
+        actaAgentGeneration = generation
         actaAgentBusy = true
+        actaAgentWatchdog = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .seconds(120)) } catch { return }
+            guard let self, self.actaAgentGeneration == generation else { return }
+            self.cancelACTAAgent(reason: "The agent request timed out. Try a narrower period or retry.")
+        }
         actaAgentStatus = "ACTA Agent analyzing multi-memory sources…"
         actaAgentTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.actaAgentBusy = false; self.actaAgentTask = nil }
+            defer {
+                if self.actaAgentGeneration == generation {
+                    self.actaAgentBusy = false; self.actaAgentTask = nil
+                    self.actaAgentWatchdog?.cancel(); self.actaAgentWatchdog = nil
+                }
+            }
             var liveFrames: [ACTALiveCameraFrame] = []
             for snap in livePixelSnapshots.prefix(4) {
                 if let jpeg = try? await VLMFrameEncoder.jpegData(from: snap.pixel.value, maxDimension: 640, quality: 0.45) {
@@ -3411,16 +3502,18 @@ final class WallModel: ObservableObject {
                 question: text,
                 threadID: threadID,
                 focusedIdentityID: focusedIdentityID,
+                recordUserMessage: false,
                 liveFrames: liveFrames,
                 cameraNames: cameraNames,
                 onProgress: { [weak self] progress in
                     Task { @MainActor [weak self] in
-                        guard let self, self.activeACTAThreadID == threadID else { return }
+                        guard let self, self.activeACTAThreadID == threadID, self.actaAgentGeneration == generation else { return }
                         self.actaAgentStatus = progress
+                        if let store = self.trackingStore { self.actaChatMessages = (try? store.loadACTAChatMessages(threadID: threadID)) ?? self.actaChatMessages }
                     }
                 }
             )
-            guard !Task.isCancelled, self.activeACTAThreadID == threadID else { return }
+            guard !Task.isCancelled, self.activeACTAThreadID == threadID, self.actaAgentGeneration == generation else { return }
             if let store = self.trackingStore {
                 self.actaChatThreads = (try? store.listACTAChatThreads(limit: 50)) ?? self.actaChatThreads
                 self.actaChatMessages = (try? store.loadACTAChatMessages(threadID: threadID)) ?? self.actaChatMessages
@@ -3603,7 +3696,7 @@ final class WallModel: ObservableObject {
     }
 
     private func scheduleDetection(now: TimeInterval) {
-        guard detectionEnabled, running, now - lastDetectionSubmission >= 0.1 else { return }
+        guard ModelSelectionRegistry.isEnabled(workerMode ? .pose : .yolo), detectionEnabled, running, now - lastDetectionSubmission >= 0.1 else { return }
         let candidates = config.cameras.filter { $0.enabled && $0.yoloEnabled }
         guard !candidates.isEmpty else { return }
         for offset in 0..<candidates.count {
@@ -3617,7 +3710,7 @@ final class WallModel: ObservableObject {
             if workerMode {
                 guard let poseDetector else { continue }
                 // Low floor so occluded FALLING/FALLEN people stay tracked; FallDetector gates new tracks.
-                let poseThreshold = FallDetectorConfiguration().lowConfidenceFloor
+                let poseThreshold = runtimePreferences.fall.lowConfidenceFloor
                 let accepted = poseDetector.submit(pixel: pixel, threshold: poseThreshold) { [weak self] result in
                     Task { @MainActor [weak self] in
                         guard let self, self.detectionGeneration == generation,

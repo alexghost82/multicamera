@@ -11,7 +11,6 @@ struct WallView: View {
     @State private var editor: Camera?
     @State private var showLocalCamera = false
     @State private var showScreenCapture = false
-    @State private var showSettings = false
     @State private var showCameras = false
     @State private var showVideoFileImporter = false
     @State private var removeCamera: Camera?
@@ -28,7 +27,6 @@ struct WallView: View {
             showCameraManager: { showCameras = true },
             exportDiagnostics: { model.exportDiagnostics() },
             resetLayout: { model.resetLayout() },
-            showSettings: { showSettings = true },
             editCamera: { editor = $0 },
             removeCamera: { removeCamera = $0 }
         )
@@ -40,7 +38,6 @@ struct WallView: View {
         }
         .sheet(isPresented: $showLocalCamera) { LocalCameraEditor(model: model, original: nil) }
         .sheet(isPresented: $showScreenCapture) { ScreenCaptureCameraEditor(model: model, camera: nil) }
-        .sheet(isPresented: $showSettings) { SettingsView(model: model) }
         .sheet(isPresented: $showCameras) { CameraManager(model: model) }
         .fileImporter(
             isPresented: $showVideoFileImporter,
@@ -63,6 +60,7 @@ struct WallView: View {
             Button("Remove", role: .destructive) { if let camera = removeCamera { model.remove(camera) }; removeCamera = nil }
         }
         .environment(\.locale, languageSettings.locale)
+        .actaAppearance()
     }
 }
 
@@ -87,7 +85,7 @@ struct CameraManager: View {
                 }.padding(.vertical, 4)
             }
             HStack { Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.cancelAction) }
-        }.padding(20).frame(width: 600, height: 480)
+        }.padding(ACTASpacing.section).frame(width: 600, height: 480)
         .sheet(item: $editor) { camera in
             if camera.fileURL != nil { VideoFileCameraEditor(model: model, camera: camera) }
             else if camera.screenDisplayID != nil { ScreenCaptureCameraEditor(model: model, camera: camera) }
@@ -128,10 +126,10 @@ struct ScreenCaptureCameraEditor: View {
                 .accessibilityLabel("Screen display to capture")
             }
             Text("Capture starts only when this source is enabled and connected. CameraWall requests Screen Recording permission when you add the source.")
-                .font(.callout)
+                .font(.system(size: ACTAType.caption))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            if !error.isEmpty { Text(locale.appLanguage.localizedMessage(error)).foregroundStyle(.red).font(.callout) }
+            if !error.isEmpty { Text(locale.appLanguage.localizedMessage(error)).foregroundStyle(.red).font(.system(size: ACTAType.caption)) }
             HStack {
                 Button("Refresh displays") { Task { await loadDisplays() } }
                 Spacer()
@@ -199,7 +197,7 @@ struct VideoFileCameraEditor: View {
                 TextField("Name", text: $name)
                 LabeledContent("File", value: camera.fileURL?.lastPathComponent ?? "")
             }
-            if !error.isEmpty { Text(locale.appLanguage.localizedMessage(error)).foregroundStyle(.red).font(.callout) }
+            if !error.isEmpty { Text(locale.appLanguage.localizedMessage(error)).foregroundStyle(.red).font(.system(size: ACTAType.caption)) }
             HStack {
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
@@ -249,27 +247,27 @@ struct CameraTile: View {
                 VStack(spacing: 4) {
                     Image(systemName: "wifi.slash").font(.title3)
                     Text(tile.frame.pixel == nil ? appLanguage.localizedMessage(tile.frame.message) : appLanguage.localized("Stale frame"))
-                        .font(.caption).lineLimit(2).multilineTextAlignment(.center)
+                        .font(.system(size: ACTAType.caption)).lineLimit(2).multilineTextAlignment(.center)
                 }
                 .foregroundStyle(ACTATheme.textSecondary)
                 .padding(4)
             }
 
             VStack(spacing: 0) {
-                HStack(spacing: 6) {
+                HStack(spacing: 8) {
                     Circle().fill(tile.stale ? ACTATheme.textMuted : ACTATheme.success).frame(width: 9, height: 9)
                     Text(camera.name)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.system(size: ACTAType.caption, weight: .semibold))
                         .foregroundStyle(ACTATheme.textPrimary)
                         .lineLimit(1)
                         .truncationMode(.tail)
                     Spacer(minLength: 2)
                     Button(action: toggleFavorite) {
                         Image(systemName: isFavorite ? "star.fill" : "star")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(.system(size: ACTAType.caption, weight: .semibold))
                             .foregroundStyle(isFavorite ? ACTATheme.warning : ACTATheme.textPrimary)
                             .frame(width: 28, height: 28)
-                            .background(Color.black.opacity(0.58), in: RoundedRectangle(cornerRadius: 6))
+                            .background(Color.black.opacity(0.58), in: RoundedRectangle(cornerRadius: 8))
                     }
                     .buttonStyle(.plain)
                     .help(appLanguage.localized(isFavorite ? "Remove from favorites" : "Add to favorites"))
@@ -284,10 +282,10 @@ struct CameraTile: View {
                     } label: {
                         Image(systemName: "ellipsis")
                             .rotationEffect(.degrees(90))
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(.system(size: ACTAType.body, weight: .semibold))
                             .foregroundStyle(ACTATheme.textPrimary)
                             .frame(width: 28, height: 28)
-                            .background(Color.black.opacity(0.58), in: RoundedRectangle(cornerRadius: 6))
+                            .background(Color.black.opacity(0.58), in: RoundedRectangle(cornerRadius: 8))
                     }
                     .menuStyle(.borderlessButton)
                     .accessibilityLabel(appLanguage.localized("Actions for %@", arguments: [camera.name]))
@@ -295,47 +293,37 @@ struct CameraTile: View {
 
                 Spacer(minLength: 0)
 
-                HStack(spacing: 6) {
+                HStack(spacing: 8) {
                     if tile.stale {
                         Label("OFFLINE", systemImage: "wifi.slash")
-                            .font(.system(size: 10, weight: .bold))
+                            .font(.system(size: ACTAType.metadata, weight: .bold))
                             .foregroundStyle(ACTATheme.textPrimary)
                             .padding(.horizontal, 7)
                             .frame(height: 24)
-                            .background(Color.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 5))
+                            .background(Color.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 8))
                     } else {
                         Text(Date.now, style: .time)
-                            .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                            .font(.system(size: ACTAType.metadata, weight: .semibold).monospacedDigit())
                             .foregroundStyle(.white)
                             .padding(.horizontal, 7)
                             .frame(height: 24)
-                            .background(Color.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 5))
+                            .background(Color.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 8))
                         Label("LIVE", systemImage: "circle.fill")
-                            .font(.system(size: 10, weight: .bold))
+                            .font(.system(size: ACTAType.metadata, weight: .bold))
                             .foregroundStyle(ACTATheme.textPrimary)
                             .padding(.horizontal, 8)
                             .frame(height: 24)
-                            .background(ACTATheme.danger, in: RoundedRectangle(cornerRadius: 5))
+                            .background(ACTATheme.dangerFill, in: RoundedRectangle(cornerRadius: 8))
                     }
-                    Toggle("YOLO", isOn: Binding(get: { camera.yoloEnabled }, set: toggleYOLO))
-                        .toggleStyle(.checkbox)
-                        .controlSize(.small)
-                        .font(.system(size: 10, weight: .medium))
-                        .help(appLanguage.localized("Run YOLO26 on %@", arguments: [camera.name]))
-                        .accessibilityLabel(appLanguage.localized("Run YOLO26 on %@", arguments: [camera.name]))
-                    Toggle("AI", isOn: Binding(get: { camera.aiChatEnabled }, set: toggleAIChat))
-                        .toggleStyle(.checkbox)
-                        .controlSize(.small)
-                        .font(.system(size: 10, weight: .medium))
-                        .help(appLanguage.localized("Include %@ in AI chat", arguments: [camera.name]))
-                        .accessibilityLabel(appLanguage.localized("Include %@ in AI chat", arguments: [camera.name]))
+                    Image(systemName: camera.yoloEnabled ? "viewfinder" : "viewfinder.circle")
+                        .foregroundStyle(camera.yoloEnabled ? ACTATheme.success : ACTATheme.textMuted)
                     Spacer()
                     Button(action: expand) {
                         Image(systemName: expanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(.system(size: ACTAType.metadata, weight: .semibold))
                             .foregroundStyle(ACTATheme.textPrimary)
                             .frame(width: 28, height: 28)
-                            .background(Color.black.opacity(0.68), in: RoundedRectangle(cornerRadius: 6))
+                            .background(Color.black.opacity(0.68), in: RoundedRectangle(cornerRadius: 8))
                     }
                     .buttonStyle(.plain)
                     .help(appLanguage.localized(expanded ? "Return to all cameras" : "Expand camera"))
@@ -399,18 +387,18 @@ struct CameraEditor: View {
                     }
                     if !camera.isapiHTTPS {
                         Text("HTTP does not encrypt camera credentials or events. Use HTTPS when supported and keep camera traffic on a trusted network.")
-                            .font(.caption)
+                            .font(.system(size: ACTAType.caption))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }.textFieldStyle(.roundedBorder).disabled(busy || !keychainLoaded)
             if busy {
-                HStack(spacing: 8) { ProgressView().controlSize(.small); Text(appLanguage.localizedMessage(status)).font(.callout) }
+                HStack(spacing: 8) { ProgressView().controlSize(.small); Text(appLanguage.localizedMessage(status)).font(.system(size: ACTAType.caption)) }
                     .accessibilityElement(children: .combine)
             }
             if !message.isEmpty {
-                Text(appLanguage.localizedMessage(message)).foregroundStyle(.red).font(.callout).fixedSize(horizontal: false, vertical: true)
+                Text(appLanguage.localizedMessage(message)).foregroundStyle(.red).font(.system(size: ACTAType.caption)).fixedSize(horizontal: false, vertical: true)
                     .accessibilityLabel(appLanguage.localized("Error: %@", arguments: [message]))
             }
             HStack {
@@ -436,7 +424,7 @@ struct CameraEditor: View {
                     }
                 }.keyboardShortcut(.defaultAction).disabled(!keychainLoaded || busy)
             }
-        }.padding(24).frame(width: 600)
+        }.padding(24).frame(width: 640).actaAppearance()
         .onAppear {
             location = camera.location ?? ""
             do {
@@ -502,9 +490,17 @@ final class WallSettingsDraft: ObservableObject {
     }
 }
 
+private struct SettingsControlBoundsKey: PreferenceKey {
+    static var defaultValue: [String: Anchor<CGRect>] { [:] }
+    static func reduce(value: inout [String: Anchor<CGRect>], nextValue: () -> [String: Anchor<CGRect>]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, latest in latest })
+    }
+}
+
 struct SettingsForm: View {
     @ObservedObject var draft: WallSettingsDraft
     let save: (WallConfiguration) throws -> Void
+    var onControlLayout: (([String: CGRect]) -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @Environment(\.locale) private var locale
     @State private var message = ""
@@ -534,6 +530,7 @@ struct SettingsForm: View {
                         .accessibilityLabel("YOLO confidence threshold")
                         .accessibilityValue(Text("\(draft.confidencePercent)%"))
                         .accessibilityIdentifier("settings.yoloConfidence")
+                        .anchorPreference(key: SettingsControlBoundsKey.self, value: .bounds) { ["confidence": $0] }
                 }
                 Stepper("Detection FPS per camera: \(Int(draft.configuration.detectionFPS))", value: $draft.configuration.detectionFPS, in: 1...5)
                     .accessibilityIdentifier("settings.detectionFPS")
@@ -553,8 +550,18 @@ struct SettingsForm: View {
                     } catch { message = error.localizedDescription }
                 }.keyboardShortcut(.defaultAction)
                     .accessibilityIdentifier("settings.save")
+                    .anchorPreference(key: SettingsControlBoundsKey.self, value: .bounds) { ["save": $0] }
             }
-        }.padding(24).frame(width: 600)
+        }.padding(24).frame(width: 640).actaAppearance()
+        .backgroundPreferenceValue(SettingsControlBoundsKey.self) { anchors in
+            GeometryReader { geometry in
+                let frames = anchors.mapValues { geometry[$0] }
+                Color.clear
+                    .onAppear { onControlLayout?(frames) }
+                    .onChange(of: frames) { _, frames in onControlLayout?(frames) }
+                    .allowsHitTesting(false)
+            }
+        }
     }
 }
 
@@ -589,8 +596,8 @@ struct LocalCameraEditor: View {
                 }
             }
             Text("For iPhone, enable Continuity Camera in Settings → General → AirPlay & Continuity. Use the same Apple Account on both devices, with Wi-Fi and Bluetooth enabled, and keep the iPhone nearby and locked.")
-                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            if devices.isEmpty { Text("No cameras found. Connect a camera, then refresh.").font(.callout) }
+                .font(.system(size: ACTAType.caption)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if devices.isEmpty { Text("No cameras found. Connect a camera, then refresh.").font(.system(size: ACTAType.caption)) }
             if !message.isEmpty { Text(appLanguage.localizedMessage(message)).foregroundStyle(.red) }
             HStack {
                 Button("Refresh cameras") { refreshDevices() }

@@ -5,7 +5,7 @@ struct AnalysisPanelViewport<Content: View>: View {
 
     var body: some View {
         GeometryReader { geometry in
-            VStack(spacing: 10, content: content)
+            VStack(spacing: 12, content: content)
                 .frame(width: max(0, geometry.size.width - 24), height: max(0, geometry.size.height - 24), alignment: .topLeading)
                 .padding(12)
         }
@@ -18,18 +18,12 @@ struct AnalysisPanelTabs: View {
     @Environment(\.locale) private var locale
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 2) {
-                ForEach(VLMPanelSection.allCases) { tab in button(tab, compact: true) }
-            }
-            .fixedSize(horizontal: true, vertical: false)
-            VStack(spacing: 2) {
-                HStack(spacing: 2) { button(.ask); button(.history) }
-                HStack(spacing: 2) { button(.schedule); button(.alerts) }
-            }
+        VStack(spacing: 4) {
+            HStack(spacing: 4) { button(.ask) }
+            HStack(spacing: 4) { button(.schedule); button(.alerts) }
         }
         .padding(2)
-        .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 5))
+        .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("AI analysis view")
     }
@@ -37,14 +31,14 @@ struct AnalysisPanelTabs: View {
     private func button(_ tab: VLMPanelSection, compact: Bool = false) -> some View {
         Button { selection = tab } label: {
             Text(tab == .alerts ? locale.appLanguage.localized("Alerts (%lld)", arguments: [alertCount]) : locale.appLanguage.localized(tab.rawValue))
-                .font(.system(size: 12, weight: .semibold))
+                .font(.system(size: ACTAType.caption, weight: .semibold))
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)
-                .frame(maxWidth: compact ? nil : .infinity, minHeight: 28)
+                .frame(maxWidth: compact ? nil : .infinity, minHeight: 32)
                 .foregroundStyle(selection == tab ? Color.white : Color.primary)
-                .background(selection == tab ? Color.accentColor : Color.clear, in: RoundedRectangle(cornerRadius: 4))
+                .background(selection == tab ? ACTATheme.actionFill : Color.clear, in: RoundedRectangle(cornerRadius: 4))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -64,7 +58,7 @@ struct AnalysisPanelEmptyState: View {
             Text(locale.appLanguage.localized(title)).font(.headline).multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
             if let detail {
-                Text(locale.appLanguage.localized(detail)).font(.subheadline).multilineTextAlignment(.center)
+                Text(locale.appLanguage.localized(detail)).font(.system(size: ACTAType.caption)).multilineTextAlignment(.center)
                     .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -85,10 +79,10 @@ struct AnalysisQuestionComposer: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(locale.appLanguage.localized(promptLabel))
-                .font(.system(size: 12)).foregroundStyle(.secondary)
+                .font(.system(size: ACTAType.caption)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             TextField("", text: $question, axis: .vertical)
-                .font(.system(size: 13))
+                .font(.system(size: ACTAType.body))
                 .lineLimit(3...3).textFieldStyle(.roundedBorder)
                 .frame(minWidth: 0, maxWidth: .infinity)
                 .accessibilityLabel(Text(locale.appLanguage.localized(promptLabel)))
@@ -98,12 +92,12 @@ struct AnalysisQuestionComposer: View {
                 Spacer(minLength: 0)
                 Button(action: submit) {
                     Label(locale.appLanguage.localized("Send question"), systemImage: "arrow.up.circle.fill")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: ACTAType.body, weight: .medium))
                         .padding(.horizontal, 12).padding(.vertical, 7)
                         .frame(minHeight: 32)
                         .foregroundStyle(Color.white)
-                        .background(sendDisabled ? Color.secondary : Color.accentColor,
-                            in: RoundedRectangle(cornerRadius: 5))
+                        .background(sendDisabled ? ACTATheme.surfaceElevated : ACTATheme.actionFill,
+                            in: RoundedRectangle(cornerRadius: 8))
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -132,27 +126,19 @@ struct AnalysisHistoryPage<Messages: View>: View {
     @Environment(\.locale) private var locale
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             ScrollViewReader { proxy in
                 ScrollView(.vertical) {
-                    VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 12) {
                         HStack(alignment: .top, spacing: 8) {
                             Label(status, systemImage: busy ? "hourglass" : "lock.doc")
                                 .lineLimit(2).fixedSize(horizontal: false, vertical: true)
                                 .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                             Button(action: clear) { Text(locale.appLanguage.localized("Clear")) }.disabled(busy)
                         }
-                        Toggle(isOn: $persistHistory) {
-                            Text(locale.appLanguage.localized("Persist local research history")).fixedSize(horizontal: false, vertical: true)
-                        }
-                        Toggle(isOn: $allowActions) {
-                            Text(locale.appLanguage.localized("Allow action proposals")).fixedSize(horizontal: false, vertical: true)
-                        }
-                        Toggle(isOn: $expandTerms) {
-                            Text(locale.appLanguage.localized("Expand search terms locally")).fixedSize(horizontal: false, vertical: true)
-                        }
+                        OpenSettingsButton(section: .features)
                         if !errorMessage.isEmpty {
-                            Text(errorMessage).font(.caption).foregroundStyle(.red)
+                            Text(errorMessage).font(.system(size: ACTAType.caption)).foregroundStyle(.red)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                         LazyVStack(alignment: .leading, spacing: 8, content: messages)

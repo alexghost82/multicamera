@@ -11,14 +11,14 @@ struct DetectionOverlay: View {
             ForEach(objects) { object in
                 let box = DetectionGeometry.displayRect(box: object.box, image: imageSize, viewport: geometry.size)
                 Rectangle()
-                    .stroke(Color.green, lineWidth: 2)
+                    .stroke(ACTATheme.success, lineWidth: 2)
                     .frame(width: box.width, height: box.height)
                     .position(x: box.midX, y: box.midY)
                 Text("\(locale.appLanguage.localized(object.label)) \(Int(object.confidence * 100))%\(object.trackID.map { " · t\(String($0.uuidString.prefix(6)))" } ?? "")")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: ACTAType.metadata, weight: .semibold))
                     .foregroundStyle(.black)
                     .padding(.horizontal, 3).padding(.vertical, 1)
-                    .background(Color.green)
+                    .background(ACTATheme.success)
                     .lineLimit(1)
                     .frame(maxWidth: min(180, geometry.size.width), alignment: .leading)
                     .position(x: min(geometry.size.width - min(180, geometry.size.width) / 2,

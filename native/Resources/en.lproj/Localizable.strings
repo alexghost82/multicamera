@@ -194,3 +194,402 @@
 "Stage-A Pose Interaction Heuristic: 2 tracks in close proximity (d=%@, IoU=%@) with rapid limb/body kinematics (wrist speed %@, duration %@ s). Experimental heuristic — review or verify via VLM." = "Stage-A Pose Interaction Heuristic: 2 tracks in close proximity (d=%@, IoU=%@) with rapid limb/body kinematics (wrist speed %@, duration %@ s). Experimental heuristic — review or verify via VLM.";
 "No active network-camera relay is expected" = "No active network-camera relay is expected";
 "Secondary VLM unavailable — primary safety detection preserved" = "Secondary VLM unavailable — primary safety detection preserved";
+
+"EVENTS · 24H" = "EVENTS · 24H";
+"Stored events" = "Stored events";
+"Stored events from the last 24 hours" = "Stored events from the last 24 hours";
+"Stored event counts by hour" = "Stored event counts by hour";
+"Camera events" = "Camera events";
+"AI alerts" = "AI alerts";
+
+"Systems" = "Systems";
+
+"Search cameras and locations…" = "Search cameras and locations…";
+
+"Choose cameras" = "Choose cameras";
+
+"⌘K" = "⌘K";
+
+"Check idle and boosted analytics sampling rates." = "Check idle and boosted analytics sampling rates.";
+
+"Check per-camera sampling and cooldown overrides." = "Check per-camera sampling and cooldown overrides.";
+
+"Check zone names, polygon coordinates and hold time." = "Check zone names, polygon coordinates and hold time.";
+
+"AI backend" = "AI backend";
+
+"OpenAI Responses URL" = "OpenAI Responses URL";
+
+"Backup relay URL" = "Backup relay URL";
+
+"Cloud nano model" = "Cloud nano model";
+
+"Cloud mini model" = "Cloud mini model";
+
+"Cloud full model" = "Cloud full model";
+
+"API credentials" = "API credentials";
+
+"Cloud privacy and budget" = "Cloud privacy and budget";
+
+"Blur faces before cloud requests" = "Blur faces before cloud requests";
+
+"Blur plates before cloud requests" = "Blur plates before cloud requests";
+
+"Daily AI budget (USD)" = "Daily AI budget (USD)";
+
+"Monthly AI budget (USD)" = "Monthly AI budget (USD)";
+
+"External requests require separate permission in Features and access." = "External requests require separate permission in Features and access.";
+
+"Persistent visual watches" = "Persistent visual watches";
+
+"Monitoring and alerts" = "Monitoring and alerts";
+
+"Person-count alerts" = "Person-count alerts";
+
+"Person threshold" = "Person threshold";
+
+"Hold seconds" = "Hold seconds";
+
+"Cooldown seconds" = "Cooldown seconds";
+
+"Memory and storage" = "Memory and storage";
+
+"Retention days: %@" = "Retention days: %@";
+
+"Frame and evidence stores also enforce their own retention and disk quotas." = "Frame and evidence stores also enforce their own retention and disk quotas.";
+
+"Features" = "Features";
+
+"Permissions" = "Permissions";
+
+"Allow external AI" = "Allow external AI";
+
+"Allow local voice input" = "Allow local voice input";
+
+"Allow plate registry lookup" = "Allow plate registry lookup";
+
+"Allow public access" = "Allow public access";
+
+"Enabling permission does not start a server or send data." = "Enabling permission does not start a server or send data.";
+
+"New primary API key" = "New primary API key";
+
+"New alert API key" = "New alert API key";
+
+"Save API keys in Keychain" = "Save API keys in Keychain";
+
+"Settings saved" = "Settings saved";
+
+"Could not save API keys" = "Could not save API keys";
+
+"Check advanced runtime thresholds and storage limits." = "Check advanced runtime thresholds and storage limits.";
+
+"Torso angle threshold degrees" = "Torso angle threshold degrees";
+
+"Aspect ratio threshold" = "Aspect ratio threshold";
+
+"Height collapse threshold" = "Height collapse threshold";
+
+"Sitting height threshold" = "Sitting height threshold";
+
+"Crouching height threshold" = "Crouching height threshold";
+
+"Low frame rate threshold" = "Low frame rate threshold";
+
+"Low frame rate persistence seconds" = "Low frame rate persistence seconds";
+
+"Velocity feature minimum f p s" = "Velocity feature minimum f p s";
+
+"Walking speed body heights per second" = "Walking speed body heights per second";
+
+"Running speed body heights per second" = "Running speed body heights per second";
+
+"Controlled sit before lie seconds" = "Controlled sit before lie seconds";
+
+"Controlled lie down max drop speed body heights per second" = "Controlled lie down max drop speed body heights per second";
+
+"Ema alpha" = "Ema alpha";
+
+"Low confidence floor" = "Low confidence floor";
+
+"Match io u threshold" = "Match io u threshold";
+
+"Relink maximum gap seconds" = "Relink maximum gap seconds";
+
+"Relink maximum diagonal ratio" = "Relink maximum diagonal ratio";
+
+"Frame interval smoothing" = "Frame interval smoothing";
+
+"Minimum confirming samples" = "Minimum confirming samples";
+
+"Minimum baseline samples" = "Minimum baseline samples";
+
+"Recovery samples" = "Recovery samples";
+
+"Maximum tracks" = "Maximum tracks";
+
+"Advanced fall tracking" = "Advanced fall tracking";
+
+"Common confidence and confirmation thresholds are in Video analytics." = "Common confidence and confirmation thresholds are in Video analytics.";
+
+"Storage cleanup" = "Storage cleanup";
+
+"Media disk limit (MB)" = "Media disk limit (MB)";
+
+"Minimum free disk (GB)" = "Minimum free disk (GB)";
+
+"Crops per identity" = "Crops per identity";
+
+"Data saver" = "Data saver";
+
+"Track image retention days" = "Track image retention days";
+
+"Log retention days" = "Log retention days";
+
+"Capture and crop selection" = "Capture and crop selection";
+
+"Bootstrap seconds" = "Bootstrap seconds";
+
+"Capture interval seconds" = "Capture interval seconds";
+
+"Movement fraction" = "Movement fraction";
+
+"Inheritance maximum age" = "Inheritance maximum age";
+
+"Inheritance minimum IoU" = "Inheritance minimum IoU";
+
+"Stale track TTL" = "Stale track TTL";
+
+"Crop window seconds" = "Crop window seconds";
+
+"Best crops per window" = "Best crops per window";
+
+"Crop improvement ratio" = "Crop improvement ratio";
+
+"Global video analytics" = "Global video analytics";
+
+"Execution mode" = "Execution mode";
+
+"Sensitivity profile" = "Sensitivity profile";
+
+"Apply sensitivity profile" = "Apply sensitivity profile";
+
+"Advanced analytics" = "Advanced analytics";
+
+"Video overlays" = "Video overlays";
+
+"Per-camera analytics" = "Per-camera analytics";
+
+"Select camera" = "Select camera";
+
+"Remove camera override" = "Remove camera override";
+
+"Override sampling FPS" = "Override sampling FPS";
+
+"Analytics sampling FPS" = "Analytics sampling FPS";
+
+"Override alert cooldown" = "Override alert cooldown";
+
+"Alert cooldown seconds" = "Alert cooldown seconds";
+
+"Restricted zones" = "Restricted zones";
+
+"Zone name" = "Zone name";
+
+"Zone hold seconds" = "Zone hold seconds";
+
+"Severity" = "Severity";
+
+"Normalized coordinates: 0 to 1" = "Normalized coordinates: 0 to 1";
+
+"X" = "X";
+
+"Y" = "Y";
+
+"Add polygon point" = "Add polygon point";
+
+"Remove zone" = "Remove zone";
+
+"Add restricted zone" = "Add restricted zone";
+
+"Diagnostics" = "Diagnostics";
+
+"Worker node configuration" = "Worker node configuration";
+
+"Worker role, addresses, ports, camera assignments, model path and trusted peers. Changes apply on the next worker launch." = "Worker role, addresses, ports, camera assignments, model path and trusted peers. Changes apply on the next worker launch.";
+
+"Open configuration" = "Open configuration";
+
+"Reload" = "Reload";
+
+"Worker configuration JSON" = "Worker configuration JSON";
+
+"Disabled" = "Disabled";
+
+"Select an existing model with the supported format." = "Select an existing model with the supported format.";
+
+"This model is disabled in Settings." = "This model is disabled in Settings.";
+
+"Enable video analytics" = "Enable video analytics";
+
+"Person detection" = "Person detection";
+
+"Pose estimation" = "Pose estimation";
+
+"Fall detection" = "Fall detection";
+
+"Behavior analysis" = "Behavior analysis";
+
+"Prolonged inactivity" = "Prolonged inactivity";
+
+"Loitering detection" = "Loitering detection";
+
+"Restricted zone monitoring" = "Restricted zone monitoring";
+
+"Unusual movement" = "Unusual movement";
+
+"Crowd activity" = "Crowd activity";
+
+"Fight detection" = "Fight detection";
+
+"Secondary VLM verification" = "Secondary VLM verification";
+
+"Sound alert" = "Sound alert";
+
+"Visual alert banner" = "Visual alert banner";
+
+"Record incident evidence" = "Record incident evidence";
+
+"Person confidence threshold" = "Person confidence threshold";
+
+"Pose keypoint confidence threshold" = "Pose keypoint confidence threshold";
+
+"Idle camera sampling FPS" = "Idle camera sampling FPS";
+
+"Active fall boost FPS" = "Active fall boost FPS";
+
+"Fall confirmation seconds" = "Fall confirmation seconds";
+
+"Person down seconds" = "Person down seconds";
+
+"Inactivity threshold seconds" = "Inactivity threshold seconds";
+
+"Loitering threshold seconds" = "Loitering threshold seconds";
+
+"Pre-event buffer seconds" = "Pre-event buffer seconds";
+
+"Post-event buffer seconds" = "Post-event buffer seconds";
+
+"Minimum visible keypoints" = "Minimum visible keypoints";
+
+"Evidence disk quota (MB)" = "Evidence disk quota (MB)";
+
+"Concurrent inference tasks" = "Concurrent inference tasks";
+
+"Bounding boxes" = "Bounding boxes";
+
+"Pose skeleton" = "Pose skeleton";
+
+"Track ID" = "Track ID";
+
+"Behavior state" = "Behavior state";
+
+"Fall status" = "Fall status";
+
+"Confidence" = "Confidence";
+
+"Critical alert marker" = "Critical alert marker";
+
+"Inherit global settings" = "Inherit global settings";
+
+"General and streams" = "General and streams";
+
+"Cameras and sources" = "Cameras and sources";
+
+"AI models" = "AI models";
+
+"Advanced runtime and cleanup" = "Advanced runtime and cleanup";
+
+"Video analytics" = "Video analytics";
+
+"AI backends and privacy" = "AI backends and privacy";
+
+"Events and alerts" = "Events and alerts";
+
+"Features and access" = "Features and access";
+
+"ReID calibration" = "ReID calibration";
+
+"Diagnostics and worker nodes" = "Diagnostics and worker nodes";
+
+"Find settings section" = "Find settings section";
+
+"Interface" = "Interface";
+
+"Interface language" = "Interface language";
+
+"English" = "English";
+
+"Object detection" = "Object detection";
+
+"Local video file" = "Local video file";
+
+"Model enabled" = "Model enabled";
+
+"Model path (empty uses bundled model)" = "Model path (empty uses bundled model)";
+
+"Choose model" = "Choose model";
+
+"Use bundled model" = "Use bundled model";
+
+"Core ML .mlmodelc" = "Core ML .mlmodelc";
+
+"Core ML .mlmodelc / .mlpackage / .mlmodel" = "Core ML .mlmodelc / .mlpackage / .mlmodel";
+
+"Local MLX model directory" = "Local MLX model directory";
+
+"ONNX model with compatible inputs and outputs" = "ONNX model with compatible inputs and outputs";
+
+"Scheduled analysis settings are in Settings." = "Scheduled analysis settings are in Settings.";
+
+"Enter an HTTP or HTTPS endpoint without credentials or fragments." = "Enter an HTTP or HTTPS endpoint without credentials or fragments.";
+
+"Check model names and alert cooldowns." = "Check model names and alert cooldowns.";
+
+"Check the daily and monthly AI budget limits." = "Check the daily and monthly AI budget limits.";
+
+"Rule cooldown seconds" = "Rule cooldown seconds";
+
+"Model settings could not be loaded; defaults are active" = "Model settings could not be loaded; defaults are active";
+
+"Runtime settings could not be loaded; defaults are active" = "Runtime settings could not be loaded; defaults are active";
+
+"Additional video sources" = "Additional video sources";
+
+"Access control" = "Access control";
+
+"Save research history" = "Save research history";
+
+"Allow operator actions" = "Allow operator actions";
+
+"Expand search terms" = "Expand search terms";
+
+"LOCAL" = "LOCAL";
+
+"DISTRIBUTED" = "DISTRIBUTED";
+
+"Conservative" = "Conservative";
+
+"Balanced" = "Balanced";
+
+"High Sensitivity" = "High Sensitivity";
+
+"Custom" = "Custom";
+
+"Person-count alerts remain off until enabled in Settings. No frames are retained." = "Person-count alerts remain off until enabled in Settings. No frames are retained.";
+
+"Public network access is not supported. Local showcase uses loopback only." = "Public network access is not supported. Local showcase uses loopback only.";
+
+"Reserved preference: no runtime control is implemented yet." = "Reserved preference: no runtime control is implemented yet.";

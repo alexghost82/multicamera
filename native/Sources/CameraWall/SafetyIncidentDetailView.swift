@@ -28,7 +28,7 @@ struct SafetyIncidentDetailView: View {
                     LabeledContent(languageSettings.localized("Suppressed until"), value: until.formatted(date: .abbreviated, time: .shortened, locale: languageSettings.locale))
                 }
                 Text(languageSettings.localized("Detector confidence: %lld%%", arguments: [Int(incident.confidence * 100)]))
-                    .font(.callout)
+                    .font(.system(size: ACTAType.caption))
                 Text(languageSettings.localizedMessage(incident.explanation)).textSelection(.enabled)
                 LabeledContent(languageSettings.localized("Secondary verification"), value: languageSettings.localized(incident.secondaryVLMStatus.rawValue))
                 if let summary = incident.secondaryVLMSummary {
@@ -76,12 +76,13 @@ struct SafetyIncidentDetailView: View {
                 if incident.clipID != nil {
                     Button(languageSettings.localized("Delete evidence"), role: .destructive) { confirmingDeletion = true }
                 }
-                Text(incident.id.uuidString).font(.system(size: 11, design: .monospaced))
+                Text(incident.id.uuidString).font(.system(size: ACTAType.metadata, design: .monospaced))
                     .foregroundStyle(.secondary).textSelection(.enabled)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(16)
         }
+        .background(ACTATheme.surface)
         .task(id: incident.clipID) { await loadEvidence() }
         .onAppear { note = incident.operatorNotes }
         .confirmationDialog(languageSettings.localized("Mark this incident as a false alarm?"), isPresented: $confirmingFalseAlarm) {

@@ -508,9 +508,9 @@ enum TrackResearchSearch {
     static func load(
         from store: LocalTrackingStore, question: String, priorMessages: [TrackResearchMessage] = [],
         queryPlan: TrackResearchQueryPlan? = nil, now: Date = Date(), calendar: Calendar = .current,
-        pageSize: Int = 1000
+        pageSize: Int = 1000, scopeOverride: TrackResearchTimeScope? = nil
     ) throws -> TrackResearchSelection {
-        let scope = try TrackResearchTimeScope.resolve(
+        let scope = try scopeOverride ?? TrackResearchTimeScope.resolve(
             question: question, priorMessages: priorMessages, now: now, calendar: calendar
         )
         let preferred = references(question: question, priorMessages: priorMessages)

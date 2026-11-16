@@ -25,7 +25,7 @@ public struct ACTACaptureDecision: Equatable, Sendable {
 }
 
 public final class ACTACaptureScheduler: @unchecked Sendable {
-    public struct Config: Equatable, Sendable {
+    public struct Config: Codable, Equatable, Sendable {
         public var bootstrapSeconds: TimeInterval = 1.0
         public var intervalSeconds: TimeInterval = 4.0
         public var movementFraction: CGFloat = 0.35

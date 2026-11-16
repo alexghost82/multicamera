@@ -2,31 +2,12 @@ import AppKit
 import SwiftUI
 import CameraCore
 
-enum ACTATheme {
-    static let background = Color(actaHex: 0x020B13)
-    static let sidebar = Color(actaHex: 0x04111D)
-    static let surface = Color(actaHex: 0x061827)
-    static let surfaceElevated = Color(actaHex: 0x092135)
-    static let surfaceHover = Color(actaHex: 0x102C3E)
-    static let border = Color(actaHex: 0x24475B)
-    static let borderActive = Color(actaHex: 0xFFD000)
-    static let selected = Color(actaHex: 0xFFD000).opacity(0.14)
-    static let primary = Color(actaHex: 0xFFD000)
-    static let secondaryAccent = Color(actaHex: 0x00CBEF)
-    static let textPrimary = Color(actaHex: 0xF5F8FC)
-    static let textSecondary = Color(actaHex: 0xAAB8C7)
-    static let textMuted = Color(actaHex: 0x748899)
-    static let success = Color(actaHex: 0x16F228)
-    static let danger = Color(actaHex: 0xFF263C)
-    static let warning = Color(actaHex: 0xFFCC00)
-}
-
 struct AnalysisSidebarSurface: ViewModifier {
     func body(content: Content) -> some View {
         content
             .modifier(SidebarContentBounds())
-            .background(ACTATheme.sidebar, in: RoundedRectangle(cornerRadius: 18))
-            .overlay(RoundedRectangle(cornerRadius: 18)
+            .background(ACTATheme.sidebar, in: RoundedRectangle(cornerRadius: 16))
+            .overlay(RoundedRectangle(cornerRadius: 16)
                 .stroke(ACTATheme.textPrimary.opacity(0.12), lineWidth: 1)
                 .allowsHitTesting(false))
     }
@@ -37,23 +18,14 @@ struct SidebarContentBounds: ViewModifier {
         GeometryReader { geometry in
             content
                 .frame(width: max(0, geometry.size.width), height: max(0, geometry.size.height), alignment: .topLeading)
-                .clipShape(RoundedRectangle(cornerRadius: 18))
-                .contentShape(.interaction, RoundedRectangle(cornerRadius: 18))
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                .contentShape(.interaction, RoundedRectangle(cornerRadius: 16))
         }
     }
 }
 
-extension Color {
-    init(actaHex: UInt32) {
-        self.init(
-            red: Double((actaHex >> 16) & 0xFF) / 255,
-            green: Double((actaHex >> 8) & 0xFF) / 255,
-            blue: Double(actaHex & 0xFF) / 255
-        )
-    }
-}
-
 private enum ACTASection: String, CaseIterable, Identifiable {
+    case settings
     case cameras
     case events
     case timeline
@@ -69,6 +41,23 @@ private enum ACTASection: String, CaseIterable, Identifiable {
 
     var title: LocalizedStringKey {
         switch self {
+        case .settings: "Settings"
+        case .cameras: "Cameras"
+        case .events: "Events"
+        case .timeline: "Timeline"
+        case .memory: "Memory"
+        case .identities: "Tracked objects"
+        case .crossCameraIdentity: "Cross-camera identity"
+        case .localShowcase: "Local Showcase"
+        case .analysis: "AI Analysis"
+        case .map: "Map"
+        case .reports: "Reports"
+        }
+    }
+
+    var localizationKey: String {
+        switch self {
+        case .settings: "Settings"
         case .cameras: "Cameras"
         case .events: "Events"
         case .timeline: "Timeline"
@@ -84,6 +73,7 @@ private enum ACTASection: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
+        case .settings: "gearshape"
         case .cameras: "video"
         case .events: "bell"
         case .timeline: "clock"
@@ -133,14 +123,15 @@ struct ACTASecurityCenterView: View {
     var showCameraManager: () -> Void
     var exportDiagnostics: () -> Void
     var resetLayout: () -> Void
-    var showSettings: () -> Void
     var editCamera: (Camera) -> Void
     var removeCamera: (Camera) -> Void
 
     @AppStorage("ACTA.favoriteCameraIDs") private var favoritesStorage = ""
     @State private var section: ACTASection = .cameras
+    @State private var requestedSettings = ACTASettingsSection.general
     @State private var cameraScope: ACTACameraScope = .all
     @State private var presentation: ACTACameraPresentation = .grid
+    @State private var referenceColumns = 4
     @State private var arrangeCameras = false
     @State private var locationFilter: String?
     @State private var searchText = ""
@@ -166,7 +157,7 @@ struct ACTASecurityCenterView: View {
     @State private var watchError = ""
     @FocusState private var searchFocused: Bool
 
-    private let sidebarWidth: CGFloat = 228
+    private let sidebarWidth: CGFloat = 260
     private let collapsedSidebarWidth: CGFloat = 64
     private let outerPadding: CGFloat = 12
     private var favoriteIDs: Set<UUID> {
@@ -216,22 +207,22 @@ struct ACTASecurityCenterView: View {
     }
 
     var body: some View {
-        GeometryReader { geometry in
-            let collapsed = geometry.size.width < 1200
+        GeometryReader { _ in
             HStack(spacing: 0) {
-                sidebar(collapsed: collapsed)
-                Rectangle().fill(ACTATheme.border).frame(width: 1)
-                VStack(spacing: 0) {
-                    header(compact: geometry.size.width < 1440 || cameraPickerPresented || aiChatPresented)
-                    Rectangle().fill(ACTATheme.border).frame(height: 1)
+                DashboardView {
+                    sidebar(collapsed: false)
+                } header: {
+                    referenceHeader
+                } metrics: {
                     ModelRuntimeView(runtime: model.modelRuntime, vlmBusy: model.vlmBusy, retry: model.prepareModels)
-                    Rectangle().fill(ACTATheme.border).frame(height: 1)
+                } filters: {
+                    if section == .cameras { referenceFilters }
+                } content: {
                     mainContent
+                } analytics: {
                     if section == .cameras { activityStrip }
-                    if section != .cameras { statusFooter }
+                    else { statusFooter }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(ACTATheme.background)
                 if cameraPickerPresented {
                     cameraPickerPanel
                         .transition(.move(edge: .trailing).combined(with: .opacity))
@@ -244,6 +235,11 @@ struct ACTASecurityCenterView: View {
             .animation(reduceMotion ? nil : Animation.snappy(duration: 0.24), value: cameraPickerPresented)
             .animation(reduceMotion ? nil : Animation.snappy(duration: 0.24), value: aiChatPresented)
         }
+        .environment(\.openACTASettings, { target in
+            requestedSettings = target
+            openSettings()
+        })
+        .background(Button("Settings", action: openSettings).keyboardShortcut(",", modifiers: .command).hidden().accessibilityHidden(true))
         .frame(minWidth: 1280, minHeight: 800)
         .foregroundStyle(ACTATheme.textPrimary)
         .preferredColorScheme(.dark)
@@ -253,65 +249,48 @@ struct ACTASecurityCenterView: View {
     }
 
     private func sidebar(collapsed: Bool) -> some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                logoMark(size: collapsed ? 36 : 38)
-                if !collapsed {
-                    Text("A C T A")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(ACTATheme.textPrimary)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 0)
+        VStack(alignment: .leading, spacing: 20) {
+            HStack {
+                Image(systemName: "triangle.fill").foregroundColor(.neonBlue).glow(color: .neonBlue)
+                Text("A C T A").font(.title2).bold().foregroundColor(.white)
             }
-            .padding(.horizontal, collapsed ? 13 : 14)
-            .frame(height: 68)
-
-            Rectangle().fill(ACTATheme.border).frame(height: 1)
-
+            .padding(.top, 40).padding(.horizontal, 20)
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    VStack(spacing: 4) {
-                        ForEach(ACTASection.allCases) { destination in
-                            sidebarButton(destination, collapsed: collapsed)
-                        }
+                VStack(spacing: 4) {
+                    ForEach([ACTASection.cameras, .events, .analysis, .timeline, .map, .reports, .settings]) { destination in
+                        sidebarButton(destination, collapsed: false)
                     }
-
-                    if !collapsed {
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text("LOCATIONS")
-                                    .font(.system(size: 10, weight: .semibold))
-                                    .foregroundStyle(ACTATheme.textMuted)
-                                Spacer()
-                                Button(action: showCameraManager) {
-                                    Image(systemName: "plus")
-                                        .font(.system(size: 12, weight: .semibold))
-                                        .frame(width: 28, height: 28)
-                                }
-                                .buttonStyle(.plain)
-                                .help("Manage cameras and locations")
-                                .accessibilityLabel("Manage cameras and locations")
-                            }
-                            .padding(.leading, 14)
-                            .padding(.trailing, 8)
-
-                            locationButton(name: "All Locations", count: enabledCameras.count, icon: "square.grid.2x2", collapsed: false)
-                            ForEach(locationGroups) { group in
-                                locationButton(name: group.name, count: group.count, icon: locationIcon(for: group.name), collapsed: false)
-                            }
+                    Menu {
+                        ForEach([ACTASection.memory, .identities, .crossCameraIdentity, .localShowcase]) { destination in
+                            Button(destination.title) { section = destination }
+                        }
+                        Button("Settings", action: openSettings)
+                    } label: {
+                        InactiveMenuButton(icon: "square.stack.3d.down.right", title: languageSettings.localized("Systems"))
+                    }.menuStyle(.borderlessButton)
+                    Divider().background(Color.white.opacity(0.1)).padding(.vertical, 8)
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text("LOCATIONS").font(.caption).foregroundColor(.gray)
+                            Spacer()
+                            Button(action: showCameraManager) { Image(systemName: "plus").foregroundColor(.gray) }.buttonStyle(.plain)
+                        }.padding(.horizontal, 20)
+                        locationButton(name: "All Locations", count: enabledCameras.count, icon: "circle.grid.2x2.fill", collapsed: false, localizeName: true)
+                        ForEach(locationGroups) { group in
+                            locationButton(name: group.name, count: group.count, icon: locationIcon(for: group.name), collapsed: false)
                         }
                     }
                 }
-                .padding(.vertical, 12)
             }
-
-            statusPanel(collapsed: collapsed)
+            Spacer(minLength: 0)
+            statusPanel(collapsed: false)
         }
-        .frame(width: collapsed ? collapsedSidebarWidth : sidebarWidth)
-        .frame(maxHeight: .infinity)
-        .background(ACTATheme.sidebar)
-        .overlay(Color.white.opacity(0.08).allowsHitTesting(false))
+        .frame(width: 260).frame(maxHeight: .infinity)
+        .background(Color.panelBackground)
+    }
+
+    private func openSettings() {
+        section = .settings; cameraPickerPresented = false; aiChatPresented = false
     }
 
     private var actaLogo: NSImage? {
@@ -343,20 +322,21 @@ struct ACTASecurityCenterView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Circle().fill(offlineCount == 0 && model.running ? ACTATheme.success : ACTATheme.warning)
-                    .frame(width: 10, height: 10)
+                    .frame(width: 8, height: 8)
+                    .actaStatusGlow(offlineCount == 0 && model.running ? ACTATheme.success : ACTATheme.warning)
                 if !collapsed {
                     Text(LocalizedStringKey(model.running ? "Online" : "Disconnected"))
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.system(size: ACTAType.caption, weight: .semibold))
                         .foregroundStyle(model.running ? ACTATheme.success : ACTATheme.warning)
                 }
             }
             if !collapsed {
                 Text(languageSettings.localized("%lld / %lld Cameras", arguments: [onlineCameras.count, enabledCameras.count]))
-                    .font(.system(size: 12, weight: .medium).monospacedDigit())
+                    .font(.system(size: ACTAType.caption, weight: .medium).monospacedDigit())
                     .foregroundStyle(ACTATheme.textSecondary)
                     .lineLimit(1)
                 Text(LocalizedStringKey(offlineCount == 0 && model.running ? "All systems operational" : "Check camera connections"))
-                    .font(.system(size: 11))
+                    .font(.system(size: ACTAType.metadata))
                     .foregroundStyle(ACTATheme.textMuted)
                     .lineLimit(1)
             }
@@ -365,11 +345,12 @@ struct ACTASecurityCenterView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(ACTATheme.surface, in: RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(ACTATheme.border, lineWidth: 1))
-        .padding(.horizontal, 10)
+        .padding(.horizontal, 12)
         .padding(.vertical, 10)
     }
 
-    private func locationButton(name: String, count: Int, icon: String, collapsed: Bool) -> some View {
+    private func locationButton(name: String, count: Int, icon: String, collapsed: Bool, localizeName: Bool = false) -> some View {
+        let displayName = localizeName ? languageSettings.localized(name) : name
         let selected = locationFilter == (name == "All Locations" ? nil : name)
         return Button {
             section = .cameras
@@ -378,20 +359,20 @@ struct ACTASecurityCenterView: View {
             alertsOnly = false
             favoritesOnly = false
         } label: {
-            HStack(spacing: 10) {
+            HStack(spacing: ACTASpacing.regular) {
                 Image(systemName: icon).frame(width: 18)
                 if !collapsed {
-                    Text(name).lineLimit(1)
+                    Text(displayName).lineLimit(1)
                     Spacer(minLength: 0)
                     Text("\(count)")
-                        .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(selected ? ACTATheme.textPrimary : ACTATheme.textMuted)
-                        .padding(.horizontal, 7)
+                        .font(.system(size: ACTAType.metadata, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(selected ? ACTATheme.background : ACTATheme.textMuted)
+                        .padding(.horizontal, 8)
                         .frame(minWidth: 24, minHeight: 22)
                         .background(selected ? ACTATheme.primary : ACTATheme.surfaceElevated, in: Capsule())
                 }
             }
-            .font(.system(size: 12, weight: selected ? .semibold : .medium))
+            .font(.system(size: ACTAType.caption, weight: selected ? .semibold : .medium))
             .foregroundStyle(selected ? ACTATheme.textPrimary : ACTATheme.textSecondary)
             .frame(height: 36)
             .padding(.horizontal, 12)
@@ -402,7 +383,7 @@ struct ACTASecurityCenterView: View {
             }
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(languageSettings.localized("%@, %lld cameras", arguments: [name, count]))
+        .accessibilityLabel(languageSettings.localized("%@, %lld cameras", arguments: [displayName, count]))
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
@@ -427,53 +408,32 @@ struct ACTASecurityCenterView: View {
                 section = destination
             }
         } label: {
-            HStack(spacing: 12) {
-                Image(systemName: destination.icon)
-                    .font(.system(size: 15, weight: isSelected ? .semibold : .regular))
-                    .frame(width: 20)
-                if !collapsed {
-                    Text(destination.title)
-                        .font(.system(size: 13, weight: isSelected ? .semibold : .medium))
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
-                    if destination == .cameras && model.config.cameras.count > 0 {
-                        sidebarBadge(model.config.cameras.count, color: ACTATheme.textMuted)
-                    } else if destination == .events && (!model.vlmAlerts.isEmpty || !model.isapiEvents.isEmpty) {
-                        sidebarBadge(model.vlmAlerts.count + model.isapiEvents.count, color: ACTATheme.danger)
-                    }
-                }
+            if isSelected {
+                ActiveMenuButton(icon: destination.icon, title: languageSettings.localized(destination.localizationKey))
+            } else {
+                InactiveMenuButton(icon: destination.icon, title: languageSettings.localized(destination.localizationKey))
             }
-            .foregroundStyle(isSelected ? ACTATheme.textPrimary : ACTATheme.textSecondary)
-            .frame(height: 44)
-            .padding(.horizontal, 16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(isSelected ? ACTATheme.selected : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 8))
-            .overlay(alignment: .leading) {
-                if isSelected { RoundedRectangle(cornerRadius: 2).fill(ACTATheme.primary).frame(width: 3, height: 24) }
-            }
-            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(collapsed ? destination.title : "")
+        .help(destination.title)
         .accessibilityLabel(destination.title)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     private func settingsSidebarButton(collapsed: Bool) -> some View {
-        Button(action: showSettings) {
+        Button(action: openSettings) {
             HStack(spacing: 12) {
                 Image(systemName: "gearshape")
-                    .font(.system(size: 15))
+                    .font(.system(size: ACTAType.body))
                     .frame(width: 20)
                 if !collapsed {
                     Text("Settings")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: ACTAType.body, weight: .medium))
                         .lineLimit(1)
                 }
             }
             .foregroundStyle(ACTATheme.textSecondary)
-            .frame(height: 44)
+            .frame(height: 48)
             .padding(.horizontal, 16)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
@@ -485,74 +445,131 @@ struct ACTASecurityCenterView: View {
 
     private func sidebarBadge(_ count: Int, color: Color) -> some View {
         Text("\(count)")
-            .font(.system(size: 11, weight: .semibold).monospacedDigit())
+            .font(.system(size: ACTAType.metadata, weight: .semibold).monospacedDigit())
             .foregroundStyle(color)
             .padding(.horizontal, 7)
             .frame(minWidth: 22, minHeight: 22)
             .background(color.opacity(0.12), in: Capsule())
     }
 
-    private func header(compact: Bool) -> some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Security Center")
-                    .font(.system(size: 18, weight: .semibold))
-                    .lineLimit(1)
+    private var referenceHeader: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(languageSettings.localized("Security Center"))
+                    .font(.title2).bold().foregroundColor(.white).lineLimit(1)
                 Text(languageSettings.localized("Intelligent monitoring and analysis"))
-                    .font(.system(size: 11))
-                    .foregroundStyle(ACTATheme.textSecondary)
-                    .lineLimit(2)
-                Button { model.running ? model.stop() : model.start() } label: {
-                    HStack(spacing: 6) {
-                        Circle().fill(model.running ? ACTATheme.success : ACTATheme.warning)
-                            .frame(width: 7, height: 7)
-                        Text(LocalizedStringKey(model.running ? "Live" : "Connect"))
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(model.running ? ACTATheme.success : ACTATheme.textSecondary)
+                    .font(.subheadline).foregroundColor(.gray).lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            HStack {
+                Image(systemName: "magnifyingglass").foregroundColor(.gray)
+                TextField(languageSettings.localized("Search cameras and locations…"), text: $searchText)
+                    .textFieldStyle(.plain).foregroundColor(.white).focused($searchFocused)
+                Text("⌘K").font(.caption).padding(4).background(Color.white.opacity(0.1)).cornerRadius(4).foregroundColor(.gray)
+            }
+            .padding(.horizontal, 12).frame(minWidth: 160, idealWidth: 320, maxWidth: 320).frame(height: 40)
+            .background(Color.panelBackground).cornerRadius(20)
+            .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.white.opacity(0.1), lineWidth: 1))
+            HStack(spacing: 12) {
+                Button { cameraPickerPresented.toggle(); aiChatPresented = false } label: { HeaderIconButton(icon: "square.grid.2x2") }
+                    .help("Choose cameras")
+                Button { section = .events } label: { HeaderIconButton(icon: "bell", showBadge: !model.vlmAlerts.isEmpty) }
+                    .help("Notifications")
+                Button(action: openSettings) { HeaderIconButton(icon: "gearshape") }.help("Settings")
+                Button(action: openSettings) {
+                    HStack { Text(languageSettings.language.buttonTitle); Image(systemName: "chevron.down") }
+                        .font(.subheadline).foregroundColor(.white).padding(.horizontal, 12).frame(height: 40)
+                        .background(Color.panelBackground).cornerRadius(8)
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.1), lineWidth: 1))
+                }
+                moreMenu
+            }
+            .buttonStyle(.plain)
+            .padding(.leading, 12)
+        }
+        .padding(.top, 4)
+    }
+
+    private var referenceFilters: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                Button { cameraScope = .all; locationFilter = nil; alertsOnly = false; favoritesOnly = false } label: {
+                    FilterTag(title: languageSettings.localized("All cameras"), isActive: cameraScope == .all && locationFilter == nil)
+                }
+                ForEach(LocalModelService.allCases, id: \.self) { service in
+                    FilterTag(title: languageSettings.localized(service.title), isActive: false)
+                }
+                Button(action: addNetworkCamera) {
+                    Image(systemName: "plus").foregroundColor(.gray).padding(8).background(Color.panelBackground).cornerRadius(8)
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.1), lineWidth: 1))
+                }.help("Add network camera")
+                Spacer(minLength: 8)
+                cameraToolbar(compact: true)
+            }.buttonStyle(.plain)
+        }.frame(height: 40)
+    }
+
+    private func header(compact: Bool) -> some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(languageSettings.localized("Security Center"))
+                        .font(.system(size: ACTAType.heading, weight: .bold))
+                        .lineLimit(1)
+                    Text(languageSettings.localized("Intelligent monitoring and analysis"))
+                        .font(.system(size: ACTAType.caption))
+                        .foregroundStyle(ACTATheme.textSecondary)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .layoutPriority(1)
+                if !compact {
+                    DateTimeReadout().fixedSize(horizontal: true, vertical: false)
+                    Button { model.running ? model.stop() : model.start() } label: {
+                        Label(languageSettings.localized(model.running ? "Live" : "Connect"), systemImage: "circle.fill")
+                            .font(.system(size: ACTAType.caption, weight: .medium))
+                            .foregroundStyle(model.running ? ACTATheme.success : ACTATheme.warning)
                     }
+                    .buttonStyle(.plain)
+                    .help(languageSettings.localized(model.running ? "Disconnect cameras" : "Connect cameras"))
+                }
+                cameraPickerButton(compact: compact)
+                notificationsButton
+                Button(action: openSettings) {
+                    Image(systemName: "gearshape")
+                        .frame(width: 40, height: 40)
+                        .background(ACTATheme.surfaceElevated, in: RoundedRectangle(cornerRadius: 8))
                 }
                 .buttonStyle(.plain)
-                .help(languageSettings.localized(model.running ? "Disconnect cameras" : "Connect cameras"))
-                .accessibilityLabel(languageSettings.localized(model.running ? "Disconnect cameras" : "Connect cameras"))
+                .help(languageSettings.localized("Settings"))
+                .accessibilityLabel(languageSettings.localized("Settings"))
+                Button(action: openSettings) {
+                    Text(languageSettings.language.buttonTitle)
+                        .font(.system(size: ACTAType.caption, weight: .semibold))
+                        .frame(width: 48, height: 40)
+                        .background(ACTATheme.surfaceElevated, in: RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .help(languageSettings.localized(languageSettings.language.switchLabelKey))
+                .accessibilityLabel(languageSettings.localized(languageSettings.language.switchLabelKey))
+                moreMenu
             }
-            .frame(minWidth: compact ? 126 : 164, alignment: .leading)
-            Spacer(minLength: compact ? 4 : 12)
-
+            .frame(height: 56)
             if section == .cameras {
-                if !compact { DateTimeReadout().frame(height: 40).fixedSize(horizontal: true, vertical: false) }
-                searchField(compact: compact)
-                cameraToolbar(compact: compact)
-            } else {
-                if !compact { DateTimeReadout().frame(height: 40).fixedSize(horizontal: true, vertical: false) }
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 12) {
+                        searchField(compact: false)
+                        cameraToolbar(compact: true)
+                    }
+                }
+                .frame(height: 44)
             }
-
-            cameraPickerButton(compact: compact)
-            notificationsButton
-            Button(action: showSettings) {
-                Image(systemName: "gearshape")
-                    .frame(width: 40, height: 40)
-                    .background(ACTATheme.surface, in: RoundedRectangle(cornerRadius: 8))
-            }
-            .buttonStyle(.plain)
-            .help(languageSettings.localized("Settings"))
-            .accessibilityLabel(languageSettings.localized("Settings"))
-            Button(action: languageSettings.toggle) {
-                Text(languageSettings.language.buttonTitle)
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                    .frame(width: 48, height: 40)
-                    .background(ACTATheme.surface, in: RoundedRectangle(cornerRadius: 8))
-            }
-            .buttonStyle(.plain)
-            .help(languageSettings.localized(languageSettings.language.switchLabelKey))
-            .accessibilityLabel(languageSettings.localized(languageSettings.language.switchLabelKey))
-            moreMenu
         }
-        .padding(.horizontal, 12)
-        .frame(height: 72)
-        .background(ACTATheme.surface, in: RoundedRectangle(cornerRadius: 13))
-        .overlay(RoundedRectangle(cornerRadius: 13).stroke(ACTATheme.border, lineWidth: 1))
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(ACTATheme.surface, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(ACTATheme.border, lineWidth: 1))
+        .padding(8)
     }
 
     private var notificationsButton: some View {
@@ -585,7 +602,7 @@ struct ACTASecurityCenterView: View {
         .padding(.horizontal, 12)
         .frame(width: compact ? 150 : 204, height: 40)
         .background(ACTATheme.surface, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(ACTATheme.border, lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(ACTATheme.controlBorder, lineWidth: 1))
     }
 
     private func cameraToolbar(compact: Bool) -> some View {
@@ -618,11 +635,11 @@ struct ACTASecurityCenterView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "line.3.horizontal.decrease")
                     Text(cameraScope.title)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: ACTAType.caption, weight: .medium))
                         .lineLimit(1)
-                    Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+                    Image(systemName: "chevron.down").font(.system(size: ACTAType.metadata, weight: .semibold))
                 }
-                .padding(.horizontal, 10)
+                .padding(.horizontal, 12)
                 .frame(width: compact ? 96 : 136, height: 40)
                     .background(ACTATheme.surface, in: RoundedRectangle(cornerRadius: 8))
             }
@@ -645,9 +662,10 @@ struct ACTASecurityCenterView: View {
                 ForEach(1...4, id: \.self) { columns in
                     let title = languageSettings.localized("%lld × %lld", arguments: [columns, columns])
                     Button {
+                        referenceColumns = columns
                         model.setGridColumns(columns)
                     } label: {
-                        if model.config.columns == columns {
+                        if referenceColumns == columns {
                             Label(title, systemImage: "checkmark")
                         } else {
                             Text(title)
@@ -655,7 +673,7 @@ struct ACTASecurityCenterView: View {
                     }
                 }
                 Divider()
-                Button(languageSettings.localized("Custom…"), action: showSettings)
+                Button(languageSettings.localized("Custom…"), action: openSettings)
             } label: {
                 Image(systemName: "square.grid.2x2")
                     .frame(width: 40, height: 40)
@@ -684,12 +702,12 @@ struct ACTASecurityCenterView: View {
             .accessibilityLabel(languageSettings.localized("Enter or exit full screen"))
 
             Button { favoritesOnly.toggle() } label: {
-                HStack(spacing: 7) {
+                HStack(spacing: 8) {
                     Image(systemName: favoritesOnly ? "star.fill" : "star")
-                    if !compact { Text("Favorites").font(.system(size: 12, weight: .medium)) }
+                    if !compact { Text("Favorites").font(.system(size: ACTAType.caption, weight: .medium)) }
                 }
                 .foregroundStyle(favoritesOnly ? ACTATheme.warning : ACTATheme.textSecondary)
-                .padding(.horizontal, 10)
+                .padding(.horizontal, 12)
                 .frame(width: compact ? 40 : 112, height: 40)
                     .background(favoritesOnly ? ACTATheme.warning.opacity(0.12) : ACTATheme.surface,
                                 in: RoundedRectangle(cornerRadius: 8))
@@ -702,17 +720,17 @@ struct ACTASecurityCenterView: View {
 
     private func cameraPickerButton(compact: Bool) -> some View {
         Button(action: toggleCameraPicker) {
-            HStack(spacing: 7) {
+            HStack(spacing: 8) {
                 Image(systemName: "video.badge.ellipsis")
-                if !compact { Text("Cameras").font(.system(size: 12, weight: .medium)) }
+                if !compact { Text("Cameras").font(.system(size: ACTAType.caption, weight: .medium)) }
                 Text("\(selectedCameraCount)")
-                    .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                    .font(.system(size: ACTAType.metadata, weight: .semibold).monospacedDigit())
                     .padding(.horizontal, 6)
                     .frame(minWidth: 22, minHeight: 20)
                     .background(ACTATheme.primary.opacity(0.22), in: Capsule())
             }
             .foregroundStyle(cameraPickerPresented ? ACTATheme.textPrimary : ACTATheme.textSecondary)
-            .padding(.horizontal, 10)
+            .padding(.horizontal, 12)
             .frame(height: 40)
             .background(cameraPickerPresented ? ACTATheme.primary.opacity(0.18) : ACTATheme.surface.opacity(0.72),
                         in: RoundedRectangle(cornerRadius: 10))
@@ -726,18 +744,18 @@ struct ACTASecurityCenterView: View {
 
     private var cameraPickerPanel: some View {
         VStack(spacing: 12) {
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: ACTASpacing.regular) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text("Select cameras")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(.system(size: ACTAType.body, weight: .semibold))
                     Text(languageSettings.localized("%lld of %lld selected", arguments: [selectedCameraCount, enabledCameras.count]))
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: ACTAType.caption, weight: .medium))
                         .foregroundStyle(ACTATheme.textSecondary)
                 }
                 Spacer(minLength: 0)
                 Button { toggleCameraPicker() } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(size: ACTAType.metadata, weight: .semibold))
                         .frame(width: 32, height: 32)
                 }
                 .buttonStyle(.plain)
@@ -753,7 +771,7 @@ struct ACTASecurityCenterView: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(ACTATheme.textSecondary)
             }
-            .font(.system(size: 12, weight: .semibold))
+            .font(.system(size: ACTAType.caption, weight: .semibold))
 
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(ACTATheme.textMuted)
@@ -779,9 +797,9 @@ struct ACTASecurityCenterView: View {
                                 if !cameras.isEmpty {
                                     VStack(alignment: .leading, spacing: 4) {
                                         Text(group.name.uppercased())
-                                            .font(.system(size: 10, weight: .semibold))
+                                            .font(.system(size: ACTAType.metadata, weight: .semibold))
                                             .foregroundStyle(ACTATheme.textMuted)
-                                            .padding(.horizontal, 10)
+                                            .padding(.horizontal, 12)
                                         ForEach(cameras) { camera in cameraPickerRow(camera) }
                                     }
                                 }
@@ -796,10 +814,10 @@ struct ACTASecurityCenterView: View {
         .modifier(SidebarContentBounds())
         .frame(width: 296)
         .frame(maxHeight: .infinity)
-        .background(ACTATheme.sidebar.opacity(0.42), in: RoundedRectangle(cornerRadius: 18))
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 18))
-        .overlay(RoundedRectangle(cornerRadius: 18).stroke(ACTATheme.textPrimary.opacity(0.12), lineWidth: 1))
-        .padding(.horizontal, 10)
+        .background(ACTATheme.sidebar.opacity(0.42), in: RoundedRectangle(cornerRadius: 16))
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(ACTATheme.textPrimary.opacity(0.12), lineWidth: 1))
+        .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .onExitCommand { toggleCameraPicker() }
         .accessibilityLabel("Camera selection panel")
@@ -818,19 +836,19 @@ struct ACTASecurityCenterView: View {
                     .frame(width: 8, height: 8)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(camera.name)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: ACTAType.caption, weight: .medium))
                         .foregroundStyle(ACTATheme.textPrimary)
                         .lineLimit(1)
                     Text(LocalizedStringKey(model.tiles[camera.id]?.stale == false ? "Live" : "Offline"))
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: ACTAType.metadata, weight: .medium))
                         .foregroundStyle(ACTATheme.textSecondary)
                 }
                 Spacer(minLength: 0)
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 16, weight: .regular))
+                    .font(.system(size: ACTAType.body, weight: .regular))
                     .foregroundStyle(isSelected ? ACTATheme.primary : ACTATheme.textMuted)
             }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, 12)
             .frame(height: 44)
             .background(isSelected ? ACTATheme.primary.opacity(0.12) : Color.clear,
                         in: RoundedRectangle(cornerRadius: 8))
@@ -865,18 +883,18 @@ struct ACTASecurityCenterView: View {
 
     private var aiChatPanel: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: ACTASpacing.regular) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text("AI Analysis")
-                        .font(.system(size: 16, weight: .semibold))
-                    Text("Ask about live camera scenes")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(size: ACTAType.body, weight: .semibold))
+                    Text("Live video and history of all cameras")
+                        .font(.system(size: ACTAType.metadata, weight: .medium))
                         .foregroundStyle(ACTATheme.textSecondary)
                 }
                 Spacer(minLength: 0)
                 Button { aiChatPresented = false } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(size: ACTAType.metadata, weight: .semibold))
                         .frame(width: 32, height: 32)
                 }
                 .buttonStyle(.plain)
@@ -894,7 +912,7 @@ struct ACTASecurityCenterView: View {
         .modifier(AnalysisSidebarSurface())
         .frame(width: 420)
         .frame(maxHeight: .infinity)
-        .padding(.horizontal, 10)
+        .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .onExitCommand { aiChatPresented = false }
         .accessibilityLabel("AI analysis chat panel")
@@ -902,6 +920,10 @@ struct ACTASecurityCenterView: View {
 
     private var moreMenu: some View {
         Menu {
+            Button(languageSettings.localized(model.running ? "Disconnect cameras" : "Connect cameras")) {
+                model.running ? model.stop() : model.start()
+            }
+            Divider()
             Button("Network camera", systemImage: "video.badge.plus", action: addNetworkCamera)
             Button("Mac / iPhone camera", systemImage: "web.camera", action: addLocalCamera)
             Button("Capture screen", systemImage: "display", action: addScreenCapture)
@@ -913,10 +935,10 @@ struct ACTASecurityCenterView: View {
             Toggle("Arrange cameras", isOn: $arrangeCameras)
             Button("Reset window layout", systemImage: "square.grid.3x3", action: resetLayout)
             Button("Export diagnostics", systemImage: "chart.bar.xaxis", action: exportDiagnostics)
-            Button("Settings", systemImage: "gearshape", action: showSettings)
+            Button("Settings", systemImage: "gearshape", action: openSettings)
         } label: {
             Image(systemName: "ellipsis")
-                .font(.system(size: 15, weight: .semibold))
+                .font(.system(size: ACTAType.body, weight: .semibold))
                 .frame(width: 40, height: 40)
                 .background(ACTATheme.surface, in: RoundedRectangle(cornerRadius: 8))
         }
@@ -928,6 +950,12 @@ struct ACTASecurityCenterView: View {
     @ViewBuilder
     private var mainContent: some View {
         switch section {
+        case .settings:
+            SettingsHubView(model: model, languageSettings: languageSettings,
+                manageCameras: showCameraManager, addNetworkCamera: addNetworkCamera,
+                addLocalCamera: addLocalCamera, addScreenCapture: addScreenCapture,
+                addVideoFile: addVideoFile, editCamera: editCamera, watchRules: AnyView(operationsWatchPanel), initialSection: requestedSettings)
+                .id(requestedSettings)
         case .cameras:
             camerasContent
         case .events:
@@ -955,7 +983,6 @@ struct ACTASecurityCenterView: View {
 
     private var camerasContent: some View {
         HStack(spacing: 0) {
-            if presentation == .grid { liveTimelineRail }
             VStack(spacing: 0) {
             if model.config.cameras.isEmpty {
                 ContentUnavailableView {
@@ -964,7 +991,7 @@ struct ACTASecurityCenterView: View {
                     Text("Add a network camera or a Mac / iPhone camera to begin.")
                 } actions: {
                     Button("Add camera", action: addNetworkCamera)
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.borderedProminent).tint(ACTATheme.actionFill)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if filteredCameras.isEmpty {
@@ -982,7 +1009,7 @@ struct ACTASecurityCenterView: View {
                         .padding(.bottom, 24)
                     }
             } else if presentation == .grid {
-                VideoCanvas(model: model, cameras: filteredCameras, arrangeCameras: arrangeCameras,
+                VideoCanvas(model: model, cameras: filteredCameras, arrangeCameras: arrangeCameras, preferredColumns: model.config.columns,
                             edit: editCamera, remove: removeCamera)
                     .padding(8)
             } else {
@@ -1000,7 +1027,7 @@ struct ACTASecurityCenterView: View {
                 ForEach(hours, id: \.self) { hoursAgo in
                     Text(Date.now.addingTimeInterval(Double(-hoursAgo) * 60 * 60)
                         .formatted(date: .omitted, time: .shortened, locale: languageSettings.locale))
-                        .font(.system(size: 10, weight: .medium).monospacedDigit())
+                        .font(.system(size: ACTAType.metadata, weight: .medium).monospacedDigit())
                         .foregroundStyle(hoursAgo == 0 ? ACTATheme.textPrimary : ACTATheme.textMuted)
                     if hoursAgo != hours.last { Spacer(minLength: 0) }
                 }
@@ -1060,64 +1087,12 @@ struct ACTASecurityCenterView: View {
             HStack {
                 pageHeading("Events", subtitle: "Camera events and local AI alerts")
                 Spacer()
-                Toggle("In-app health monitor", isOn: Binding(
-                    get: { model.featurePreferences.enabledFeatures.contains(.independentWatcher) },
-                    set: { enabled in
-                        do { try model.setFeatureEnabled(.independentWatcher, enabled: enabled) }
-                        catch { model.notice = "Could not save local monitor setting" }
-                    }
-                ))
-                .toggleStyle(.switch)
-                .help("Checks camera feeds, local relay and track storage while CameraWall is open. No restart or network access.")
-                Toggle("Enable local operations alerts", isOn: Binding(
-                    get: { model.featurePreferences.enabledFeatures.contains(.operationalAlerts) },
-                    set: { enabled in
-                        do { try model.setFeatureEnabled(.operationalAlerts, enabled: enabled) }
-                        catch { model.notice = "Could not save alert acknowledgement setting" }
-                    }
-                ))
-                .toggleStyle(.switch)
-                .help("Enable local person-count alerts and acknowledgement of stored AI alerts")
-                if !latestISAPIEvents.isEmpty {
-                    Button(role: .destructive) { model.clearISAPIEvents() } label: {
-                        Label("Clear camera events", systemImage: "trash")
-                    }
-                    .help("Delete saved Hikvision camera event metadata")
-                }
-            }
-            HStack {
-                Toggle("Critical alert sound", isOn: Binding(
-                    get: { model.operationsPreferences.criticalSoundEnabled },
-                    set: { enabled in
-                        var preferences = model.operationsPreferences
-                        preferences.criticalSoundEnabled = enabled
-                        do { try model.saveOperationsPreferences(preferences) }
-                        catch { model.notice = error.localizedDescription }
-                    }
-                ))
-                .disabled(!model.featurePreferences.enabledFeatures.contains(.operationalAlerts))
-                Toggle("Retain alert lookback frames", isOn: Binding(
-                    get: { model.featurePreferences.retainFullFrames },
-                    set: { enabled in
-                        do { try model.setMemoryFrameRetentionEnabled(enabled) }
-                        catch { model.notice = error.localizedDescription }
-                    }
-                ))
-                .disabled(!model.featurePreferences.enabledFeatures.contains(.operationalAlerts))
-                .help("Required in addition to operations-alert opt-in. Alert frames stay local for up to seven days.")
-                Spacer()
-                Button(action: exportOperationsReport) {
-                    Label("Export operations report", systemImage: "square.and.arrow.up")
-                }
-                .disabled(!model.featurePreferences.enabledFeatures.contains(.operationalAlerts))
+                OpenSettingsButton(section: .events)
+                Button(action: exportOperationsReport) { Label("Export operations report", systemImage: "square.and.arrow.up") }
             }
             if model.featurePreferences.enabledFeatures.contains(.independentWatcher) {
                 localMonitorPanel
             }
-            if model.featurePreferences.enabledFeatures.contains(.operationalAlerts) {
-                operationsWatchPanel
-            }
-            CameraMissionsPanel(model: model)
             HStack {
                 Button { safetyIncidentsPresented = true } label: {
                     Label(languageSettings.localized("Safety incidents (%lld)", arguments: [model.localAnalyticsEngine.incidents.count]), systemImage: "exclamationmark.shield")
@@ -1136,7 +1111,7 @@ struct ACTASecurityCenterView: View {
                     LazyVStack(alignment: .leading, spacing: 8) {
                         if !latestISAPIEvents.isEmpty {
                             Text("CAMERA EVENTS")
-                                .font(.system(size: 10, weight: .semibold))
+                                .font(.system(size: ACTAType.metadata, weight: .semibold))
                                 .foregroundStyle(ACTATheme.textMuted)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.top, 8)
@@ -1144,7 +1119,7 @@ struct ACTASecurityCenterView: View {
                         }
                         if !latestAlerts.isEmpty {
                             Text("AI ALERTS")
-                                .font(.system(size: 10, weight: .semibold))
+                                .font(.system(size: ACTAType.metadata, weight: .semibold))
                                 .foregroundStyle(ACTATheme.textMuted)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.top, 8)
@@ -1154,22 +1129,22 @@ struct ACTASecurityCenterView: View {
                 }
             }
         }
-        .padding(20)
+        .padding(ACTASpacing.section)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(ACTATheme.background)
     }
 
     private var localMonitorPanel: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Label("Local monitor: \(languageSettings.localized(model.localMonitorSnapshot.verdict.rawValue.capitalized))",
                       systemImage: model.localMonitorSnapshot.verdict == .fault ? "exclamationmark.triangle.fill" : "waveform.path.ecg")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: ACTAType.body, weight: .semibold))
                     .accessibilityValue(languageSettings.localized(model.localMonitorSnapshot.verdict.rawValue))
                 Spacer()
                 if let checkedAt = model.localMonitorSnapshot.checkedAt {
                     Text(checkedAt.formatted(date: .omitted, time: .shortened, locale: languageSettings.locale))
-                        .font(.system(size: 11).monospacedDigit())
+                        .font(.system(size: ACTAType.metadata).monospacedDigit())
                         .foregroundStyle(ACTATheme.textMuted)
                 }
                 Button {
@@ -1185,8 +1160,8 @@ struct ACTASecurityCenterView: View {
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("\(languageSettings.localizedMessage(probe.label)) · \(languageSettings.localized(probe.status.rawValue.capitalized))")
-                            .font(.system(size: 11, weight: .medium))
-                        Text(languageSettings.localizedMessage(probe.detail)).font(.system(size: 11)).foregroundStyle(ACTATheme.textSecondary)
+                            .font(.system(size: ACTAType.metadata, weight: .medium))
+                        Text(languageSettings.localizedMessage(probe.detail)).font(.system(size: ACTAType.metadata)).foregroundStyle(ACTATheme.textSecondary)
                     }
                 }
                 .accessibilityElement(children: .combine)
@@ -1196,16 +1171,16 @@ struct ACTASecurityCenterView: View {
                     ForEach(Array(model.localMonitorHistory.suffix(10).reversed())) { event in
                         VStack(alignment: .leading, spacing: 2) {
                             Text("\(languageSettings.localizedMessage(event.label)) · \(languageSettings.localized(event.kind.rawValue.capitalized))")
-                                .font(.system(size: 11, weight: .medium))
+                                .font(.system(size: ACTAType.metadata, weight: .medium))
                             Text("\(event.occurredAt.formatted(date: .abbreviated, time: .shortened, locale: languageSettings.locale)) · \(languageSettings.localizedMessage(event.detail))")
-                                .font(.system(size: 11)).foregroundStyle(ACTATheme.textSecondary)
+                                .font(.system(size: ACTAType.metadata)).foregroundStyle(ACTATheme.textSecondary)
                         }
                         .accessibilityElement(children: .combine)
                     }
                 }
             }
             Text("Runs only while this app is open. Read-only; no auto-restart, LaunchAgent, tunnel or external checks.")
-                .font(.system(size: 10)).foregroundStyle(ACTATheme.textMuted)
+                .font(.system(size: ACTAType.metadata)).foregroundStyle(ACTATheme.textMuted)
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1214,13 +1189,13 @@ struct ACTASecurityCenterView: View {
     }
 
     private var operationsWatchPanel: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Label("Standing visual watches", systemImage: "eye")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: ACTAType.body, weight: .semibold))
                 Spacer()
                 Text("Local descriptions · one alert per track")
-                    .font(.system(size: 10)).foregroundStyle(ACTATheme.textMuted)
+                    .font(.system(size: ACTAType.metadata)).foregroundStyle(ACTATheme.textMuted)
             }
             TextField("Describe visible details to watch for", text: $watchText, axis: .vertical)
                 .lineLimit(1...3)
@@ -1260,20 +1235,20 @@ struct ACTASecurityCenterView: View {
                 .help("Match all entered terms only against recent local descriptions")
             }
             if !watchError.isEmpty {
-                Text(languageSettings.localizedMessage(watchError)).font(.caption).foregroundStyle(ACTATheme.danger)
+                Text(languageSettings.localizedMessage(watchError)).font(.system(size: ACTAType.caption)).foregroundStyle(ACTATheme.danger)
                     .accessibilityLabel("Watch rule error: \(watchError)")
             }
             if model.operationsWatchRules.isEmpty {
-                Text("No active watch rules.").font(.system(size: 11)).foregroundStyle(ACTATheme.textSecondary)
+                Text("No active watch rules.").font(.system(size: ACTAType.metadata)).foregroundStyle(ACTATheme.textSecondary)
             } else {
                 ForEach(model.operationsWatchRules) { rule in
                     HStack(alignment: .top, spacing: 8) {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(rule.text).font(.system(size: 12, weight: .medium))
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(rule.text).font(.system(size: ACTAType.caption, weight: .medium))
                             let scope = rule.cameraIDs.isEmpty ? languageSettings.localized("All enabled cameras") : languageSettings.localized("%lld selected cameras", arguments: [rule.cameraIDs.count])
                             let expiry = rule.expiresAt.map { languageSettings.localized("Expires %@", arguments: [$0.formatted(date: .abbreviated, time: .shortened, locale: languageSettings.locale)]) } ?? languageSettings.localized("No expiry")
                             Text("\(scope) · \(expiry) · \(rule.firedTrackIDs.count) tracks alerted")
-                                .font(.system(size: 10)).foregroundStyle(ACTATheme.textMuted)
+                                .font(.system(size: ACTAType.metadata)).foregroundStyle(ACTATheme.textMuted)
                         }
                         Spacer()
                         Button(role: .destructive) {
@@ -1291,7 +1266,7 @@ struct ACTASecurityCenterView: View {
                 }
             }
             Text("Rules use exact visible description terms; they do not identify a person or infer intent. Forever rules can be cancelled here.")
-                .font(.system(size: 10)).foregroundStyle(ACTATheme.textMuted)
+                .font(.system(size: ACTAType.metadata)).foregroundStyle(ACTATheme.textMuted)
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1312,32 +1287,32 @@ struct ACTASecurityCenterView: View {
     }
 
     private func isapiEventRow(_ event: ISAPIEventRecord) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Label(event.cameraName, systemImage: "video")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: ACTAType.body, weight: .semibold))
                 Spacer()
                 Text((event.occurredAt ?? event.receivedAt).formatted(date: .abbreviated, time: .shortened, locale: languageSettings.locale))
-                    .font(.system(size: 11, weight: .medium).monospacedDigit())
+                    .font(.system(size: ACTAType.metadata, weight: .medium).monospacedDigit())
                     .foregroundStyle(ACTATheme.textMuted)
             }
             HStack(spacing: 8) {
                 Text(event.eventType)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: ACTAType.caption, weight: .semibold))
                 if let state = event.eventState {
                     Text(languageSettings.localized(state.capitalized))
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.system(size: ACTAType.metadata, weight: .semibold))
                         .foregroundStyle(state.lowercased() == "active" ? ACTATheme.warning : ACTATheme.textSecondary)
                         .padding(.horizontal, 7)
                         .padding(.vertical, 3)
                         .background(ACTATheme.surfaceElevated, in: Capsule())
                 }
                 if let channel = event.channelID {
-                    Text(languageSettings.localized("Channel %lld", arguments: [channel])).font(.system(size: 11))
+                    Text(languageSettings.localized("Channel %lld", arguments: [channel])).font(.system(size: ACTAType.metadata))
                 }
             }
             if let detail = event.eventDescription, !detail.isEmpty {
-                Text(detail).font(.system(size: 12)).foregroundStyle(ACTATheme.textSecondary).lineLimit(2)
+                Text(detail).font(.system(size: ACTAType.caption)).foregroundStyle(ACTATheme.textSecondary).lineLimit(2)
             }
         }
         .padding(14)
@@ -1371,7 +1346,7 @@ struct ACTASecurityCenterView: View {
                 }
             }
         }
-        .padding(20)
+        .padding(ACTASpacing.section)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(ACTATheme.background)
     }
@@ -1402,7 +1377,7 @@ struct ACTASecurityCenterView: View {
                 Spacer()
                 Text("Now")
             }
-            .font(.system(size: 11, weight: .medium).monospacedDigit())
+            .font(.system(size: ACTAType.metadata, weight: .medium).monospacedDigit())
             .foregroundStyle(ACTATheme.textSecondary)
         }
         .padding(16)
@@ -1413,22 +1388,22 @@ struct ACTASecurityCenterView: View {
         VStack(alignment: .leading, spacing: 16) {
             pageHeading("AI Analysis", subtitle: "Local Qwen vision model")
             HStack(spacing: 12) {
-                Image(systemName: "cpu").font(.system(size: 18)).foregroundStyle(ACTATheme.primary)
+                Image(systemName: "cpu").font(.system(size: ACTAType.heading)).foregroundStyle(ACTATheme.primary)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Qwen3.5-9B-4bit").font(.system(size: 14, weight: .semibold))
-                    Text(languageSettings.localizedMessage(model.vlmStatus)).font(.system(size: 12)).foregroundStyle(ACTATheme.textSecondary)
+                    Text("Qwen3.5-9B-4bit").font(.system(size: ACTAType.body, weight: .semibold))
+                    Text(languageSettings.localizedMessage(model.vlmStatus)).font(.system(size: ACTAType.caption)).foregroundStyle(ACTATheme.textSecondary)
                 }
                 Spacer()
-                Button("Open AI analysis", action: openAIChat).buttonStyle(.borderedProminent)
+                Button("Open AI analysis", action: openAIChat).buttonStyle(.borderedProminent).tint(ACTATheme.actionFill)
             }
             .padding(16)
             .background(ACTATheme.surface, in: RoundedRectangle(cornerRadius: 8))
             Text("\(languageSettings.localized(model.vlmPreferences.scheduleEnabled ? "Scheduled checks enabled" : "Scheduled checks off")) · \(languageSettings.localized("%lld active alert conditions", arguments: [model.vlmPreferences.alertRules.filter(\.enabled).count]))")
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(size: ACTAType.caption, weight: .medium))
                 .foregroundStyle(ACTATheme.textSecondary)
             Spacer()
         }
-        .padding(20)
+        .padding(ACTASpacing.section)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(ACTATheme.background)
     }
@@ -1449,19 +1424,19 @@ struct ACTASecurityCenterView: View {
                     reportMetric("Latest alert", value: latest?.createdAt.formatted(date: .abbreviated, time: .shortened, locale: languageSettings.locale) ?? "—")
                 }
                 Text("Alert history is limited to the most recent 100 records. Optional alert lookbacks are local JPEG frames and expire after seven days; no continuous video is stored.")
-                    .font(.system(size: 12))
+                    .font(.system(size: ACTAType.caption))
                     .foregroundStyle(ACTATheme.textSecondary)
                 Spacer()
             }
         }
-        .padding(20)
+        .padding(ACTASpacing.section)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(ACTATheme.background)
     }
 
     private func reportMetric(_ title: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(LocalizedStringKey(title)).font(.system(size: 12, weight: .medium)).foregroundStyle(ACTATheme.textSecondary)
+            Text(LocalizedStringKey(title)).font(.system(size: ACTAType.caption, weight: .medium)).foregroundStyle(ACTATheme.textSecondary)
             Text(value).font(.system(size: 21, weight: .semibold).monospacedDigit())
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1470,76 +1445,9 @@ struct ACTASecurityCenterView: View {
     }
 
     private var activityStrip: some View {
-        let cutoff = Date().addingTimeInterval(-24 * 60 * 60)
-        let recentAlerts = latestAlerts.filter { $0.createdAt >= cutoff }
-        return VStack(spacing: 5) {
-            HStack(spacing: 16) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Label("AI EVENTS · 24H", systemImage: "waveform.path")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(ACTATheme.textSecondary)
-                    Text(languageSettings.localized("%lld events", arguments: [recentAlerts.count]))
-                        .font(.system(size: 11))
-                        .foregroundStyle(ACTATheme.textMuted)
-                }
-                Spacer(minLength: 8)
-                ForEach(latestAlerts.prefix(3)) { alert in
-                    Button { selectedAlert = alert } label: {
-                        HStack(spacing: 6) {
-                            Circle().fill(ACTATheme.primary).frame(width: 7, height: 7)
-                            Text(alert.cameraName).lineLimit(1)
-                            Text(alert.createdAt.formatted(date: .omitted, time: .shortened, locale: languageSettings.locale))
-                                .monospacedDigit()
-                        }
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(ACTATheme.textSecondary)
-                        .padding(.horizontal, 10)
-                        .frame(height: 28)
-                        .background(ACTATheme.surfaceElevated, in: RoundedRectangle(cornerRadius: 6))
-                    }
-                    .buttonStyle(.plain)
-                }
-                if !latestAlerts.isEmpty {
-                    Button("All events") { section = .events }
-                        .font(.system(size: 12, weight: .semibold))
-                        .buttonStyle(.plain)
-                        .foregroundStyle(ACTATheme.primary)
-                }
-            }
-            HStack(spacing: 8) {
-                Text(cutoff.formatted(date: .omitted, time: .shortened, locale: languageSettings.locale))
-                GeometryReader { geometry in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(ACTATheme.border).frame(height: 6)
-                        ForEach(recentAlerts) { alert in
-                            let age = min(1, max(0, Date().timeIntervalSince(alert.createdAt) / (24 * 60 * 60)))
-                            Button { selectedAlert = alert } label: {
-                                Circle().fill(ACTATheme.primary)
-                                    .frame(width: 10, height: 10)
-                                    .frame(width: 24, height: 24)
-                                    .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .help("\(alert.cameraName) · \(alert.createdAt.formatted(date: .omitted, time: .shortened, locale: languageSettings.locale))")
-                            .accessibilityLabel(languageSettings.localized(
-                                "AI alert for %@ at %@",
-                                arguments: [alert.cameraName, alert.createdAt.formatted(date: .omitted, time: .shortened, locale: languageSettings.locale)]
-                            ))
-                            .position(x: max(12, min(geometry.size.width - 12, geometry.size.width * (1 - age))),
-                                      y: geometry.size.height / 2)
-                        }
-                    }
-                }
-                .frame(height: 24)
-                Text("Now")
-            }
-            .font(.system(size: 10, weight: .medium).monospacedDigit())
-            .foregroundStyle(ACTATheme.textMuted)
-        }
-        .padding(.horizontal, 20)
-        .frame(height: 78)
-        .background(ACTATheme.surface)
-        .overlay(alignment: .top) { Rectangle().fill(ACTATheme.border).frame(height: 1) }
+        ACTAActivitySummaryView(alerts: latestAlerts, incidents: model.localAnalyticsEngine.incidents,
+            hardwareEvents: latestISAPIEvents, openEvents: { section = .events }, openAlert: { selectedAlert = $0 })
+            .equatable()
     }
 
     private var statusFooter: some View {
@@ -1559,7 +1467,7 @@ struct ACTASecurityCenterView: View {
                     .keyboardShortcut(.escape, modifiers: [])
             }
         }
-        .font(.system(size: 11, weight: .medium))
+        .font(.system(size: ACTAType.metadata, weight: .medium))
         .foregroundStyle(ACTATheme.textSecondary)
         .padding(.horizontal, 16)
         .frame(height: 30)
@@ -1568,8 +1476,8 @@ struct ACTASecurityCenterView: View {
 
     private func pageHeading(_ title: String, subtitle: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(LocalizedStringKey(title)).font(.system(size: 20, weight: .semibold))
-            Text(LocalizedStringKey(subtitle)).font(.system(size: 12)).foregroundStyle(ACTATheme.textSecondary)
+            Text(LocalizedStringKey(title)).font(.system(size: ACTAType.heading, weight: .semibold))
+            Text(LocalizedStringKey(subtitle)).font(.system(size: ACTAType.caption)).foregroundStyle(ACTATheme.textSecondary)
         }
     }
 
@@ -1591,29 +1499,29 @@ struct ACTASecurityCenterView: View {
                 Image(systemName: "bell.badge.fill")
                     .foregroundStyle(ACTATheme.danger)
                     .frame(width: 24, height: 24)
-                VStack(alignment: .leading, spacing: 5) {
+                VStack(alignment: .leading, spacing: 4) {
                     HStack {
-                        Text(alert.cameraName).font(.system(size: 13, weight: .semibold))
+                        Text(alert.cameraName).font(.system(size: ACTAType.body, weight: .semibold))
                         Spacer()
                         Text(alert.createdAt.formatted(date: .abbreviated, time: .shortened, locale: languageSettings.locale))
-                            .font(.system(size: 11, weight: .medium).monospacedDigit())
+                            .font(.system(size: ACTAType.metadata, weight: .medium).monospacedDigit())
                             .foregroundStyle(ACTATheme.textMuted)
                     }
-                    Text(alert.condition).font(.system(size: 12, weight: .medium))
-                    Text(alert.evidence).font(.system(size: 12)).foregroundStyle(ACTATheme.textSecondary)
+                    Text(alert.condition).font(.system(size: ACTAType.caption, weight: .medium))
+                    Text(alert.evidence).font(.system(size: ACTAType.caption)).foregroundStyle(ACTATheme.textSecondary)
                         .lineLimit(2)
                     if let review = model.operationsAlertReviews[alert.id] {
                         Label("\(languageSettings.localized(review.priority.rawValue.capitalized)) · \(languageSettings.localized(review.status.rawValue.capitalized))",
                               systemImage: review.priority == .critical ? "exclamationmark.triangle" : "checkmark.circle")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(.system(size: ACTAType.metadata, weight: .medium))
                             .foregroundStyle(review.priority == .critical ? ACTATheme.warning : ACTATheme.textSecondary)
                     } else if let acknowledgedAt = model.operationsAlertAcknowledgements[alert.id] {
                         Label("Acknowledged · \(acknowledgedAt.formatted(date: .abbreviated, time: .shortened))", systemImage: "checkmark.circle.fill")
-                            .font(.system(size: 10, weight: .medium))
+                            .font(.system(size: ACTAType.metadata, weight: .medium))
                             .foregroundStyle(ACTATheme.success)
                     } else if alert.priority == .critical {
                         Label("Critical · Open", systemImage: "exclamationmark.triangle")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(.system(size: ACTAType.metadata, weight: .medium))
                             .foregroundStyle(ACTATheme.warning)
                     }
                 }
@@ -1635,22 +1543,22 @@ struct ACTASecurityCenterView: View {
         ScrollView {
         VStack(alignment: .leading, spacing: 12) {
             Label(alert.cameraName, systemImage: "video")
-                .font(.system(size: 18, weight: .semibold))
-            Text(alert.condition).font(.system(size: 14, weight: .medium))
-            Text(alert.evidence).font(.system(size: 14)).foregroundStyle(ACTATheme.textSecondary)
+                .font(.system(size: ACTAType.heading, weight: .semibold))
+            Text(alert.condition).font(.system(size: ACTAType.body, weight: .medium))
+            Text(alert.evidence).font(.system(size: ACTAType.body)).foregroundStyle(ACTATheme.textSecondary)
             if let watchID = alert.watchID, let trackID = alert.sourceTrackID {
                 Label("Local watch · track \(trackID.uuidString)", systemImage: "eye")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: ACTAType.metadata, weight: .medium))
                     .textSelection(.enabled)
                     .accessibilityLabel("Local watch alert for per-camera track \(trackID.uuidString), rule \(watchID.uuidString)")
             }
             Text(alert.createdAt.formatted(date: .complete, time: .shortened, locale: languageSettings.locale))
-                .font(.system(size: 12, weight: .medium).monospacedDigit())
+                .font(.system(size: ACTAType.caption, weight: .medium).monospacedDigit())
                 .foregroundStyle(ACTATheme.textMuted)
             if model.featurePreferences.enabledFeatures.contains(.operationalAlerts) {
                 if alert.clipID != nil {
                     DisclosureGroup("Local lookback frames · 8 seconds") {
-                        VStack(alignment: .leading, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 12) {
                             if alertClipFrames.isEmpty {
                                 Button {
                                     loadAlertClip(alert)
@@ -1671,7 +1579,7 @@ struct ACTASecurityCenterView: View {
                                     } label: { Label("Previous", systemImage: "chevron.left") }
                                     .disabled(alertClipFrameIndex == 0)
                                     Text("Frame \(alertClipFrameIndex + 1) of \(alertClipFrames.count)")
-                                        .font(.system(size: 11).monospacedDigit())
+                                        .font(.system(size: ACTAType.metadata).monospacedDigit())
                                     Button {
                                         alertClipFrameIndex = min(alertClipFrames.count - 1, alertClipFrameIndex + 1)
                                     } label: { Label("Next", systemImage: "chevron.right") }
@@ -1687,7 +1595,7 @@ struct ACTASecurityCenterView: View {
                                 }
                             }
                             if !alertClipError.isEmpty {
-                                Text(languageSettings.localizedMessage(alertClipError)).font(.caption).foregroundStyle(ACTATheme.danger)
+                                Text(languageSettings.localizedMessage(alertClipError)).font(.system(size: ACTAType.caption)).foregroundStyle(ACTATheme.danger)
                                     .accessibilityLabel("Clip error: \(alertClipError)")
                             }
                         }
@@ -1724,7 +1632,7 @@ struct ACTASecurityCenterView: View {
                     }
                 }
                 if !alertReviewError.isEmpty {
-                    Text(languageSettings.localizedMessage(alertReviewError)).font(.caption).foregroundStyle(ACTATheme.danger)
+                    Text(languageSettings.localizedMessage(alertReviewError)).font(.system(size: ACTAType.caption)).foregroundStyle(ACTATheme.danger)
                         .accessibilityLabel("Alert review error: \(alertReviewError)")
                 }
                 DisclosureGroup("Recent review history") {
@@ -1735,7 +1643,7 @@ struct ACTASecurityCenterView: View {
                                     Text("\(review.updatedAt.formatted(date: .abbreviated, time: .shortened, locale: languageSettings.locale)) · \(languageSettings.localized(review.priority.rawValue)) · \(languageSettings.localized(review.status.rawValue))")
                                     if !review.note.isEmpty { Text(review.note).textSelection(.enabled) }
                                 }
-                                .font(.caption)
+                                .font(.system(size: ACTAType.caption))
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1753,7 +1661,7 @@ struct ACTASecurityCenterView: View {
                             model.unacknowledgeVLMAlert(alert.id)
                         }
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.borderedProminent).tint(ACTATheme.actionFill)
                 }
                 Spacer()
                 Button("Close") { selectedAlert = nil }.keyboardShortcut(.cancelAction)
@@ -1825,7 +1733,7 @@ private struct DateTimeReadout: View {
                 Image(systemName: "calendar")
             Text(Date.now.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day().year(.twoDigits).locale(locale)))
             }
-            .font(.system(size: 12, weight: .medium))
+            .font(.system(size: ACTAType.caption, weight: .medium))
             .foregroundStyle(ACTATheme.textSecondary)
             Text(Date.now, style: .time)
                 .font(.system(size: 21, weight: .bold).monospacedDigit())
@@ -1859,7 +1767,7 @@ private struct ACTACameraListRow: View {
                 VideoView(frame: tile.frame, stale: tile.stale)
                 if tile.stale {
                     Label("OFFLINE", systemImage: "video.slash")
-                        .font(.system(size: 10, weight: .bold))
+                        .font(.system(size: ACTAType.metadata, weight: .bold))
                         .foregroundStyle(ACTATheme.textPrimary)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 5)
@@ -1872,33 +1780,23 @@ private struct ACTACameraListRow: View {
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(ACTATheme.border, lineWidth: 1))
 
             VStack(alignment: .leading, spacing: 8) {
-                Text(camera.name).font(.system(size: 15, weight: .semibold)).lineLimit(1)
+                Text(camera.name).font(.system(size: ACTAType.body, weight: .semibold)).lineLimit(1)
                 HStack(spacing: 8) {
                     Circle().fill(tile.stale ? ACTATheme.textMuted : ACTATheme.success).frame(width: 8, height: 8)
                     Text(LocalizedStringKey(tile.stale ? "Offline" : "Live"))
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: ACTAType.caption, weight: .medium))
                         .foregroundStyle(tile.stale ? ACTATheme.textSecondary : ACTATheme.success)
                     if !tile.stale {
                         Text("· \(tile.frame.width)×\(tile.frame.height)")
                         Text("· \(tile.frame.measuredFPS.formatted(.number.precision(.fractionLength(1)))) FPS")
                     }
                 }
-                .font(.system(size: 12, weight: .medium).monospacedDigit())
+                .font(.system(size: ACTAType.caption, weight: .medium).monospacedDigit())
                 .foregroundStyle(ACTATheme.textSecondary)
                 if !tile.objects.isEmpty {
                     Text(appLanguage.localized("%lld objects detected", arguments: [tile.objects.count]))
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: ACTAType.caption, weight: .medium))
                         .foregroundStyle(ACTATheme.primary)
-                }
-                HStack(spacing: 14) {
-                    Toggle("YOLO", isOn: Binding(get: { camera.yoloEnabled }, set: toggleYOLO))
-                        .toggleStyle(.checkbox)
-                        .controlSize(.small)
-                        .help(appLanguage.localized("Run YOLO26 on %@", arguments: [camera.name]))
-                    Toggle("AI chat", isOn: Binding(get: { camera.aiChatEnabled }, set: toggleAIChat))
-                        .toggleStyle(.checkbox)
-                        .controlSize(.small)
-                        .help(appLanguage.localized("Include %@ in AI chat", arguments: [camera.name]))
                 }
             }
             Spacer(minLength: 8)

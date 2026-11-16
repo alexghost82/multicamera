@@ -1237,3 +1237,402 @@
 "Stage-A Pose Interaction Heuristic: 2 tracks in close proximity (d=%@, IoU=%@) with rapid limb/body kinematics (wrist speed %@, duration %@ s). Experimental heuristic — review or verify via VLM." = "Эвристика взаимодействия поз: два близких трека (d=%@, IoU=%@) с быстрыми движениями (скорость запястья %@, длительность %@ с). Экспериментальное обнаружение — проверьте событие вручную или с помощью VLM.";
 "No active network-camera relay is expected" = "Активный ретранслятор сетевых камер не требуется";
 "Secondary VLM unavailable — primary safety detection preserved" = "Вторичная проверка VLM недоступна; исходное событие сохранено";
+
+"EVENTS · 24H" = "СОБЫТИЯ · 24 ЧАСА";
+"Stored events" = "Сохранённые события";
+"Stored events from the last 24 hours" = "Сохранённые события за последние 24 часа";
+"Stored event counts by hour" = "Число сохранённых событий по часам";
+"Camera events" = "События камер";
+"AI alerts" = "Оповещения ИИ";
+
+"Systems" = "Системы";
+
+"Search cameras and locations…" = "Поиск камер и расположений…";
+
+"Choose cameras" = "Выбрать камеры";
+
+"⌘K" = "⌘K";
+
+"Check idle and boosted analytics sampling rates." = "Проверьте частоты анализа в режиме ожидания и при обнаружении падения.";
+
+"Check per-camera sampling and cooldown overrides." = "Проверьте частоту анализа и паузу оповещений отдельных камер.";
+
+"Check zone names, polygon coordinates and hold time." = "Проверьте названия зон, координаты вершин и время подтверждения.";
+
+"AI backend" = "Сервис ИИ";
+
+"OpenAI Responses URL" = "Адрес OpenAI Responses";
+
+"Backup relay URL" = "Адрес резервного ретранслятора";
+
+"Cloud nano model" = "Облачная модель Nano";
+
+"Cloud mini model" = "Облачная модель Mini";
+
+"Cloud full model" = "Основная облачная модель";
+
+"API credentials" = "Ключи API";
+
+"Cloud privacy and budget" = "Конфиденциальность и бюджет облачного ИИ";
+
+"Blur faces before cloud requests" = "Размывать лица перед отправкой в облако";
+
+"Blur plates before cloud requests" = "Размывать номера перед отправкой в облако";
+
+"Daily AI budget (USD)" = "Дневной бюджет ИИ (USD)";
+
+"Monthly AI budget (USD)" = "Месячный бюджет ИИ (USD)";
+
+"External requests require separate permission in Features and access." = "Для внешних запросов требуется отдельное разрешение в разделе «Функции и доступ».";
+
+"Persistent visual watches" = "Постоянные визуальные наблюдения";
+
+"Monitoring and alerts" = "Мониторинг и оповещения";
+
+"Person-count alerts" = "Оповещения о количестве людей";
+
+"Person threshold" = "Порог количества людей";
+
+"Hold seconds" = "Время подтверждения, с";
+
+"Cooldown seconds" = "Пауза между оповещениями, с";
+
+"Memory and storage" = "Память и хранение";
+
+"Retention days: %@" = "Срок хранения, дней: %@";
+
+"Frame and evidence stores also enforce their own retention and disk quotas." = "Для кадров и материалов инцидентов также действуют отдельные сроки хранения и лимиты диска.";
+
+"Features" = "Функции";
+
+"Permissions" = "Разрешения";
+
+"Allow external AI" = "Разрешить внешний ИИ";
+
+"Allow local voice input" = "Разрешить локальный голосовой ввод";
+
+"Allow plate registry lookup" = "Разрешить поиск в реестре автомобилей";
+
+"Allow public access" = "Разрешить публичный доступ";
+
+"Enabling permission does not start a server or send data." = "Само разрешение не запускает сервер и не отправляет данные.";
+
+"New primary API key" = "Новый основной ключ API";
+
+"New alert API key" = "Новый ключ API для оповещений";
+
+"Save API keys in Keychain" = "Сохранить ключи API в Связке ключей";
+
+"Settings saved" = "Настройки сохранены";
+
+"Could not save API keys" = "Не удалось сохранить ключи API";
+
+"Check advanced runtime thresholds and storage limits." = "Проверьте расширенные пороги анализа и ограничения хранения.";
+
+"Torso angle threshold degrees" = "Порог наклона корпуса, градусы";
+
+"Aspect ratio threshold" = "Порог соотношения сторон тела";
+
+"Height collapse threshold" = "Порог резкого уменьшения высоты";
+
+"Sitting height threshold" = "Порог высоты сидящего человека";
+
+"Crouching height threshold" = "Порог высоты присевшего человека";
+
+"Low frame rate threshold" = "Порог низкой частоты кадров";
+
+"Low frame rate persistence seconds" = "Подтверждение при низкой частоте кадров, с";
+
+"Velocity feature minimum f p s" = "Минимальная частота для оценки скорости, FPS";
+
+"Walking speed body heights per second" = "Скорость ходьбы, высот тела в секунду";
+
+"Running speed body heights per second" = "Скорость бега, высот тела в секунду";
+
+"Controlled sit before lie seconds" = "Минимальное время сидения перед укладыванием, с";
+
+"Controlled lie down max drop speed body heights per second" = "Предельная скорость спокойного укладывания, высот тела в секунду";
+
+"Ema alpha" = "Коэффициент сглаживания EMA";
+
+"Low confidence floor" = "Нижний порог уверенности сопровождения";
+
+"Match io u threshold" = "Порог IoU для сопоставления";
+
+"Relink maximum gap seconds" = "Предельный перерыв для восстановления трека, с";
+
+"Relink maximum diagonal ratio" = "Предельное расстояние восстановления, диагоналей тела";
+
+"Frame interval smoothing" = "Сглаживание интервала кадров";
+
+"Minimum confirming samples" = "Минимум отсчётов для подтверждения";
+
+"Minimum baseline samples" = "Минимум отсчётов для исходной высоты";
+
+"Recovery samples" = "Отсчёты восстановления положения";
+
+"Maximum tracks" = "Предельное количество треков";
+
+"Advanced fall tracking" = "Расширенные параметры сопровождения падений";
+
+"Common confidence and confirmation thresholds are in Video analytics." = "Основные пороги уверенности и подтверждения находятся в разделе «Видеоаналитика».";
+
+"Storage cleanup" = "Очистка хранилища";
+
+"Media disk limit (MB)" = "Лимит медиафайлов на диске, МБ";
+
+"Minimum free disk (GB)" = "Минимум свободного места, ГБ";
+
+"Crops per identity" = "Фрагментов на объект";
+
+"Data saver" = "Экономия места";
+
+"Track image retention days" = "Хранение изображений треков, дней";
+
+"Log retention days" = "Хранение журналов, дней";
+
+"Capture and crop selection" = "Съёмка и отбор фрагментов";
+
+"Bootstrap seconds" = "Начальное ожидание, с";
+
+"Capture interval seconds" = "Интервал съёмки, с";
+
+"Movement fraction" = "Доля перемещения для съёмки";
+
+"Inheritance maximum age" = "Предельный возраст наследуемого кадра, с";
+
+"Inheritance minimum IoU" = "Минимальный IoU для наследования";
+
+"Stale track TTL" = "Срок жизни неактивного трека, с";
+
+"Crop window seconds" = "Окно отбора фрагментов, с";
+
+"Best crops per window" = "Лучших фрагментов за окно";
+
+"Crop improvement ratio" = "Коэффициент улучшения фрагмента";
+
+"Global video analytics" = "Общая видеоаналитика";
+
+"Execution mode" = "Режим выполнения";
+
+"Sensitivity profile" = "Профиль чувствительности";
+
+"Apply sensitivity profile" = "Применить профиль чувствительности";
+
+"Advanced analytics" = "Расширенные параметры анализа";
+
+"Video overlays" = "Наложения на видео";
+
+"Per-camera analytics" = "Аналитика отдельных камер";
+
+"Select camera" = "Выберите камеру";
+
+"Remove camera override" = "Убрать настройки камеры";
+
+"Override sampling FPS" = "Задать частоту анализа камеры";
+
+"Analytics sampling FPS" = "Частота анализа, FPS";
+
+"Override alert cooldown" = "Задать паузу между оповещениями камеры";
+
+"Alert cooldown seconds" = "Пауза между оповещениями, с";
+
+"Restricted zones" = "Ограниченные зоны";
+
+"Zone name" = "Название зоны";
+
+"Zone hold seconds" = "Время подтверждения в зоне, с";
+
+"Severity" = "Важность";
+
+"Normalized coordinates: 0 to 1" = "Нормализованные координаты: от 0 до 1";
+
+"X" = "X";
+
+"Y" = "Y";
+
+"Add polygon point" = "Добавить вершину многоугольника";
+
+"Remove zone" = "Удалить зону";
+
+"Add restricted zone" = "Добавить ограниченную зону";
+
+"Diagnostics" = "Диагностика";
+
+"Worker node configuration" = "Настройки рабочего узла";
+
+"Worker role, addresses, ports, camera assignments, model path and trusted peers. Changes apply on the next worker launch." = "Роль узла, адреса, порты, назначение камер, путь модели и доверенные узлы. Изменения применяются при следующем запуске узла.";
+
+"Open configuration" = "Открыть конфигурацию";
+
+"Reload" = "Перезагрузить";
+
+"Worker configuration JSON" = "Конфигурация рабочего узла JSON";
+
+"Disabled" = "Выключено";
+
+"Select an existing model with the supported format." = "Выберите существующую модель в поддерживаемом формате.";
+
+"This model is disabled in Settings." = "Эта модель выключена в настройках.";
+
+"Enable video analytics" = "Включить видеоаналитику";
+
+"Person detection" = "Обнаружение людей";
+
+"Pose estimation" = "Оценка позы";
+
+"Fall detection" = "Обнаружение падений";
+
+"Behavior analysis" = "Анализ поведения";
+
+"Prolonged inactivity" = "Длительная неподвижность";
+
+"Loitering detection" = "Длительное пребывание";
+
+"Restricted zone monitoring" = "Наблюдение за ограниченными зонами";
+
+"Unusual movement" = "Необычные движения";
+
+"Crowd activity" = "Активность скопления людей";
+
+"Fight detection" = "Обнаружение драк";
+
+"Secondary VLM verification" = "Дополнительная проверка с помощью VLM";
+
+"Sound alert" = "Звуковое оповещение";
+
+"Visual alert banner" = "Визуальный баннер оповещения";
+
+"Record incident evidence" = "Сохранять материалы инцидентов";
+
+"Person confidence threshold" = "Порог уверенности обнаружения человека";
+
+"Pose keypoint confidence threshold" = "Порог уверенности ключевых точек позы";
+
+"Idle camera sampling FPS" = "Частота анализа неактивной камеры, FPS";
+
+"Active fall boost FPS" = "Повышенная частота при падении, FPS";
+
+"Fall confirmation seconds" = "Подтверждение падения, с";
+
+"Person down seconds" = "Подтверждение лежащего человека, с";
+
+"Inactivity threshold seconds" = "Порог неподвижности, с";
+
+"Loitering threshold seconds" = "Порог длительного пребывания, с";
+
+"Pre-event buffer seconds" = "Буфер до события, с";
+
+"Post-event buffer seconds" = "Буфер после события, с";
+
+"Minimum visible keypoints" = "Минимум видимых ключевых точек";
+
+"Evidence disk quota (MB)" = "Лимит материалов инцидентов, МБ";
+
+"Concurrent inference tasks" = "Одновременных задач анализа";
+
+"Bounding boxes" = "Рамки объектов";
+
+"Pose skeleton" = "Скелет позы";
+
+"Track ID" = "Идентификатор трека";
+
+"Behavior state" = "Состояние поведения";
+
+"Fall status" = "Состояние падения";
+
+"Confidence" = "Уверенность";
+
+"Critical alert marker" = "Метка критического оповещения";
+
+"Inherit global settings" = "Наследовать общие настройки";
+
+"General and streams" = "Общие и потоки";
+
+"Cameras and sources" = "Камеры и источники";
+
+"AI models" = "Модели ИИ";
+
+"Advanced runtime and cleanup" = "Расширенные параметры и очистка";
+
+"Video analytics" = "Видеоаналитика";
+
+"AI backends and privacy" = "Сервисы ИИ и конфиденциальность";
+
+"Events and alerts" = "События и оповещения";
+
+"Features and access" = "Функции и доступ";
+
+"ReID calibration" = "Калибровка ReID";
+
+"Diagnostics and worker nodes" = "Диагностика и рабочие узлы";
+
+"Find settings section" = "Найти отдел настроек";
+
+"Interface" = "Интерфейс";
+
+"Interface language" = "Язык интерфейса";
+
+"English" = "English";
+
+"Object detection" = "Обнаружение объектов";
+
+"Local video file" = "Локальный видеофайл";
+
+"Model enabled" = "Модель включена";
+
+"Model path (empty uses bundled model)" = "Путь модели (пусто — встроенная модель)";
+
+"Choose model" = "Выбрать модель";
+
+"Use bundled model" = "Использовать встроенную модель";
+
+"Core ML .mlmodelc" = "Core ML .mlmodelc";
+
+"Core ML .mlmodelc / .mlpackage / .mlmodel" = "Core ML .mlmodelc / .mlpackage / .mlmodel";
+
+"Local MLX model directory" = "Каталог локальной модели MLX";
+
+"ONNX model with compatible inputs and outputs" = "Модель ONNX с совместимыми входами и выходами";
+
+"Scheduled analysis settings are in Settings." = "Параметры анализа по расписанию находятся в настройках.";
+
+"Enter an HTTP or HTTPS endpoint without credentials or fragments." = "Укажите адрес HTTP или HTTPS без логина, пароля и фрагмента.";
+
+"Check model names and alert cooldowns." = "Проверьте названия моделей и паузы оповещений.";
+
+"Check the daily and monthly AI budget limits." = "Проверьте дневной и месячный лимиты бюджета ИИ.";
+
+"Rule cooldown seconds" = "Пауза этого правила, с";
+
+"Model settings could not be loaded; defaults are active" = "Не удалось загрузить настройки моделей; используются исходные параметры";
+
+"Runtime settings could not be loaded; defaults are active" = "Не удалось загрузить параметры выполнения; используются исходные параметры";
+
+"Additional video sources" = "Дополнительные источники видео";
+
+"Access control" = "Контроль доступа";
+
+"Save research history" = "Сохранять историю исследований";
+
+"Allow operator actions" = "Разрешить действия оператора";
+
+"Expand search terms" = "Расширять поисковые запросы";
+
+"LOCAL" = "Локально";
+
+"DISTRIBUTED" = "На рабочих узлах";
+
+"Conservative" = "Осторожный";
+
+"Balanced" = "Сбалансированный";
+
+"High Sensitivity" = "Высокая чувствительность";
+
+"Custom" = "Пользовательский";
+
+"Person-count alerts remain off until enabled in Settings. No frames are retained." = "Оповещения о количестве людей выключены до включения в настройках. Кадры не сохраняются.";
+
+"Public network access is not supported. Local showcase uses loopback only." = "Публичный доступ по сети не поддерживается. Локальный показ работает только на этом компьютере.";
+
+"Reserved preference: no runtime control is implemented yet." = "Зарезервированный параметр: управление работой приложения пока не реализовано.";

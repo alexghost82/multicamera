@@ -15,16 +15,7 @@ struct VLMScheduleForm<QueueContent: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             StableSidebarScroll {
-                    VStack(alignment: .leading, spacing: 20) {
-                        section("Local runtime") {
-                            localized("Bundled model path").font(.subheadline)
-                            TextField("", text: $draft.model, prompt: localized("Bundled model path"))
-                                .labelsHidden()
-                                .frame(minWidth: 0, maxWidth: .infinity)
-                                .accessibilityLabel("Bundled model path")
-                                .help(draft.model)
-                            note("Runs natively inside CameraWall with MLX and Metal")
-                        }
+                    VStack(alignment: .leading, spacing: 24) {
                         section("Scheduled analysis") {
                             Toggle(isOn: $draft.scheduleEnabled) { localized("Enable scheduled analysis") }
                             counter("Per-camera interval: \(draft.intervalSeconds) seconds",
@@ -50,13 +41,7 @@ struct VLMScheduleForm<QueueContent: View>: View {
                             note("Uses saved local crops and the bundled MLX model. No images are sent to an external service.")
                             if descriptionsEnabled { descriptionQueue }
                         }
-                        section("Crowd alert threshold") {
-                            counter("People: \(operations.personThreshold)", value: $operations.personThreshold, range: 2...100)
-                            counter("Hold: \(operations.holdSeconds) seconds", value: $operations.holdSeconds, range: 1...60)
-                            counter("Cooldown: \(operations.cooldownSeconds) seconds", value: $operations.cooldownSeconds, range: 60...3600, step: 60)
-                            note("Person-count alerts remain off until enabled in Events. No frames are retained.")
-                        }
-                        VStack(alignment: .leading, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 12) {
                             HStack {
                                 localized("Alert conditions").font(.headline)
                                 Spacer(minLength: 8)
@@ -72,6 +57,7 @@ struct VLMScheduleForm<QueueContent: View>: View {
                                     TextField("", text: $draft.alertRules[index].condition, prompt: localized("Observable condition"), axis: .vertical)
                                         .lineLimit(2...5)
                                         .frame(minWidth: 0, maxWidth: .infinity)
+                                    TextField("Rule cooldown seconds", value: $draft.alertRules[index].cooldownSeconds, format: .number)
                                     HStack(spacing: 8) {
                                         Toggle("Enable alert condition", isOn: $draft.alertRules[index].enabled)
                                             .labelsHidden()
@@ -102,16 +88,16 @@ struct VLMScheduleForm<QueueContent: View>: View {
             .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
             Divider()
             Label { localized("Alerts require operator review") } icon: { Image(systemName: "exclamationmark.triangle") }
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.system(size: ACTAType.caption)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if !errorMessage.isEmpty {
-                Text(errorMessage).font(.caption).foregroundStyle(.red)
+                Text(errorMessage).font(.system(size: ACTAType.caption)).foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack {
                 Spacer(minLength: 0)
                 Button(action: save) { localized("Save settings") }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.borderedProminent).tint(ACTATheme.actionFill)
                     .keyboardShortcut(.defaultAction)
             }
         }
@@ -137,7 +123,7 @@ struct VLMScheduleForm<QueueContent: View>: View {
     }
 
     private func note(_ text: LocalizedStringKey) -> some View {
-        localized(text).font(.caption).foregroundStyle(.secondary)
+        localized(text).font(.system(size: ACTAType.caption)).foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
     }
 

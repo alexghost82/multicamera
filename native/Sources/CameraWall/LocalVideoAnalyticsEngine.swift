@@ -30,6 +30,7 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
     private let scheduler = AnalyticsFrameScheduler<IdentityPixelBuffer>()
     private let analyticsQueue = DispatchQueue(label: "CameraWall.LocalVideoAnalyticsEngine", qos: .userInitiated)
     private let stateLock = NSLock()
+    private nonisolated(unsafe) var baseFallConfiguration = FallDetectorConfiguration()
     private nonisolated(unsafe) var fallDetectorsByCamera: [UUID: FallDetector] = [:]
     private nonisolated(unsafe) var behaviorEnginesByCamera: [UUID: BehaviorAnalysisEngine] = [:]
     private nonisolated(unsafe) var sessionGeneration = UUID()
@@ -77,7 +78,7 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
     // MARK: - Lifecycle Management
 
     func startIfEnabled(activeCameraCount: Int) {
-        guard settings.globalEnabled else {
+        guard settings.globalEnabled, ModelSelectionRegistry.isEnabled(.pose) else {
             transitionState(to: .disabled, reason: "Video analytics disabled in settings")
             return
         }
@@ -151,7 +152,7 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
 
     func updateRunningState(activeCameraCount: Int) {
         refreshPersistenceStatus()
-        guard settings.globalEnabled else {
+        guard settings.globalEnabled, ModelSelectionRegistry.isEnabled(.pose) else {
             if engineState != .disabled {
                 stopEngine()
             }
@@ -178,7 +179,7 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
     }
 
     func notifyStreamReconnecting(cameraName: String) {
-        guard settings.globalEnabled, engineState == .running else { return }
+        guard settings.globalEnabled, ModelSelectionRegistry.isEnabled(.pose), engineState == .running else { return }
         transitionState(to: .recovering, reason: "Reconnecting stream for \(cameraName)…")
     }
 
@@ -241,6 +242,11 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
 
     // MARK: - Settings Persistence
 
+    func configureFallDetector(_ configuration: FallDetectorConfiguration) {
+        stopEngine()
+        stateLock.lock(); baseFallConfiguration = configuration; stateLock.unlock()
+    }
+
     func updateSettings(_ newSettings: VideoAnalyticsSettings) throws {
         let validated = newSettings.clamped()
         try validated.validate()
@@ -273,7 +279,7 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         pixelBuffer: CVPixelBuffer,
         monotonicTimestamp: TimeInterval
     ) {
-        guard settings.globalEnabled else { return }
+        guard settings.globalEnabled, ModelSelectionRegistry.isEnabled(.pose) else { return }
         cameraNamesByID[camera.id] = camera.name
         if engineState == .disabled {
             startIfEnabled(activeCameraCount: 1)
@@ -316,7 +322,7 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
     }
 
     func drainSchedulerIfNeeded(camerasByID: [UUID: Camera]) {
-        guard settings.globalEnabled, modelDescriptors[.yoloPose]?.status == .ready,
+        guard settings.globalEnabled, ModelSelectionRegistry.isEnabled(.pose), modelDescriptors[.yoloPose]?.status == .ready,
               let poseDetector else { return }
         let now = ProcessInfo.processInfo.systemUptime
         let currentSettings = settings
@@ -377,11 +383,12 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
                         self.stateLock.unlock()
                         return
                     }
-                    var fallConfig = FallDetectorConfiguration()
+                    var fallConfig = self.baseFallConfiguration
                     fallConfig.fallPersistenceSeconds = workItem.effectiveConfig.fallConfirmationSeconds
                     fallConfig.personDownSeconds = workItem.effectiveConfig.personDownSeconds
                     fallConfig.primaryConfidence = workItem.effectiveConfig.personConfidenceThreshold
                     fallConfig.keypointConfidence = workItem.effectiveConfig.poseKeypointConfidenceThreshold
+                    fallConfig.lowConfidenceFloor = min(fallConfig.lowConfidenceFloor, fallConfig.primaryConfidence)
 
                     var fallDetector = self.fallDetectorsByCamera[workItem.cameraID] ?? FallDetector(configuration: fallConfig)
                     let fallUpdate = fallDetector.update(
@@ -464,7 +471,13 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
             )
         }
         stateLock.lock()
-        var fallDetector = fallDetectorsByCamera[camera.id] ?? FallDetector()
+        var fallConfig = baseFallConfiguration
+        fallConfig.primaryConfidence = config.personConfidenceThreshold
+        fallConfig.keypointConfidence = config.poseKeypointConfidenceThreshold
+        fallConfig.fallPersistenceSeconds = config.fallConfirmationSeconds
+        fallConfig.personDownSeconds = config.personDownSeconds
+        fallConfig.lowConfidenceFloor = min(fallConfig.lowConfidenceFloor, fallConfig.primaryConfidence)
+        var fallDetector = fallDetectorsByCamera[camera.id] ?? FallDetector(configuration: fallConfig)
         let fallUpdate = fallDetector.update(observations, frameWidth: frameWidth, frameHeight: frameHeight, timestamp: monotonicTimestamp)
         fallDetectorsByCamera[camera.id] = fallDetector
 
@@ -756,11 +769,12 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         modelDescriptors = map
     }
 
-    func reloadPoseModel(customPath: URL? = nil) {
+    func reloadPoseModel(customPath: URL? = nil, replaceCustomPath: Bool = false) {
         let cameraCount = trackedPosesByCamera.count
         stopEngine()
         poseDetector = nil
-        if let customPath { customPoseModelURL = customPath }
+        if replaceCustomPath { customPoseModelURL = customPath }
+        else if let customPath { customPoseModelURL = customPath }
         startIfEnabled(activeCameraCount: cameraCount)
     }
 

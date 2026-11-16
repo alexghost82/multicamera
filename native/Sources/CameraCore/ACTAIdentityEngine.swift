@@ -3,7 +3,7 @@ import simd
 
 // MARK: - 1. Same-Camera Tracklet Stitcher
 
-public struct GhostActiveTracklet: Sendable, Equatable {
+public struct ACTAActiveTracklet: Sendable, Equatable {
     public var trackKey: String
     public var cameraID: String
     public var label: String
@@ -12,7 +12,7 @@ public struct GhostActiveTracklet: Sendable, Equatable {
     public var velocityYPerSec: Double
     public var lastSeenAt: Date
     public var embedding: [Float]
-    public var chromaPrint: GhostChromaSignature?
+    public var chromaPrint: ACTAChromaSignature?
 
     public init(
         trackKey: String,
@@ -23,7 +23,7 @@ public struct GhostActiveTracklet: Sendable, Equatable {
         velocityYPerSec: Double = 0,
         lastSeenAt: Date,
         embedding: [Float] = [],
-        chromaPrint: GhostChromaSignature? = nil
+        chromaPrint: ACTAChromaSignature? = nil
     ) {
         self.trackKey = trackKey
         self.cameraID = cameraID
@@ -46,7 +46,7 @@ public struct GhostActiveTracklet: Sendable, Equatable {
     }
 }
 
-public struct GhostStitchMatch: Sendable, Equatable {
+public struct ACTAStitchMatch: Sendable, Equatable {
     public var matchedTrackKey: String
     public var score: Double
     public var reidCosine: Double
@@ -65,17 +65,17 @@ public struct GhostStitchMatch: Sendable, Equatable {
     }
 }
 
-public struct GhostTrackletStitcher: Sendable {
+public struct ACTATrackletStitcher: Sendable {
     public static let maxGapSeconds: TimeInterval = 15.0
     public static let maxPredictedDistanceDiagMultiplier: Double = 1.5
     public static let minReIDCosine: Double = 0.58
     public static let maxAspectRatioDelta: Double = 0.35
 
-    private var lostTrackletsByCamera: [String: [GhostActiveTracklet]] = [:]
+    private var lostTrackletsByCamera: [String: [ACTAActiveTracklet]] = [:]
 
     public init() {}
 
-    public mutating func recordTracklet(_ tracklet: GhostActiveTracklet) {
+    public mutating func recordTracklet(_ tracklet: ACTAActiveTracklet) {
         pruneExpired(now: tracklet.lastSeenAt)
         var list = lostTrackletsByCamera[tracklet.cameraID] ?? []
         if let idx = list.firstIndex(where: { $0.trackKey == tracklet.trackKey }) {
@@ -102,7 +102,7 @@ public struct GhostTrackletStitcher: Sendable {
         normalizedRect: NormalizedRect,
         embedding: [Float],
         timestamp: Date
-    ) -> GhostStitchMatch? {
+    ) -> ACTAStitchMatch? {
         pruneExpired(now: timestamp)
         guard let candidates = lostTrackletsByCamera[cameraID], !candidates.isEmpty else {
             return nil
@@ -113,7 +113,7 @@ public struct GhostTrackletStitcher: Sendable {
         let candDiag = max(0.01, hypot(normalizedRect.width, normalizedRect.height))
         let candAspect = normalizedRect.width / max(0.001, normalizedRect.height)
 
-        var bestMatch: GhostStitchMatch?
+        var bestMatch: ACTAStitchMatch?
         for previous in candidates {
             guard previous.trackKey != candidateTrackKey,
                   previous.label.caseInsensitiveCompare(label) == .orderedSame else {
@@ -132,7 +132,7 @@ public struct GhostTrackletStitcher: Sendable {
             let distanceRatio = distance / max(0.01, refDiag)
             guard distanceRatio <= Self.maxPredictedDistanceDiagMultiplier else { continue }
 
-            let cosine = GhostVectorMath.cosineSimilarity(embedding, previous.embedding)
+            let cosine = ACTAVectorMath.cosineSimilarity(embedding, previous.embedding)
             guard cosine >= Self.minReIDCosine else { continue }
 
             let proximityScore = max(0.0, 1.0 - (distanceRatio / Self.maxPredictedDistanceDiagMultiplier))
@@ -140,7 +140,7 @@ public struct GhostTrackletStitcher: Sendable {
             let combinedScore = 0.65 * cosine + 0.25 * proximityScore + 0.10 * timeScore
 
             if bestMatch == nil || combinedScore > bestMatch!.score {
-                bestMatch = GhostStitchMatch(
+                bestMatch = ACTAStitchMatch(
                     matchedTrackKey: previous.trackKey,
                     score: combinedScore,
                     reidCosine: cosine,
@@ -165,7 +165,7 @@ public struct GhostTrackletStitcher: Sendable {
 
 // MARK: - 2. Vector & Cosine Helpers
 
-public enum GhostVectorMath {
+public enum ACTAVectorMath {
     public static func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Double {
         guard !a.isEmpty, a.count == b.count else { return 0 }
         var dot: Float = 0
@@ -195,7 +195,7 @@ public enum GhostVectorMath {
 
 // MARK: - 3. Inter-Camera Topology Graph
 
-public struct GhostCameraTransitionLink: Codable, Sendable, Equatable {
+public struct ACTACameraTransitionLink: Codable, Sendable, Equatable {
     public var fromCameraID: String
     public var toCameraID: String
     public var transitionCount: Int
@@ -223,10 +223,10 @@ public struct GhostCameraTransitionLink: Codable, Sendable, Equatable {
     }
 }
 
-public struct GhostCameraTopology: Sendable {
-    private var links: [String: GhostCameraTransitionLink] = [:]
+public struct ACTACameraTopology: Sendable {
+    private var links: [String: ACTACameraTransitionLink] = [:]
 
-    public init(links: [GhostCameraTransitionLink] = []) {
+    public init(links: [ACTACameraTransitionLink] = []) {
         for link in links {
             self.links[Self.key(from: link.fromCameraID, to: link.toCameraID)] = link
         }
@@ -236,7 +236,7 @@ public struct GhostCameraTopology: Sendable {
         "\(from)->\(to)"
     }
 
-    public var allLinks: [GhostCameraTransitionLink] {
+    public var allLinks: [ACTACameraTransitionLink] {
         Array(links.values)
     }
 
@@ -258,7 +258,7 @@ public struct GhostCameraTopology: Sendable {
             existing.updatedAt = timestamp
             links[k] = existing
         } else {
-            links[k] = GhostCameraTransitionLink(
+            links[k] = ACTACameraTransitionLink(
                 fromCameraID: fromCameraID,
                 toCameraID: toCameraID,
                 transitionCount: 1,
@@ -300,7 +300,7 @@ public struct GhostCameraTopology: Sendable {
 
 // MARK: - 4. Gallery Exemplar Bank & Identity Profile
 
-public struct GhostExemplar: Codable, Sendable, Equatable {
+public struct ACTAExemplar: Codable, Sendable, Equatable {
     public var embedding: [Float]
     public var cropQuality: Double
     public var cameraID: String
@@ -312,26 +312,26 @@ public struct GhostExemplar: Codable, Sendable, Equatable {
         cameraID: String,
         capturedAt: Date
     ) {
-        self.embedding = GhostVectorMath.l2Normalize(embedding)
+        self.embedding = ACTAVectorMath.l2Normalize(embedding)
         self.cropQuality = cropQuality
         self.cameraID = cameraID
         self.capturedAt = capturedAt
     }
 }
 
-public enum GhostIdentityMatchState: String, Codable, Sendable, Equatable {
+public enum ACTAIdentityMatchState: String, Codable, Sendable, Equatable {
     case confirmed
     case suggested
     case single
 }
 
-public enum GhostResolvedSex: String, Codable, Sendable, Equatable {
+public enum ACTAResolvedSex: String, Codable, Sendable, Equatable {
     case male
     case female
     case unknown
 }
 
-public struct GhostIdentityGalleryProfile: Codable, Sendable, Equatable {
+public struct ACTAIdentityGalleryProfile: Codable, Sendable, Equatable {
     public static let maxExemplars: Int = 16
     public static let diversityCosineCeiling: Double = 0.92
     public static let ewmaAlpha: Double = 0.15
@@ -342,11 +342,11 @@ public struct GhostIdentityGalleryProfile: Codable, Sendable, Equatable {
     public var displayCode: String
     public var displayName: String?
     public var centroid: [Float]
-    public var exemplars: [GhostExemplar]
-    public var chromaPrint: GhostChromaSignature?
+    public var exemplars: [ACTAExemplar]
+    public var chromaPrint: ACTAChromaSignature?
     public var hsvHistogram: [Float]
     public var plateNumber: String?
-    public var resolvedSex: GhostResolvedSex
+    public var resolvedSex: ACTAResolvedSex
     public var resolvedSexConfidence: Double
     public var firstSeenAt: Date
     public var lastSeenAt: Date
@@ -363,11 +363,11 @@ public struct GhostIdentityGalleryProfile: Codable, Sendable, Equatable {
         displayCode: String,
         displayName: String? = nil,
         centroid: [Float] = [],
-        exemplars: [GhostExemplar] = [],
-        chromaPrint: GhostChromaSignature? = nil,
+        exemplars: [ACTAExemplar] = [],
+        chromaPrint: ACTAChromaSignature? = nil,
         hsvHistogram: [Float] = [],
         plateNumber: String? = nil,
-        resolvedSex: GhostResolvedSex = .unknown,
+        resolvedSex: ACTAResolvedSex = .unknown,
         resolvedSexConfidence: Double = 0,
         firstSeenAt: Date = Date(),
         lastSeenAt: Date = Date(),
@@ -382,7 +382,7 @@ public struct GhostIdentityGalleryProfile: Codable, Sendable, Equatable {
         self.kind = kind
         self.displayCode = displayCode
         self.displayName = displayName
-        self.centroid = GhostVectorMath.l2Normalize(centroid)
+        self.centroid = ACTAVectorMath.l2Normalize(centroid)
         self.exemplars = exemplars
         self.chromaPrint = chromaPrint
         self.hsvHistogram = hsvHistogram
@@ -404,7 +404,7 @@ public struct GhostIdentityGalleryProfile: Codable, Sendable, Equatable {
         cameraID: String,
         embedding: [Float],
         cropQuality: Double,
-        chromaPrint: GhostChromaSignature?,
+        chromaPrint: ACTAChromaSignature?,
         hsvHistogram: [Float]?,
         normalizedRect: NormalizedRect?,
         observedAt: Date
@@ -449,7 +449,7 @@ public struct GhostIdentityGalleryProfile: Codable, Sendable, Equatable {
             }
         }
 
-        let normEmb = GhostVectorMath.l2Normalize(embedding)
+        let normEmb = ACTAVectorMath.l2Normalize(embedding)
         guard !normEmb.isEmpty else { return }
 
         if centroid.isEmpty {
@@ -460,14 +460,14 @@ public struct GhostIdentityGalleryProfile: Codable, Sendable, Equatable {
             for i in 0..<centroid.count {
                 blended[i] = (1.0 - alpha) * centroid[i] + alpha * normEmb[i]
             }
-            centroid = GhostVectorMath.l2Normalize(blended)
+            centroid = ACTAVectorMath.l2Normalize(blended)
         }
 
         let maxSimToExisting = exemplars.map {
-            GhostVectorMath.cosineSimilarity(normEmb, $0.embedding)
+            ACTAVectorMath.cosineSimilarity(normEmb, $0.embedding)
         }.max() ?? 0.0
 
-        let candidateExemplar = GhostExemplar(
+        let candidateExemplar = ACTAExemplar(
             embedding: normEmb,
             cropQuality: cropQuality,
             cameraID: cameraID,
@@ -484,8 +484,8 @@ public struct GhostIdentityGalleryProfile: Codable, Sendable, Equatable {
                 exemplars[worstIdx] = candidateExemplar
             }
         } else if let nearestIdx = exemplars.enumerated().max(by: {
-            GhostVectorMath.cosineSimilarity(normEmb, $0.element.embedding) <
-            GhostVectorMath.cosineSimilarity(normEmb, $1.element.embedding)
+            ACTAVectorMath.cosineSimilarity(normEmb, $0.element.embedding) <
+            ACTAVectorMath.cosineSimilarity(normEmb, $1.element.embedding)
         })?.offset, cropQuality > exemplars[nearestIdx].cropQuality {
             exemplars[nearestIdx] = candidateExemplar
         }
@@ -494,19 +494,19 @@ public struct GhostIdentityGalleryProfile: Codable, Sendable, Equatable {
 
 // MARK: - 5. Multi-Cue Identity Scorer & Resolver
 
-public struct GhostMultiCueCandidateObservation: Sendable {
+public struct ACTAMultiCueCandidateObservation: Sendable {
     public var trackKey: String
     public var cameraID: String
     public var kind: String // "person" or "vehicle"
     public var embedding: [Float]
     public var cropQuality: Double
-    public var chromaPrint: GhostChromaSignature?
+    public var chromaPrint: ACTAChromaSignature?
     public var hsvHistogram: [Float]
     public var normalizedRect: NormalizedRect?
     public var velocityXPerSec: Double
     public var velocityYPerSec: Double
     public var plateNumber: String?
-    public var resolvedSex: GhostResolvedSex
+    public var resolvedSex: ACTAResolvedSex
     public var observedAt: Date
 
     public init(
@@ -515,19 +515,19 @@ public struct GhostMultiCueCandidateObservation: Sendable {
         kind: String,
         embedding: [Float],
         cropQuality: Double,
-        chromaPrint: GhostChromaSignature? = nil,
+        chromaPrint: ACTAChromaSignature? = nil,
         hsvHistogram: [Float] = [],
         normalizedRect: NormalizedRect? = nil,
         velocityXPerSec: Double = 0,
         velocityYPerSec: Double = 0,
         plateNumber: String? = nil,
-        resolvedSex: GhostResolvedSex = .unknown,
+        resolvedSex: ACTAResolvedSex = .unknown,
         observedAt: Date = Date()
     ) {
         self.trackKey = trackKey
         self.cameraID = cameraID
         self.kind = kind
-        self.embedding = GhostVectorMath.l2Normalize(embedding)
+        self.embedding = ACTAVectorMath.l2Normalize(embedding)
         self.cropQuality = cropQuality
         self.chromaPrint = chromaPrint
         self.hsvHistogram = hsvHistogram
@@ -540,7 +540,7 @@ public struct GhostMultiCueCandidateObservation: Sendable {
     }
 }
 
-public struct GhostIdentityScoreBreakdown: Sendable, Equatable {
+public struct ACTAIdentityScoreBreakdown: Sendable, Equatable {
     public var identityID: String
     public var reidScore: Double
     public var maxExemplarCosine: Double
@@ -560,27 +560,27 @@ public struct GhostIdentityScoreBreakdown: Sendable, Equatable {
     public var isVetoed: Bool { vetoReason != nil }
 }
 
-public struct GhostIdentityResolutionDecision: Sendable, Equatable {
+public struct ACTAIdentityResolutionDecision: Sendable, Equatable {
     public var identityID: String
-    public var state: GhostIdentityMatchState
+    public var state: ACTAIdentityMatchState
     public var score: Double
     public var secondBestScore: Double
     public var chromaRescued: Bool
     public var chromaGuarded: Bool
     public var echoSuppressed: Bool
     public var createdNewIdentity: Bool
-    public var breakdown: GhostIdentityScoreBreakdown?
+    public var breakdown: ACTAIdentityScoreBreakdown?
 
     public init(
         identityID: String,
-        state: GhostIdentityMatchState,
+        state: ACTAIdentityMatchState,
         score: Double,
         secondBestScore: Double = 0,
         chromaRescued: Bool = false,
         chromaGuarded: Bool = false,
         echoSuppressed: Bool = false,
         createdNewIdentity: Bool = false,
-        breakdown: GhostIdentityScoreBreakdown? = nil
+        breakdown: ACTAIdentityScoreBreakdown? = nil
     ) {
         self.identityID = identityID
         self.state = state
@@ -594,7 +594,7 @@ public struct GhostIdentityResolutionDecision: Sendable, Equatable {
     }
 }
 
-public struct GhostMultiCueScorer: Sendable {
+public struct ACTAMultiCueScorer: Sendable {
     // Cue Weights
     public static let wReid: Double = 0.45
     public static let wTime: Double = 0.20
@@ -628,8 +628,8 @@ public struct GhostMultiCueScorer: Sendable {
 
     /// Checks whether the candidate observation overlaps on a different camera within 1.0s.
     public static func isImpossibleSimultaneous(
-        observation: GhostMultiCueCandidateObservation,
-        gallery: GhostIdentityGalleryProfile
+        observation: ACTAMultiCueCandidateObservation,
+        gallery: ACTAIdentityGalleryProfile
     ) -> Bool {
         for (camID, window) in gallery.activeWindowsByCamera where camID != observation.cameraID {
             let expandedStart = window.start.addingTimeInterval(-simultaneousOverlapSlopSec)
@@ -642,13 +642,13 @@ public struct GhostMultiCueScorer: Sendable {
     }
 
     public static func scoreCandidate(
-        observation: GhostMultiCueCandidateObservation,
-        gallery: GhostIdentityGalleryProfile,
-        topology: GhostCameraTopology,
+        observation: ACTAMultiCueCandidateObservation,
+        gallery: ACTAIdentityGalleryProfile,
+        topology: ACTACameraTopology,
         cannotLinkIdentityIDs: Set<String> = []
-    ) -> GhostIdentityScoreBreakdown {
+    ) -> ACTAIdentityScoreBreakdown {
         if cannotLinkIdentityIDs.contains(gallery.identityID) {
-            return GhostIdentityScoreBreakdown(
+            return ACTAIdentityScoreBreakdown(
                 identityID: gallery.identityID,
                 reidScore: 0, maxExemplarCosine: 0, centroidCosine: 0, agreementFraction: 0,
                 timeScore: 0, topoScore: 0, clothingScore: 0, directionScore: 0, sizeScore: 0,
@@ -658,7 +658,7 @@ public struct GhostMultiCueScorer: Sendable {
         }
 
         if gallery.kind.caseInsensitiveCompare(observation.kind) != .orderedSame {
-            return GhostIdentityScoreBreakdown(
+            return ACTAIdentityScoreBreakdown(
                 identityID: gallery.identityID,
                 reidScore: 0, maxExemplarCosine: 0, centroidCosine: 0, agreementFraction: 0,
                 timeScore: 0, topoScore: 0, clothingScore: 0, directionScore: 0, sizeScore: 0,
@@ -671,7 +671,7 @@ public struct GhostMultiCueScorer: Sendable {
             gallery.resolvedSex != .unknown &&
             observation.resolvedSex != gallery.resolvedSex &&
             gallery.resolvedSexConfidence >= 0.55 {
-            return GhostIdentityScoreBreakdown(
+            return ACTAIdentityScoreBreakdown(
                 identityID: gallery.identityID,
                 reidScore: 0, maxExemplarCosine: 0, centroidCosine: 0, agreementFraction: 0,
                 timeScore: 0, topoScore: 0, clothingScore: 0, directionScore: 0, sizeScore: 0,
@@ -681,7 +681,7 @@ public struct GhostMultiCueScorer: Sendable {
         }
 
         if isImpossibleSimultaneous(observation: observation, gallery: gallery) {
-            return GhostIdentityScoreBreakdown(
+            return ACTAIdentityScoreBreakdown(
                 identityID: gallery.identityID,
                 reidScore: 0, maxExemplarCosine: 0, centroidCosine: 0, agreementFraction: 0,
                 timeScore: 0, topoScore: 0, clothingScore: 0, directionScore: 0, sizeScore: 0,
@@ -694,7 +694,7 @@ public struct GhostMultiCueScorer: Sendable {
         if let obsPlate = observation.plateNumber?.trimmingCharacters(in: .whitespacesAndNewlines),
            let galPlate = gallery.plateNumber?.trimmingCharacters(in: .whitespacesAndNewlines),
            obsPlate.count >= 5, obsPlate == galPlate {
-            return GhostIdentityScoreBreakdown(
+            return ACTAIdentityScoreBreakdown(
                 identityID: gallery.identityID,
                 reidScore: 0.99, maxExemplarCosine: 0.99, centroidCosine: 0.99, agreementFraction: 1.0,
                 timeScore: 1.0, topoScore: 1.0, clothingScore: 1.0, directionScore: 1.0, sizeScore: 1.0,
@@ -705,11 +705,11 @@ public struct GhostMultiCueScorer: Sendable {
 
         // 1. ReID Cosine against Exemplar Bank + Centroid
         let exemplarCosines: [Double] = gallery.exemplars.map {
-            GhostVectorMath.cosineSimilarity(observation.embedding, $0.embedding)
+            ACTAVectorMath.cosineSimilarity(observation.embedding, $0.embedding)
         }
         let centroidCos = gallery.centroid.isEmpty
             ? (exemplarCosines.max() ?? 0.0)
-            : GhostVectorMath.cosineSimilarity(observation.embedding, gallery.centroid)
+            : ACTAVectorMath.cosineSimilarity(observation.embedding, gallery.centroid)
         let maxExemplarCos = exemplarCosines.max() ?? centroidCos
         let sReid = 0.70 * maxExemplarCos + 0.30 * centroidCos
 
@@ -736,7 +736,7 @@ public struct GhostMultiCueScorer: Sendable {
             chromaSim = obsChroma.cosineSimilarity(to: galChroma)
         }
         let hsvSim: Double? = (!observation.hsvHistogram.isEmpty && !gallery.hsvHistogram.isEmpty)
-            ? GhostChromaPrint.hsvCosineSimilarity(observation.hsvHistogram, gallery.hsvHistogram)
+            ? ACTAChromaPrint.hsvCosineSimilarity(observation.hsvHistogram, gallery.hsvHistogram)
             : nil
         let sCloth: Double
         if let chromaSim, let hsvSim {
@@ -781,7 +781,7 @@ public struct GhostMultiCueScorer: Sendable {
         let priorMultiplier = exp((rawPrior - 0.5) * 0.45)
         let sFinal = max(0.0, min(1.0, sReid * priorMultiplier))
 
-        return GhostIdentityScoreBreakdown(
+        return ACTAIdentityScoreBreakdown(
             identityID: gallery.identityID,
             reidScore: sReid,
             maxExemplarCosine: maxExemplarCos,
@@ -801,17 +801,17 @@ public struct GhostMultiCueScorer: Sendable {
     }
 }
 
-public final class GhostIdentityResolver: @unchecked Sendable {
+public final class ACTAIdentityResolver: @unchecked Sendable {
     private let lock = NSLock()
-    private var galleries: [String: GhostIdentityGalleryProfile] = [:]
+    private var galleries: [String: ACTAIdentityGalleryProfile] = [:]
     private var cannotLinkPairs: Set<String> = []
-    private var topology: GhostCameraTopology
+    private var topology: ACTACameraTopology
     private var nextPersonSequence: Int = 1
     private var nextVehicleSequence: Int = 1
 
     public init(
-        galleries: [GhostIdentityGalleryProfile] = [],
-        topology: GhostCameraTopology = GhostCameraTopology()
+        galleries: [ACTAIdentityGalleryProfile] = [],
+        topology: ACTACameraTopology = ACTACameraTopology()
     ) {
         self.topology = topology
         for g in galleries {
@@ -836,31 +836,31 @@ public final class GhostIdentityResolver: @unchecked Sendable {
         return cannotLinkPairs.contains(Self.pairKey(idA, idB))
     }
 
-    public func allGalleries() -> [GhostIdentityGalleryProfile] {
+    public func allGalleries() -> [ACTAIdentityGalleryProfile] {
         lock.lock()
         defer { lock.unlock() }
         return Array(galleries.values)
     }
 
-    public func gallery(for identityID: String) -> GhostIdentityGalleryProfile? {
+    public func gallery(for identityID: String) -> ACTAIdentityGalleryProfile? {
         lock.lock()
         defer { lock.unlock() }
         return galleries[identityID]
     }
 
-    public func upsertGallery(_ profile: GhostIdentityGalleryProfile) {
+    public func upsertGallery(_ profile: ACTAIdentityGalleryProfile) {
         lock.lock()
         defer { lock.unlock() }
         galleries[profile.identityID] = profile
     }
 
-    public func currentTopology() -> GhostCameraTopology {
+    public func currentTopology() -> ACTACameraTopology {
         lock.lock()
         defer { lock.unlock() }
         return topology
     }
 
-    public func replaceTopology(_ newTopology: GhostCameraTopology) {
+    public func replaceTopology(_ newTopology: ACTACameraTopology) {
         lock.lock()
         defer { lock.unlock() }
         topology = newTopology
@@ -883,20 +883,20 @@ public final class GhostIdentityResolver: @unchecked Sendable {
     }
 
     public func resolve(
-        observation: GhostMultiCueCandidateObservation,
+        observation: ACTAMultiCueCandidateObservation,
         forbiddenIdentityIDs: Set<String> = []
-    ) -> GhostIdentityResolutionDecision {
+    ) -> ACTAIdentityResolutionDecision {
         lock.lock()
         defer { lock.unlock() }
 
         let isVehicle = observation.kind.caseInsensitiveCompare("vehicle") == .orderedSame ||
             observation.kind.caseInsensitiveCompare("car") == .orderedSame ||
             observation.kind.caseInsensitiveCompare("truck") == .orderedSame
-        let tAccept = isVehicle ? GhostMultiCueScorer.tAcceptVehicle : GhostMultiCueScorer.tAcceptPerson
+        let tAccept = isVehicle ? ACTAMultiCueScorer.tAcceptVehicle : ACTAMultiCueScorer.tAcceptPerson
 
-        var breakdowns: [GhostIdentityScoreBreakdown] = []
+        var breakdowns: [ACTAIdentityScoreBreakdown] = []
         for profile in galleries.values {
-            let breakdown = GhostMultiCueScorer.scoreCandidate(
+            let breakdown = ACTAMultiCueScorer.scoreCandidate(
                 observation: observation,
                 gallery: profile,
                 topology: topology,
@@ -917,41 +917,41 @@ public final class GhostIdentityResolver: @unchecked Sendable {
             var sameVisualCluster = false
             if let second, let secondProfile = galleries[second.identityID],
                !bestProfile.centroid.isEmpty, !secondProfile.centroid.isEmpty {
-                let clusterCos = GhostVectorMath.cosineSimilarity(bestProfile.centroid, secondProfile.centroid)
-                sameVisualCluster = clusterCos >= GhostMultiCueScorer.clusterCosineThreshold
+                let clusterCos = ACTAVectorMath.cosineSimilarity(bestProfile.centroid, secondProfile.centroid)
+                sameVisualCluster = clusterCos >= ACTAMultiCueScorer.clusterCosineThreshold
             }
 
-            let marginSatisfied = sameVisualCluster || ((best.finalScore - secondScore) >= GhostMultiCueScorer.tMargin)
+            let marginSatisfied = sameVisualCluster || ((best.finalScore - secondScore) >= ACTAMultiCueScorer.tMargin)
             let kOfNSatisfied = best.agreementFraction >= 0.50 || bestProfile.exemplars.count <= 1
 
-            var state: GhostIdentityMatchState = .single
+            var state: ACTAIdentityMatchState = .single
             var chromaRescued = false
             var chromaGuarded = false
             var echoSuppressed = false
 
             if best.finalScore >= tAccept && marginSatisfied && kOfNSatisfied {
                 // Check Chroma Guard: if S_final >= tAccept but chromaSim < 0.55 -> downgrade to .suggested
-                if let chromaSim = best.chromaSimilarity, chromaSim < GhostMultiCueScorer.chromaGuardMaxSim {
+                if let chromaSim = best.chromaSimilarity, chromaSim < ACTAMultiCueScorer.chromaGuardMaxSim {
                     state = .suggested
                     chromaGuarded = true
                 } else {
                     state = .confirmed
                 }
-            } else if best.finalScore >= GhostMultiCueScorer.chromaRescueMinScore,
+            } else if best.finalScore >= ACTAMultiCueScorer.chromaRescueMinScore,
                       best.finalScore < tAccept,
                       let chromaSim = best.chromaSimilarity,
-                      chromaSim >= GhostMultiCueScorer.chromaRescueMinSim,
+                      chromaSim >= ACTAMultiCueScorer.chromaRescueMinSim,
                       marginSatisfied {
                 // Chroma Rescue: S_final in [0.68, tAccept) and chromaSim >= 0.90 -> rescue to .confirmed
                 state = .confirmed
                 chromaRescued = true
-            } else if best.finalScore >= GhostMultiCueScorer.tSuggest {
+            } else if best.finalScore >= ACTAMultiCueScorer.tSuggest {
                 state = .suggested
             } else {
                 // 30s Echo Suppression: if same or adjacent camera within 30s has cosine >= 0.68,
                 // attach instead of spawning a duplicate ID.
                 let dt = abs(observation.observedAt.timeIntervalSince(bestProfile.lastSeenAt))
-                if dt <= GhostMultiCueScorer.echoWindowSec && best.maxExemplarCosine >= GhostMultiCueScorer.echoMinCosine {
+                if dt <= ACTAMultiCueScorer.echoWindowSec && best.maxExemplarCosine >= ACTAMultiCueScorer.echoMinCosine {
                     state = .suggested
                     echoSuppressed = true
                 }
@@ -985,7 +985,7 @@ public final class GhostIdentityResolver: @unchecked Sendable {
                 }
                 galleries[updated.identityID] = updated
 
-                return GhostIdentityResolutionDecision(
+                return ACTAIdentityResolutionDecision(
                     identityID: updated.identityID,
                     state: state,
                     score: best.finalScore,
@@ -1010,7 +1010,7 @@ public final class GhostIdentityResolver: @unchecked Sendable {
             nextPersonSequence += 1
         }
 
-        var newProfile = GhostIdentityGalleryProfile(
+        var newProfile = ACTAIdentityGalleryProfile(
             identityID: newID,
             kind: isVehicle ? "vehicle" : "person",
             displayCode: displayCode,
@@ -1038,7 +1038,7 @@ public final class GhostIdentityResolver: @unchecked Sendable {
         )
         galleries[newID] = newProfile
 
-        return GhostIdentityResolutionDecision(
+        return ACTAIdentityResolutionDecision(
             identityID: newID,
             state: .single,
             score: 1.0,
@@ -1054,7 +1054,7 @@ public final class GhostIdentityResolver: @unchecked Sendable {
 
 // MARK: - 6. Weighted Sex Resolution & Impurity Splitter
 
-public struct GhostSexObservationInput: Sendable, Equatable {
+public struct ACTASexObservationInput: Sendable, Equatable {
     public var trackKey: String
     public var apparentSex: String?
     public var descriptionText: String?
@@ -1079,14 +1079,14 @@ public struct GhostSexObservationInput: Sendable, Equatable {
     }
 }
 
-public struct GhostSexResolutionResult: Sendable, Equatable {
-    public var sex: GhostResolvedSex
+public struct ACTASexResolutionResult: Sendable, Equatable {
+    public var sex: ACTAResolvedSex
     public var confidence: Double
     public var maleWeight: Double
     public var femaleWeight: Double
 
     public init(
-        sex: GhostResolvedSex,
+        sex: ACTAResolvedSex,
         confidence: Double,
         maleWeight: Double,
         femaleWeight: Double
@@ -1098,7 +1098,7 @@ public struct GhostSexResolutionResult: Sendable, Equatable {
     }
 }
 
-public enum GhostSexResolver {
+public enum ACTASexResolver {
     private static let maleNouns: [String] = [
         "man", "male", "boy", "gentleman", "guy",
         "мужчина", "парень", "мальчик", "мужской",
@@ -1111,7 +1111,7 @@ public enum GhostSexResolver {
         "אישה", "בחורה", "ילדה"
     ]
 
-    public static func resolve(observations: [GhostSexObservationInput]) -> GhostSexResolutionResult {
+    public static func resolve(observations: [ACTASexObservationInput]) -> ACTASexResolutionResult {
         var maleDirect: Double = 0
         var femaleDirect: Double = 0
         var maleSecondary: Double = 0
@@ -1158,14 +1158,14 @@ public enum GhostSexResolver {
 
         let lead = max(totalMale, totalFemale)
         let other = min(totalMale, totalFemale)
-        let winningSex: GhostResolvedSex = totalMale >= totalFemale ? .male : .female
+        let winningSex: ACTAResolvedSex = totalMale >= totalFemale ? .male : .female
 
         // Uncontradicted direct signal >= 0.50 OR (lead >= 0.40 AND lead / max(0.01, other) >= 1.6)
         let uncontradictedDirect = (other == 0 && max(maleDirect, femaleDirect) >= 0.50)
         let ratioDominant = (lead >= 0.40 && (lead / max(0.01, other)) >= 1.6)
 
         guard uncontradictedDirect || ratioDominant else {
-            return GhostSexResolutionResult(
+            return ACTASexResolutionResult(
                 sex: .unknown,
                 confidence: 0,
                 maleWeight: totalMale,
@@ -1176,7 +1176,7 @@ public enum GhostSexResolver {
         let total = max(0.01, totalMale + totalFemale)
         let dominanceRatio = lead / total
         let confidence = min(0.99, dominanceRatio * min(1.0, lead / 0.80))
-        return GhostSexResolutionResult(
+        return ACTASexResolutionResult(
             sex: winningSex,
             confidence: confidence,
             maleWeight: totalMale,
@@ -1185,18 +1185,18 @@ public enum GhostSexResolver {
     }
 }
 
-public struct GhostImpuritySplitAction: Sendable, Equatable {
+public struct ACTAImpuritySplitAction: Sendable, Equatable {
     public var originalIdentityID: String
     public var newIdentityID: String
-    public var majoritySex: GhostResolvedSex
-    public var minoritySex: GhostResolvedSex
+    public var majoritySex: ACTAResolvedSex
+    public var minoritySex: ACTAResolvedSex
     public var movedTrackKeys: [String]
 
     public init(
         originalIdentityID: String,
         newIdentityID: String,
-        majoritySex: GhostResolvedSex,
-        minoritySex: GhostResolvedSex,
+        majoritySex: ACTAResolvedSex,
+        minoritySex: ACTAResolvedSex,
         movedTrackKeys: [String]
     ) {
         self.originalIdentityID = originalIdentityID
@@ -1207,19 +1207,19 @@ public struct GhostImpuritySplitAction: Sendable, Equatable {
     }
 }
 
-public enum GhostIdentityPuritySplitter {
+public enum ACTAIdentityPuritySplitter {
     public static let minConfidenceForSplit: Double = 0.55
 
     /// Inspects a person identity's member tracks and splits out conflicting sex tracks into a new identity.
     public static func evaluateIdentity(
         identityID: String,
-        trackObservations: [String: [GhostSexObservationInput]]
-    ) -> GhostImpuritySplitAction? {
+        trackObservations: [String: [ACTASexObservationInput]]
+    ) -> ACTAImpuritySplitAction? {
         var maleTracks: [(trackKey: String, confidence: Double)] = []
         var femaleTracks: [(trackKey: String, confidence: Double)] = []
 
         for (trackKey, obsList) in trackObservations {
-            let res = GhostSexResolver.resolve(observations: obsList)
+            let res = ACTASexResolver.resolve(observations: obsList)
             guard res.confidence >= minConfidenceForSplit else { continue }
             switch res.sex {
             case .male:
@@ -1238,13 +1238,13 @@ public enum GhostIdentityPuritySplitter {
         let maleWeight = maleTracks.reduce(0.0) { $0 + $1.confidence }
         let femaleWeight = femaleTracks.reduce(0.0) { $0 + $1.confidence }
 
-        let majoritySex: GhostResolvedSex = maleWeight >= femaleWeight ? .male : .female
-        let minoritySex: GhostResolvedSex = majoritySex == .male ? .female : .male
+        let majoritySex: ACTAResolvedSex = maleWeight >= femaleWeight ? .male : .female
+        let minoritySex: ACTAResolvedSex = majoritySex == .male ? .female : .male
         let minorityTrackKeys = (minoritySex == .male ? maleTracks : femaleTracks)
             .map(\.trackKey)
             .sorted()
 
-        return GhostImpuritySplitAction(
+        return ACTAImpuritySplitAction(
             originalIdentityID: identityID,
             newIdentityID: UUID().uuidString,
             majoritySex: majoritySex,
@@ -1256,10 +1256,10 @@ public enum GhostIdentityPuritySplitter {
 
 // MARK: - 7. 4-Layer Continuity Deduplication Sweeper
 
-public struct GhostFacetSummary: Codable, Sendable, Equatable {
+public struct ACTAFacetSummary: Codable, Sendable, Equatable {
     public var identityID: String
     public var kind: String // "person" or "vehicle"
-    public var resolvedSex: GhostResolvedSex
+    public var resolvedSex: ACTAResolvedSex
     public var ageGroup: String?
     public var build: String?
     public var hairStyleOrColor: String?
@@ -1277,7 +1277,7 @@ public struct GhostFacetSummary: Codable, Sendable, Equatable {
     public init(
         identityID: String,
         kind: String,
-        resolvedSex: GhostResolvedSex = .unknown,
+        resolvedSex: ACTAResolvedSex = .unknown,
         ageGroup: String? = nil,
         build: String? = nil,
         hairStyleOrColor: String? = nil,
@@ -1311,19 +1311,19 @@ public struct GhostFacetSummary: Codable, Sendable, Equatable {
     }
 }
 
-public enum GhostDedupLayer: String, Codable, Sendable, Equatable {
+public enum ACTADedupLayer: String, Codable, Sendable, Equatable {
     case layerALocalSignals = "layer_a_local"
     case layerBLocalFacets = "layer_b_facets"
     case layerCTextLLM = "layer_c_text"
     case layerDCollageVision = "layer_d_collage"
 }
 
-public typealias GhostSweeperPairDecision = GhostDedupDecision
+public typealias ACTASweeperPairDecision = ACTADedupDecision
 
-public struct GhostDedupDecision: Codable, Sendable, Equatable {
+public struct ACTADedupDecision: Codable, Sendable, Equatable {
     public var idA: String
     public var idB: String
-    public var layer: GhostDedupLayer
+    public var layer: ACTADedupLayer
     public var shouldMerge: Bool
     public var recordCannotLink: Bool
     public var confidence: Double
@@ -1332,7 +1332,7 @@ public struct GhostDedupDecision: Codable, Sendable, Equatable {
     public init(
         idA: String,
         idB: String,
-        layer: GhostDedupLayer,
+        layer: ACTADedupLayer,
         shouldMerge: Bool,
         recordCannotLink: Bool = false,
         confidence: Double,
@@ -1348,17 +1348,17 @@ public struct GhostDedupDecision: Codable, Sendable, Equatable {
     }
 }
 
-public struct GhostSweepEvaluationBatch: Sendable {
-    public var autoMerges: [GhostDedupDecision]
-    public var newCannotLinks: [GhostDedupDecision]
-    public var layerCTextPairs: [(GhostIdentityGalleryProfile, GhostFacetSummary?, GhostIdentityGalleryProfile, GhostFacetSummary?)]
-    public var layerDCollageCandidates: [GhostIdentityGalleryProfile]
+public struct ACTASweepEvaluationBatch: Sendable {
+    public var autoMerges: [ACTADedupDecision]
+    public var newCannotLinks: [ACTADedupDecision]
+    public var layerCTextPairs: [(ACTAIdentityGalleryProfile, ACTAFacetSummary?, ACTAIdentityGalleryProfile, ACTAFacetSummary?)]
+    public var layerDCollageCandidates: [ACTAIdentityGalleryProfile]
 
     public init(
-        autoMerges: [GhostDedupDecision] = [],
-        newCannotLinks: [GhostDedupDecision] = [],
-        layerCTextPairs: [(GhostIdentityGalleryProfile, GhostFacetSummary?, GhostIdentityGalleryProfile, GhostFacetSummary?)] = [],
-        layerDCollageCandidates: [GhostIdentityGalleryProfile] = []
+        autoMerges: [ACTADedupDecision] = [],
+        newCannotLinks: [ACTADedupDecision] = [],
+        layerCTextPairs: [(ACTAIdentityGalleryProfile, ACTAFacetSummary?, ACTAIdentityGalleryProfile, ACTAFacetSummary?)] = [],
+        layerDCollageCandidates: [ACTAIdentityGalleryProfile] = []
     ) {
         self.autoMerges = autoMerges
         self.newCannotLinks = newCannotLinks
@@ -1367,22 +1367,22 @@ public struct GhostSweepEvaluationBatch: Sendable {
     }
 }
 
-public enum GhostContinuitySweeper {
+public enum ACTAContinuitySweeper {
     /// Runs Layers A and B locally and prepares candidate pairs/groups for Layers C (Text LLM) and D (Vision Collage).
     public static func evaluateGalleries(
-        galleries: [GhostIdentityGalleryProfile],
-        facetsByIdentity: [String: GhostFacetSummary],
+        galleries: [ACTAIdentityGalleryProfile],
+        facetsByIdentity: [String: ACTAFacetSummary],
         existingCannotLinks: Set<String>
-    ) -> GhostSweepEvaluationBatch {
-        var autoMerges: [GhostDedupDecision] = []
-        var newCannotLinks: [GhostDedupDecision] = []
-        var layerCTextPairs: [(GhostIdentityGalleryProfile, GhostFacetSummary?, GhostIdentityGalleryProfile, GhostFacetSummary?)] = []
+    ) -> ACTASweepEvaluationBatch {
+        var autoMerges: [ACTADedupDecision] = []
+        var newCannotLinks: [ACTADedupDecision] = []
+        var layerCTextPairs: [(ACTAIdentityGalleryProfile, ACTAFacetSummary?, ACTAIdentityGalleryProfile, ACTAFacetSummary?)] = []
         var layerDIds: Set<String> = []
-        var layerDCandidates: [GhostIdentityGalleryProfile] = []
+        var layerDCandidates: [ACTAIdentityGalleryProfile] = []
 
         let sorted = galleries.sorted { $0.lastSeenAt > $1.lastSeenAt }
         guard sorted.count >= 2 else {
-            return GhostSweepEvaluationBatch()
+            return ACTASweepEvaluationBatch()
         }
 
         for i in 0..<sorted.count {
@@ -1417,7 +1417,7 @@ public enum GhostContinuitySweeper {
                 if let pA = (a.plateNumber ?? facetA?.plateNumber)?.trimmingCharacters(in: .whitespacesAndNewlines),
                    let pB = (b.plateNumber ?? facetB?.plateNumber)?.trimmingCharacters(in: .whitespacesAndNewlines),
                    pA.count >= 5, pA == pB {
-                    autoMerges.append(GhostDedupDecision(
+                    autoMerges.append(ACTADedupDecision(
                         idA: a.identityID,
                         idB: b.identityID,
                         layer: .layerALocalSignals,
@@ -1430,14 +1430,14 @@ public enum GhostContinuitySweeper {
 
                 // 2. High ReID + Chroma similarity
                 let reidCos = (!a.centroid.isEmpty && !b.centroid.isEmpty)
-                    ? GhostVectorMath.cosineSimilarity(a.centroid, b.centroid)
+                    ? ACTAVectorMath.cosineSimilarity(a.centroid, b.centroid)
                     : 0.0
                 let chromaSim: Double? = (a.chromaPrint != nil && b.chromaPrint != nil)
                     ? a.chromaPrint!.cosineSimilarity(to: b.chromaPrint!)
                     : nil
 
                 if reidCos >= 0.84, let chromaSim, chromaSim >= 0.82 {
-                    autoMerges.append(GhostDedupDecision(
+                    autoMerges.append(ACTADedupDecision(
                         idA: a.identityID,
                         idB: b.identityID,
                         layer: .layerALocalSignals,
@@ -1481,7 +1481,7 @@ public enum GhostContinuitySweeper {
             }
         }
 
-        return GhostSweepEvaluationBatch(
+        return ACTASweepEvaluationBatch(
             autoMerges: autoMerges,
             newCannotLinks: newCannotLinks,
             layerCTextPairs: layerCTextPairs,
@@ -1490,17 +1490,17 @@ public enum GhostContinuitySweeper {
     }
 
     private static func compareFacets(
-        a: GhostIdentityGalleryProfile,
-        facetA: GhostFacetSummary,
-        b: GhostIdentityGalleryProfile,
-        facetB: GhostFacetSummary,
+        a: ACTAIdentityGalleryProfile,
+        facetA: ACTAFacetSummary,
+        b: ACTAIdentityGalleryProfile,
+        facetB: ACTAFacetSummary,
         reidCos: Double,
         chromaSim: Double?
-    ) -> GhostDedupDecision? {
+    ) -> ACTADedupDecision? {
         let sexA = a.resolvedSex != .unknown ? a.resolvedSex : facetA.resolvedSex
         let sexB = b.resolvedSex != .unknown ? b.resolvedSex : facetB.resolvedSex
         if sexA != .unknown && sexB != .unknown && sexA != sexB {
-            return GhostDedupDecision(
+            return ACTADedupDecision(
                 idA: a.identityID,
                 idB: b.identityID,
                 layer: .layerBLocalFacets,
@@ -1532,7 +1532,7 @@ public enum GhostContinuitySweeper {
             }
 
             if conflicts >= 2 && reidCos < 0.72 {
-                return GhostDedupDecision(
+                return ACTADedupDecision(
                     idA: a.identityID,
                     idB: b.identityID,
                     layer: .layerBLocalFacets,
@@ -1543,7 +1543,7 @@ public enum GhostContinuitySweeper {
                 )
             }
             if matches >= 3 && conflicts == 0 && reidCos >= 0.68 && (chromaSim ?? 0.75) >= 0.72 {
-                return GhostDedupDecision(
+                return ACTADedupDecision(
                     idA: a.identityID,
                     idB: b.identityID,
                     layer: .layerBLocalFacets,
@@ -1566,7 +1566,7 @@ public enum GhostContinuitySweeper {
                 if mmA == mmB { matches += 2 } else { conflicts += 1 }
             }
             if conflicts >= 2 && reidCos < 0.72 {
-                return GhostDedupDecision(
+                return ACTADedupDecision(
                     idA: a.identityID,
                     idB: b.identityID,
                     layer: .layerBLocalFacets,
@@ -1577,7 +1577,7 @@ public enum GhostContinuitySweeper {
                 )
             }
             if matches >= 3 && conflicts == 0 && reidCos >= 0.70 {
-                return GhostDedupDecision(
+                return ACTADedupDecision(
                     idA: a.identityID,
                     idB: b.identityID,
                     layer: .layerBLocalFacets,

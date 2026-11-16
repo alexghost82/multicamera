@@ -20,7 +20,7 @@ struct VLMPanel: View {
     @State private var questionBeforeVoice = ""
     @State private var historyQuestion = ""
     @State private var historyError = ""
-    @State private var useUnifiedGhostAgent = true
+    @State private var useUnifiedACTAAgent = true
     @State private var saveError = ""
     @State private var descriptionJobs: [CameraFeatureJob] = []
     @StateObject private var voiceInput = LocalVoiceInput()
@@ -163,14 +163,14 @@ struct VLMPanel: View {
 
     private var historyTab: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Picker("Research Mode", selection: $useUnifiedGhostAgent) {
+            Picker("Research Mode", selection: $useUnifiedACTAAgent) {
                 Text("Unified Multi-Memory Agent").tag(true)
                 Text("Local Track Research").tag(false)
             }
             .pickerStyle(.segmented)
 
-            if useUnifiedGhostAgent {
-                ghostAgentHistoryView
+            if useUnifiedACTAAgent {
+                actaAgentHistoryView
             } else {
                 AnalysisHistoryPage(status: languageSettings.localizedMessage(model.trackResearchStatus), busy: model.trackResearchBusy,
                     persistHistory: Binding(
@@ -212,31 +212,31 @@ struct VLMPanel: View {
         .onAppear { model.reloadOperatorActions() }
     }
 
-    private var ghostAgentHistoryView: some View {
+    private var actaAgentHistoryView: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Label(languageSettings.localizedMessage(model.ghostAgentStatus), systemImage: model.ghostAgentBusy ? "hourglass" : "brain.head.profile")
+                Label(languageSettings.localizedMessage(model.actaAgentStatus), systemImage: model.actaAgentBusy ? "hourglass" : "brain.head.profile")
                     .font(.caption)
                     .lineLimit(1)
                 Spacer()
-                if !model.ghostChatThreads.isEmpty {
+                if !model.actaChatThreads.isEmpty {
                     Menu {
-                        ForEach(model.ghostChatThreads, id: \.threadID) { thread in
+                        ForEach(model.actaChatThreads, id: \.threadID) { thread in
                             Button(thread.title.isEmpty ? thread.threadID : thread.title) {
-                                model.selectGhostChatThread(thread.threadID)
+                                model.selectACTAChatThread(thread.threadID)
                             }
                         }
                     } label: {
-                        Label(model.activeGhostThreadID, systemImage: "bubble.left.and.bubble.right")
+                        Label(model.activeACTAThreadID, systemImage: "bubble.left.and.bubble.right")
                             .font(.caption)
                     }
                 }
             }
 
-            if !model.ghostThreadFocusEntries.isEmpty {
+            if !model.actaThreadFocusEntries.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
-                        ForEach(model.ghostThreadFocusEntries, id: \.refID) { focus in
+                        ForEach(model.actaThreadFocusEntries, id: \.refID) { focus in
                             Text("\(focus.kind): \(focus.refID)")
                                 .font(.caption2)
                                 .padding(.horizontal, 6)
@@ -249,7 +249,7 @@ struct VLMPanel: View {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
-                    if model.ghostChatMessages.isEmpty {
+                    if model.actaChatMessages.isEmpty {
                         AnalysisPanelEmptyState(
                             title: "Ask the Unified Multi-Memory Agent",
                             icon: "brain.head.profile",
@@ -257,10 +257,10 @@ struct VLMPanel: View {
                         )
                         .frame(maxWidth: .infinity, minHeight: 180)
                     }
-                    ForEach(model.ghostChatMessages, id: \.messageID) { msg in
+                    ForEach(model.actaChatMessages, id: \.messageID) { msg in
                         VStack(alignment: .leading, spacing: 5) {
                             HStack {
-                                Text(msg.role == "user" ? "Operator" : "Ghost Agent")
+                                Text(msg.role == "user" ? "Operator" : "ACTA Agent")
                                     .font(.caption.weight(.semibold))
                                 Spacer()
                                 Text(msg.createdAt.formatted(date: .abbreviated, time: .shortened, locale: languageSettings.locale))
@@ -274,7 +274,7 @@ struct VLMPanel: View {
                         .background(msg.role == "user" ? Color.secondary.opacity(0.08) : Color.accentColor.opacity(0.08),
                                     in: RoundedRectangle(cornerRadius: 6))
                     }
-                    ForEach(model.ghostChatActions, id: \.actionID) { action in
+                    ForEach(model.actaChatActions, id: \.actionID) { action in
                         VStack(alignment: .leading, spacing: 6) {
                             Label(action.title.isEmpty ? "Proposed Action: \(action.actionType)" : action.title, systemImage: "bolt.shield")
                                 .font(.caption.weight(.semibold))
@@ -284,12 +284,12 @@ struct VLMPanel: View {
                                 .textSelection(.enabled)
                             HStack {
                                 Button {
-                                    model.reviewGhostChatAction(action.actionID, confirmed: true)
+                                    model.reviewACTAChatAction(action.actionID, confirmed: true)
                                 } label: {
                                     Label("Confirm", systemImage: "checkmark")
                                 }
                                 Button(role: .destructive) {
-                                    model.reviewGhostChatAction(action.actionID, confirmed: false)
+                                    model.reviewACTAChatAction(action.actionID, confirmed: false)
                                 } label: {
                                     Label("Reject", systemImage: "xmark")
                                 }
@@ -304,7 +304,7 @@ struct VLMPanel: View {
 
             AnalysisQuestionComposer(
                 question: $historyQuestion,
-                sendDisabled: model.ghostAgentBusy || historyQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                sendDisabled: model.actaAgentBusy || historyQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                 submit: submitHistoryQuestion
             )
         }
@@ -390,9 +390,9 @@ struct VLMPanel: View {
     private func submitHistoryQuestion() {
         let trimmed = historyQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        if useUnifiedGhostAgent {
-            guard !model.ghostAgentBusy else { return }
-            if model.askGhostAgent(question: trimmed) { historyQuestion = "" }
+        if useUnifiedACTAAgent {
+            guard !model.actaAgentBusy else { return }
+            if model.askACTAAgent(question: trimmed) { historyQuestion = "" }
         } else {
             guard !model.trackResearchBusy else { return }
             if model.askTrackResearch(question: historyQuestion) { historyQuestion = "" }
@@ -401,30 +401,30 @@ struct VLMPanel: View {
 
     private var scheduleTab: some View {
         VStack(alignment: .leading, spacing: 12) {
-            GroupBox("GHOST ONWAY Hybrid AI & Analytics") {
+            GroupBox("ACTA ONWAY Hybrid AI & Analytics") {
                 VStack(alignment: .leading, spacing: 8) {
-                    Picker("AI Backend", selection: $draft.ghostBackendMode) {
-                        ForEach(GhostAIBackendMode.allCases, id: \.self) { mode in
+                    Picker("AI Backend", selection: $draft.actaBackendMode) {
+                        ForEach(ACTAAIBackendMode.allCases, id: \.self) { mode in
                             Text(mode.displayName).tag(mode)
                         }
                     }
-                    Picker("Analytics Language", selection: $draft.ghostPreferredLanguage) {
-                        ForEach(GhostPromptLanguage.allCases, id: \.self) { lang in
+                    Picker("Analytics Language", selection: $draft.actaPreferredLanguage) {
+                        ForEach(ACTAPromptLanguage.allCases, id: \.self) { lang in
                             Text(lang.displayName).tag(lang)
                         }
                     }
-                    TextField("Local vLLM URL", text: $draft.ghostVLLMBaseURL)
+                    TextField("Local vLLM URL", text: $draft.actaVLLMBaseURL)
                         .textFieldStyle(.roundedBorder)
-                    TextField("Local vLLM Model", text: $draft.ghostVLLMModelName)
+                    TextField("Local vLLM Model", text: $draft.actaVLLMModelName)
                         .textFieldStyle(.roundedBorder)
-                    Toggle("Spoken Tactical Briefing (18s)", isOn: $draft.ghostSpokenBriefingEnabled)
+                    Toggle("Spoken Tactical Briefing (18s)", isOn: $draft.actaSpokenBriefingEnabled)
                     HStack {
                         Label(
-                            model.ghostHealthStatus.isHealthy ? "Engine Healthy" : "Circuit Open",
-                            systemImage: model.ghostHealthStatus.isHealthy ? "checkmark.shield" : "exclamationmark.triangle"
+                            model.actaHealthStatus.isHealthy ? "Engine Healthy" : "Circuit Open",
+                            systemImage: model.actaHealthStatus.isHealthy ? "checkmark.shield" : "exclamationmark.triangle"
                         )
                         Spacer()
-                        Text(String(format: "Latency: %.0f ms · Spend: $%.2f", model.ghostHealthStatus.ewmaLatencyMs, model.ghostBudgetSnapshot.dailySpendUSD))
+                        Text(String(format: "Latency: %.0f ms · Spend: $%.2f", model.actaHealthStatus.ewmaLatencyMs, model.actaBudgetSnapshot.dailySpendUSD))
                             .foregroundStyle(.secondary)
                     }
                     .font(.caption)

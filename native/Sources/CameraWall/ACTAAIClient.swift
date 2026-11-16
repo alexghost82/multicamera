@@ -8,7 +8,7 @@ import Vision
 
 // MARK: - 1. AI Backend Mode & Task Lane Routing
 
-public enum GhostAIBackendMode: String, Codable, Sendable, CaseIterable {
+public enum ACTAAIBackendMode: String, Codable, Sendable, CaseIterable {
     case mlxInProcess = "mlx"
     case localVLLM = "vllm"
     case openAI = "openai"
@@ -26,7 +26,7 @@ public enum GhostAIBackendMode: String, Codable, Sendable, CaseIterable {
     }
 }
 
-public enum GhostAILane: String, Codable, Sendable, CaseIterable {
+public enum ACTAAILane: String, Codable, Sendable, CaseIterable {
     case chat
     case alert
     case background
@@ -40,14 +40,14 @@ public enum GhostAILane: String, Codable, Sendable, CaseIterable {
     }
 }
 
-public enum GhostAITier: String, Codable, Sendable {
+public enum ACTAAITier: String, Codable, Sendable {
     case nano = "gpt-5.4-nano"
     case mini = "gpt-5.4-mini"
     case full = "gpt-5.4"
 }
 
-public struct GhostAIConfiguration: Codable, Sendable, Equatable {
-    public var mode: GhostAIBackendMode
+public struct ACTAAIConfiguration: Codable, Sendable, Equatable {
+    public var mode: ACTAAIBackendMode
     public var vllmBaseURL: String
     public var vllmModelName: String
     public var openAIBaseURL: String
@@ -58,10 +58,10 @@ public struct GhostAIConfiguration: Codable, Sendable, Equatable {
     public var allowPlateRegistryLookup: Bool
     public var dailyBudgetLimitUSD: Double
     public var monthlyBudgetLimitUSD: Double
-    public var preferredLanguage: GhostPromptLanguage
+    public var preferredLanguage: ACTAPromptLanguage
 
     public init(
-        mode: GhostAIBackendMode = .mlxInProcess,
+        mode: ACTAAIBackendMode = .mlxInProcess,
         vllmBaseURL: String = "http://127.0.0.1:8000/v1",
         vllmModelName: String = "Qwen/Qwen2.5-VL-7B-Instruct",
         openAIBaseURL: String = "https://api.openai.com/v1/responses",
@@ -72,7 +72,7 @@ public struct GhostAIConfiguration: Codable, Sendable, Equatable {
         allowPlateRegistryLookup: Bool = false,
         dailyBudgetLimitUSD: Double = 80.0,
         monthlyBudgetLimitUSD: Double = 400.0,
-        preferredLanguage: GhostPromptLanguage = .ru
+        preferredLanguage: ACTAPromptLanguage = .ru
     ) {
         self.mode = mode
         self.vllmBaseURL = vllmBaseURL
@@ -91,7 +91,7 @@ public struct GhostAIConfiguration: Codable, Sendable, Equatable {
 
 // MARK: - 1b. Cloud Privacy Redactor (Faces & License Plates Blur / Pixelation)
 
-public enum GhostCloudPrivacyRedactor {
+public enum ACTACloudPrivacyRedactor {
     /// Detects faces (`VNDetectFaceRectanglesRequest`) and license-plate/text regions (`VNRecognizeTextRequest`)
     /// and applies an irreversible pixelation mosaic over all matched regions before cloud transmission.
     public static func redactJPEG(
@@ -217,7 +217,7 @@ public enum GhostCloudPrivacyRedactor {
         return outData as Data
     }
 
-    public static func redactImages(_ images: [Data], config: GhostAIConfiguration) -> [Data] {
+    public static func redactImages(_ images: [Data], config: ACTAAIConfiguration) -> [Data] {
         guard config.privacyBlurFacesInCloud || config.privacyBlurPlatesInCloud else {
             return images
         }
@@ -231,9 +231,9 @@ public enum GhostCloudPrivacyRedactor {
     }
 }
 
-// MARK: - 2. Keychain Credential Store (GhostKey & AlertKey)
+// MARK: - 2. Keychain Credential Store (ACTAKey & AlertKey)
 
-public enum GhostKeychainStore {
+public enum ACTAKeychainStore {
     public static let serviceName = "CameraWall.GhostCredentials"
     public static let primaryKeyAccount = "GhostKey"
     public static let alertKeyAccount = "AlertKey"
@@ -274,7 +274,7 @@ public enum GhostKeychainStore {
 
 // MARK: - 3. Budget Tracker & CER (Cost-Efficiency Ratio)
 
-public struct GhostBudgetSnapshot: Codable, Sendable, Equatable {
+public struct ACTABudgetSnapshot: Codable, Sendable, Equatable {
     public var dailySpendUSD: Double
     public var monthlySpendUSD: Double
     public var totalCalls: Int
@@ -297,7 +297,7 @@ public struct GhostBudgetSnapshot: Codable, Sendable, Equatable {
     }
 }
 
-public final class GhostBudgetTracker: @unchecked Sendable {
+public final class ACTABudgetTracker: @unchecked Sendable {
     private let lock = NSLock()
     private var dailySpendUSD: Double = 0
     private var monthlySpendUSD: Double = 0
@@ -307,7 +307,7 @@ public final class GhostBudgetTracker: @unchecked Sendable {
     public init() {}
 
     public func recordUsage(
-        tier: GhostAITier,
+        tier: ACTAAITier,
         inputTokens: Int,
         outputTokens: Int,
         verifiedDetections: Int = 0,
@@ -336,16 +336,16 @@ public final class GhostBudgetTracker: @unchecked Sendable {
         monthlySpendUSD += cost
     }
 
-    public func isWithinBudget(config: GhostAIConfiguration) -> Bool {
+    public func isWithinBudget(config: ACTAAIConfiguration) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         return dailySpendUSD < config.dailyBudgetLimitUSD && monthlySpendUSD < config.monthlyBudgetLimitUSD
     }
 
-    public func snapshot() -> GhostBudgetSnapshot {
+    public func snapshot() -> ACTABudgetSnapshot {
         lock.lock()
         defer { lock.unlock() }
-        return GhostBudgetSnapshot(
+        return ACTABudgetSnapshot(
             dailySpendUSD: dailySpendUSD,
             monthlySpendUSD: monthlySpendUSD,
             totalCalls: totalCalls,
@@ -356,7 +356,7 @@ public final class GhostBudgetTracker: @unchecked Sendable {
 
 // MARK: - 4. Circuit Breaker & Health Probe (ghstHC)
 
-public struct GhostHealthStatus: Codable, Sendable, Equatable {
+public struct ACTAHealthStatus: Codable, Sendable, Equatable {
     public var isHealthy: Bool
     public var circuitOpen: Bool
     public var consecutiveFailures: Int
@@ -381,7 +381,7 @@ public struct GhostHealthStatus: Codable, Sendable, Equatable {
     }
 }
 
-public final class GhostCircuitBreaker: @unchecked Sendable {
+public final class ACTACircuitBreaker: @unchecked Sendable {
     public static let failureThreshold: Int = 8
     public static let openCooldownSeconds: TimeInterval = 30.0
     public static let ewmaAlpha: Double = 0.25
@@ -424,7 +424,7 @@ public final class GhostCircuitBreaker: @unchecked Sendable {
         }
     }
 
-    public func status(now: Date = Date()) -> GhostHealthStatus {
+    public func status(now: Date = Date()) -> ACTAHealthStatus {
         lock.lock()
         defer { lock.unlock() }
         let isOpen: Bool
@@ -433,7 +433,7 @@ public final class GhostCircuitBreaker: @unchecked Sendable {
         } else {
             isOpen = false
         }
-        return GhostHealthStatus(
+        return ACTAHealthStatus(
             isHealthy: !isOpen,
             circuitOpen: isOpen,
             consecutiveFailures: consecutiveFailures,
@@ -446,7 +446,7 @@ public final class GhostCircuitBreaker: @unchecked Sendable {
 
 // MARK: - 5. Async Semaphore per Lane
 
-public actor GhostAsyncLaneLimiter {
+public actor ACTAAsyncLaneLimiter {
     private let limit: Int
     private var active: Int = 0
     private var waiters: [CheckedContinuation<Void, Never>] = []
@@ -483,9 +483,9 @@ public actor GhostAsyncLaneLimiter {
 
 // MARK: - 5b. Agent Tool-Calling Types
 
-public typealias GhostHTTPTransport = @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse)
+public typealias ACTAHTTPTransport = @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse)
 
-public struct GhostAgentToolSpec: Sendable, Equatable {
+public struct ACTAAgentToolSpec: Sendable, Equatable {
     public var name: String
     public var description: String
     public var parametersSchemaJSON: String
@@ -502,7 +502,7 @@ public struct GhostAgentToolSpec: Sendable, Equatable {
         description: String,
         properties: [(String, String, String)] = [],
         required: [String] = []
-    ) -> GhostAgentToolSpec {
+    ) -> ACTAAgentToolSpec {
         var props: [String: Any] = [:]
         for (key, type, desc) in properties {
             props[key] = ["type": type, "description": desc]
@@ -510,7 +510,7 @@ public struct GhostAgentToolSpec: Sendable, Equatable {
         var schema: [String: Any] = ["type": "object", "properties": props]
         if !required.isEmpty { schema["required"] = required }
         let data = (try? JSONSerialization.data(withJSONObject: schema, options: [.sortedKeys])) ?? Data("{}".utf8)
-        return GhostAgentToolSpec(name: name, description: description, parametersSchemaJSON: String(decoding: data, as: UTF8.self))
+        return ACTAAgentToolSpec(name: name, description: description, parametersSchemaJSON: String(decoding: data, as: UTF8.self))
     }
 
     var parametersObject: [String: Any] {
@@ -519,7 +519,7 @@ public struct GhostAgentToolSpec: Sendable, Equatable {
     }
 }
 
-public struct GhostAgentFunctionCall: Sendable, Equatable {
+public struct ACTAAgentFunctionCall: Sendable, Equatable {
     public var callID: String
     public var name: String
     public var argumentsJSON: String
@@ -552,20 +552,20 @@ public struct GhostAgentFunctionCall: Sendable, Equatable {
     }
 }
 
-public enum GhostAgentItem: Sendable, Equatable {
+public enum ACTAAgentItem: Sendable, Equatable {
     case user(text: String, images: [Data])
     case assistantText(String)
-    case functionCall(GhostAgentFunctionCall)
+    case functionCall(ACTAAgentFunctionCall)
     case functionOutput(callID: String, output: String)
 }
 
-public enum GhostAgentToolChoice: Sendable, Equatable {
+public enum ACTAAgentToolChoice: Sendable, Equatable {
     case auto
     case required
     case function(String)
 }
 
-public enum GhostAgentBackend: String, Sendable, Equatable {
+public enum ACTAAgentBackend: String, Sendable, Equatable {
     case openAI = "openai"
     case vllm
     case mlx
@@ -573,25 +573,25 @@ public enum GhostAgentBackend: String, Sendable, Equatable {
     case offline
 }
 
-public struct GhostAgentRequest: Sendable {
-    public var tier: GhostAITier
+public struct ACTAAgentRequest: Sendable {
+    public var tier: ACTAAITier
     public var instructions: String
     /// Complete conversation, used by stateless backends or when no chain head is available.
-    public var fullInput: [GhostAgentItem]
+    public var fullInput: [ACTAAgentItem]
     /// Only the items the server has not seen yet; sent together with `previousResponseID`.
-    public var chainedInput: [GhostAgentItem]
+    public var chainedInput: [ACTAAgentItem]
     public var previousResponseID: String?
-    public var tools: [GhostAgentToolSpec]
-    public var toolChoice: GhostAgentToolChoice
+    public var tools: [ACTAAgentToolSpec]
+    public var toolChoice: ACTAAgentToolChoice
 
     public init(
-        tier: GhostAITier = .full,
+        tier: ACTAAITier = .full,
         instructions: String,
-        fullInput: [GhostAgentItem],
-        chainedInput: [GhostAgentItem] = [],
+        fullInput: [ACTAAgentItem],
+        chainedInput: [ACTAAgentItem] = [],
         previousResponseID: String? = nil,
-        tools: [GhostAgentToolSpec],
-        toolChoice: GhostAgentToolChoice = .auto
+        tools: [ACTAAgentToolSpec],
+        toolChoice: ACTAAgentToolChoice = .auto
     ) {
         self.tier = tier
         self.instructions = instructions
@@ -603,16 +603,16 @@ public struct GhostAgentRequest: Sendable {
     }
 }
 
-public struct GhostAgentTurnResult: Sendable, Equatable {
+public struct ACTAAgentTurnResult: Sendable, Equatable {
     /// Real Responses API `id` (nil for stateless backends).
     public var responseID: String?
     public var text: String?
-    public var functionCalls: [GhostAgentFunctionCall]
-    public var backend: GhostAgentBackend
+    public var functionCalls: [ACTAAgentFunctionCall]
+    public var backend: ACTAAgentBackend
     /// True when the request was sent with `previous_response_id`.
     public var usedChain: Bool
 
-    public init(responseID: String?, text: String?, functionCalls: [GhostAgentFunctionCall], backend: GhostAgentBackend, usedChain: Bool = false) {
+    public init(responseID: String?, text: String?, functionCalls: [ACTAAgentFunctionCall], backend: ACTAAgentBackend, usedChain: Bool = false) {
         self.responseID = responseID
         self.text = text
         self.functionCalls = functionCalls
@@ -621,7 +621,7 @@ public struct GhostAgentTurnResult: Sendable, Equatable {
     }
 }
 
-public enum GhostAgentError: Error, Equatable {
+public enum ACTAAgentError: Error, Equatable {
     case chainRejected
     case noBackendAvailable
     case badResponse
@@ -629,24 +629,24 @@ public enum GhostAgentError: Error, Equatable {
 
 // MARK: - 6. Hybrid Ghost AI Client (MLX + Local vLLM + OpenAI + Backup Failover)
 
-public final class GhostAIClient: @unchecked Sendable {
+public final class ACTAAIClient: @unchecked Sendable {
     private let lock = NSLock()
-    private var config: GhostAIConfiguration
+    private var config: ACTAAIConfiguration
     private let localVLM: LocalVLMClient?
     private var cacheStore: LocalTrackingStore?
-    public let budgetTracker = GhostBudgetTracker()
-    public let circuitBreaker = GhostCircuitBreaker()
+    public let budgetTracker = ACTABudgetTracker()
+    public let circuitBreaker = ACTACircuitBreaker()
 
-    private let chatLane = GhostAsyncLaneLimiter(limit: GhostAILane.chat.maxConcurrentRequests)
-    private let alertLane = GhostAsyncLaneLimiter(limit: GhostAILane.alert.maxConcurrentRequests)
-    private let backgroundLane = GhostAsyncLaneLimiter(limit: GhostAILane.background.maxConcurrentRequests)
-    private let transport: GhostHTTPTransport
+    private let chatLane = ACTAAsyncLaneLimiter(limit: ACTAAILane.chat.maxConcurrentRequests)
+    private let alertLane = ACTAAsyncLaneLimiter(limit: ACTAAILane.alert.maxConcurrentRequests)
+    private let backgroundLane = ACTAAsyncLaneLimiter(limit: ACTAAILane.background.maxConcurrentRequests)
+    private let transport: ACTAHTTPTransport
 
     init(
-        config: GhostAIConfiguration = GhostAIConfiguration(),
+        config: ACTAAIConfiguration = ACTAAIConfiguration(),
         localVLM: LocalVLMClient? = nil,
         cacheStore: LocalTrackingStore? = nil,
-        transport: GhostHTTPTransport? = nil
+        transport: ACTAHTTPTransport? = nil
     ) {
         self.config = config
         self.localVLM = localVLM
@@ -678,19 +678,19 @@ public final class GhostAIClient: @unchecked Sendable {
         return cacheStore
     }
 
-    public func configuration() -> GhostAIConfiguration {
+    public func configuration() -> ACTAAIConfiguration {
         lock.lock()
         defer { lock.unlock() }
         return config
     }
 
-    public func updateConfiguration(_ newConfig: GhostAIConfiguration) {
+    public func updateConfiguration(_ newConfig: ACTAAIConfiguration) {
         lock.lock()
         defer { lock.unlock() }
         config = newConfig
     }
 
-    private func limiter(for lane: GhostAILane) -> GhostAsyncLaneLimiter {
+    private func limiter(for lane: ACTAAILane) -> ACTAAsyncLaneLimiter {
         switch lane {
         case .chat: return chatLane
         case .alert: return alertLane
@@ -700,21 +700,21 @@ public final class GhostAIClient: @unchecked Sendable {
 
     /// Executes a structured JSON generation task across the configured hybrid backend with SHA-256 content-hash deduplication.
     public func generateStructured<T: Codable & Sendable>(
-        lane: GhostAILane,
-        tier: GhostAITier,
+        lane: ACTAAILane,
+        tier: ACTAAITier,
         taskType: String = "structured",
         promptVersion: String = "v1",
         prompt: String,
         jpegImages: [Data] = [],
         previousResponseID: String? = nil,
-        owedOutputs: [GhostPendingOutputDebt] = [],
+        owedOutputs: [ACTAPendingOutputDebt] = [],
         useContentCache: Bool = true,
         responseType: T.Type,
         fallbackFactory: @Sendable () -> T
     ) async -> T {
         let currentConfig = configuration()
         let store = currentCacheStore()
-        let requestHash = GhostAIRequestHasher.computeHash(
+        let requestHash = ACTAAIRequestHasher.computeHash(
             taskType: "\(taskType):\(String(describing: T.self))",
             promptVersion: promptVersion,
             prompt: prompt,
@@ -722,7 +722,7 @@ public final class GhostAIClient: @unchecked Sendable {
         )
 
         if useContentCache, previousResponseID == nil,
-           let cachedJSON = try? store?.cachedGhostAIResponse(requestHash: requestHash),
+           let cachedJSON = try? store?.cachedACTAAIResponse(requestHash: requestHash),
            let data = cachedJSON.data(using: .utf8),
            let decoded = try? JSONDecoder().decode(T.self, from: data) {
             circuitBreaker.recordSuccess(latencyMs: 1.0, backend: "cache")
@@ -736,7 +736,7 @@ public final class GhostAIClient: @unchecked Sendable {
             if useContentCache, previousResponseID == nil,
                let encoded = try? JSONEncoder().encode(result),
                let jsonStr = String(data: encoded, encoding: .utf8) {
-                try? store?.saveGhostAICacheResponse(
+                try? store?.saveACTAAICacheResponse(
                     requestHash: requestHash,
                     taskType: taskType,
                     promptVersion: promptVersion,
@@ -765,7 +765,7 @@ public final class GhostAIClient: @unchecked Sendable {
                     let elapsedMs = Date().timeIntervalSince(start) * 1000.0
                     circuitBreaker.recordSuccess(latencyMs: elapsedMs, backend: currentConfig.mode.rawValue)
                     if useContentCache, previousResponseID == nil {
-                        try? store?.saveGhostAICacheResponse(
+                        try? store?.saveACTAAICacheResponse(
                             requestHash: requestHash,
                             taskType: taskType,
                             promptVersion: promptVersion,
@@ -787,21 +787,21 @@ public final class GhostAIClient: @unchecked Sendable {
     }
 
     private static func redactAgentRequest(
-        _ request: GhostAgentRequest,
-        config: GhostAIConfiguration
-    ) -> GhostAgentRequest {
+        _ request: ACTAAgentRequest,
+        config: ACTAAIConfiguration
+    ) -> ACTAAgentRequest {
         guard config.privacyBlurFacesInCloud || config.privacyBlurPlatesInCloud else { return request }
-        func redactItems(_ items: [GhostAgentItem]) -> [GhostAgentItem] {
+        func redactItems(_ items: [ACTAAgentItem]) -> [ACTAAgentItem] {
             items.map { item in
                 switch item {
                 case .user(let text, let images) where !images.isEmpty:
-                    return .user(text: text, images: GhostCloudPrivacyRedactor.redactImages(images, config: config))
+                    return .user(text: text, images: ACTACloudPrivacyRedactor.redactImages(images, config: config))
                 default:
                     return item
                 }
             }
         }
-        return GhostAgentRequest(
+        return ACTAAgentRequest(
             tier: request.tier,
             instructions: request.instructions,
             fullInput: redactItems(request.fullInput),
@@ -813,13 +813,13 @@ public final class GhostAIClient: @unchecked Sendable {
     }
 
     private func dispatchRawRequest(
-        config: GhostAIConfiguration,
-        lane: GhostAILane,
-        tier: GhostAITier,
+        config: ACTAAIConfiguration,
+        lane: ACTAAILane,
+        tier: ACTAAITier,
         prompt: String,
         jpegImages: [Data],
         previousResponseID: String? = nil,
-        owedOutputs: [GhostPendingOutputDebt] = []
+        owedOutputs: [ACTAPendingOutputDebt] = []
     ) async throws -> String {
         switch config.mode {
         case .dryRun:
@@ -860,7 +860,7 @@ public final class GhostAIClient: @unchecked Sendable {
         }
     }
 
-    private func callMLX(prompt: String, jpegImages: [Data], tier: GhostAITier) async throws -> String {
+    private func callMLX(prompt: String, jpegImages: [Data], tier: ACTAAITier) async throws -> String {
         guard let localVLM else {
             throw URLError(.cannotConnectToHost)
         }
@@ -875,10 +875,10 @@ public final class GhostAIClient: @unchecked Sendable {
     }
 
     private func callLocalVLLM(
-        config: GhostAIConfiguration,
+        config: ACTAAIConfiguration,
         prompt: String,
         jpegImages: [Data],
-        tier: GhostAITier
+        tier: ACTAAITier
     ) async throws -> String {
         let base = config.vllmBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard let url = URL(string: "\(base)/chat/completions") else {
@@ -892,7 +892,7 @@ public final class GhostAIClient: @unchecked Sendable {
         }
         let outgoingImages = isLoopback
             ? jpegImages
-            : GhostCloudPrivacyRedactor.redactImages(jpegImages, config: config)
+            : ACTACloudPrivacyRedactor.redactImages(jpegImages, config: config)
 
         var contentArray: [[String: Any]] = [
             ["type": "text", "text": prompt]
@@ -937,21 +937,21 @@ public final class GhostAIClient: @unchecked Sendable {
     }
 
     private func callOpenAIWithBackup(
-        config: GhostAIConfiguration,
-        lane: GhostAILane,
-        tier: GhostAITier,
+        config: ACTAAIConfiguration,
+        lane: ACTAAILane,
+        tier: ACTAAITier,
         prompt: String,
         jpegImages: [Data],
         previousResponseID: String? = nil,
-        owedOutputs: [GhostPendingOutputDebt] = []
+        owedOutputs: [ACTAPendingOutputDebt] = []
     ) async throws -> String {
         guard config.allowExternalAI else {
             throw URLError(.appTransportSecurityRequiresSecureConnection)
         }
-        let outgoingImages = GhostCloudPrivacyRedactor.redactImages(jpegImages, config: config)
-        let preferredAccount = (lane == .alert) ? GhostKeychainStore.alertKeyAccount : GhostKeychainStore.primaryKeyAccount
-        let apiKey = GhostKeychainStore.loadKey(account: preferredAccount)
-            ?? GhostKeychainStore.loadKey(account: GhostKeychainStore.primaryKeyAccount)
+        let outgoingImages = ACTACloudPrivacyRedactor.redactImages(jpegImages, config: config)
+        let preferredAccount = (lane == .alert) ? ACTAKeychainStore.alertKeyAccount : ACTAKeychainStore.primaryKeyAccount
+        let apiKey = ACTAKeychainStore.loadKey(account: preferredAccount)
+            ?? ACTAKeychainStore.loadKey(account: ACTAKeychainStore.primaryKeyAccount)
 
         if let apiKey, let primaryURL = URL(string: config.openAIBaseURL) {
             if let text = try? await sendResponsesPayload(
@@ -983,11 +983,11 @@ public final class GhostAIClient: @unchecked Sendable {
     }
 
     public static func buildOpenAIResponsesBody(
-        tier: GhostAITier,
+        tier: ACTAAITier,
         prompt: String,
         jpegImages: [Data],
         previousResponseID: String? = nil,
-        owedOutputs: [GhostPendingOutputDebt] = [],
+        owedOutputs: [ACTAPendingOutputDebt] = [],
         store: Bool = true
     ) -> [String: Any] {
         var inputItems: [[String: Any]] = []
@@ -1031,11 +1031,11 @@ public final class GhostAIClient: @unchecked Sendable {
     private func sendResponsesPayload(
         url: URL,
         apiKey: String,
-        tier: GhostAITier,
+        tier: ACTAAITier,
         prompt: String,
         jpegImages: [Data],
         previousResponseID: String? = nil,
-        owedOutputs: [GhostPendingOutputDebt] = []
+        owedOutputs: [ACTAPendingOutputDebt] = []
     ) async throws -> String {
         let body = Self.buildOpenAIResponsesBody(
             tier: tier,
@@ -1079,12 +1079,12 @@ public final class GhostAIClient: @unchecked Sendable {
     /// Runs one model step of a tool-calling agent. The caller executes returned `functionCalls` and loops.
     /// - Parameter pinnedBackend: keeps a multi-step loop on the backend that served its first step.
     public func runAgentStep(
-        lane: GhostAILane = .chat,
-        request: GhostAgentRequest,
-        pinnedBackend: GhostAgentBackend? = nil
-    ) async throws -> GhostAgentTurnResult {
+        lane: ACTAAILane = .chat,
+        request: ACTAAgentRequest,
+        pinnedBackend: ACTAAgentBackend? = nil
+    ) async throws -> ACTAAgentTurnResult {
         let currentConfig = configuration()
-        let candidates: [GhostAgentBackend]
+        let candidates: [ACTAAgentBackend]
         if let pinnedBackend {
             candidates = [pinnedBackend]
         } else {
@@ -1093,7 +1093,7 @@ public final class GhostAIClient: @unchecked Sendable {
             case .localVLLM: candidates = [.vllm]
             case .mlxInProcess: candidates = [.mlx]
             case .hybridAuto:
-                var list: [GhostAgentBackend] = []
+                var list: [ACTAAgentBackend] = []
                 if circuitBreaker.allowRequest() { list.append(.vllm) }
                 if currentConfig.allowExternalAI, budgetTracker.isWithinBudget(config: currentConfig) { list.append(.openAI) }
                 list.append(.mlx)
@@ -1101,26 +1101,26 @@ public final class GhostAIClient: @unchecked Sendable {
             case .dryRun: candidates = []
             }
         }
-        guard !candidates.isEmpty else { throw GhostAgentError.noBackendAvailable }
+        guard !candidates.isEmpty else { throw ACTAAgentError.noBackendAvailable }
 
         return try await limiter(for: lane).withPermit {
-            var lastError: Error = GhostAgentError.noBackendAvailable
+            var lastError: Error = ACTAAgentError.noBackendAvailable
             for backend in candidates {
                 let start = Date()
                 do {
-                    let result: GhostAgentTurnResult
+                    let result: ACTAAgentTurnResult
                     switch backend {
                     case .openAI:
                         result = try await agentStepOpenAI(config: currentConfig, lane: lane, request: request)
                     case .vllm, .mlx:
                         result = try await agentStepLocal(config: currentConfig, backend: backend, request: request)
                     case .offline:
-                        throw GhostAgentError.noBackendAvailable
+                        throw ACTAAgentError.noBackendAvailable
                     }
                     circuitBreaker.recordSuccess(latencyMs: Date().timeIntervalSince(start) * 1000.0, backend: backend.rawValue)
                     return result
-                } catch GhostAgentError.chainRejected {
-                    throw GhostAgentError.chainRejected
+                } catch ACTAAgentError.chainRejected {
+                    throw ACTAAgentError.chainRejected
                 } catch {
                     circuitBreaker.recordFailure()
                     lastError = error
@@ -1131,26 +1131,26 @@ public final class GhostAIClient: @unchecked Sendable {
     }
 
     private func agentStepOpenAI(
-        config: GhostAIConfiguration,
-        lane: GhostAILane,
-        request: GhostAgentRequest
-    ) async throws -> GhostAgentTurnResult {
+        config: ACTAAIConfiguration,
+        lane: ACTAAILane,
+        request: ACTAAgentRequest
+    ) async throws -> ACTAAgentTurnResult {
         guard config.allowExternalAI else {
-            throw GhostAgentError.noBackendAvailable
+            throw ACTAAgentError.noBackendAvailable
         }
         let redactedRequest = Self.redactAgentRequest(request, config: config)
-        let preferredAccount = (lane == .alert) ? GhostKeychainStore.alertKeyAccount : GhostKeychainStore.primaryKeyAccount
-        let apiKey = GhostKeychainStore.loadKey(account: preferredAccount)
-            ?? GhostKeychainStore.loadKey(account: GhostKeychainStore.primaryKeyAccount)
+        let preferredAccount = (lane == .alert) ? ACTAKeychainStore.alertKeyAccount : ACTAKeychainStore.primaryKeyAccount
+        let apiKey = ACTAKeychainStore.loadKey(account: preferredAccount)
+            ?? ACTAKeychainStore.loadKey(account: ACTAKeychainStore.primaryKeyAccount)
         let body = Self.buildOpenAIAgentBody(request: redactedRequest)
         let chained = body["previous_response_id"] != nil
 
         var urls: [(URL, String)] = []
         if let apiKey, let primary = URL(string: config.openAIBaseURL) { urls.append((primary, apiKey)) }
         if let backup = URL(string: config.backupRelayURL) { urls.append((backup, apiKey ?? "backup-relay")) }
-        guard !urls.isEmpty else { throw GhostAgentError.noBackendAvailable }
+        guard !urls.isEmpty else { throw ACTAAgentError.noBackendAvailable }
 
-        var lastError: Error = GhostAgentError.noBackendAvailable
+        var lastError: Error = ACTAAgentError.noBackendAvailable
         for (url, key) in urls {
             do {
                 var http = URLRequest(url: url)
@@ -1161,14 +1161,14 @@ public final class GhostAIClient: @unchecked Sendable {
                 let (data, response) = try await transport(http)
                 if chained, response.statusCode == 400 || response.statusCode == 404 {
                     // Expired/unknown `previous_response_id` or unsettled call debt: caller retries with full history.
-                    throw GhostAgentError.chainRejected
+                    throw ACTAAgentError.chainRejected
                 }
                 guard (200..<300).contains(response.statusCode),
                       let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    throw GhostAgentError.badResponse
+                    throw ACTAAgentError.badResponse
                 }
                 let parsed = Self.parseResponsesOutput(root)
-                guard parsed.text != nil || !parsed.calls.isEmpty else { throw GhostAgentError.badResponse }
+                guard parsed.text != nil || !parsed.calls.isEmpty else { throw ACTAAgentError.badResponse }
                 let inputItems = chained ? request.chainedInput : request.fullInput
                 let inputChars = request.instructions.count + inputItems.reduce(0) { $0 + Self.itemTextLength($1) }
                 let imageCount = inputItems.reduce(0) { total, item in
@@ -1181,15 +1181,15 @@ public final class GhostAIClient: @unchecked Sendable {
                     outputTokens: ((parsed.text?.count ?? 0) + parsed.calls.reduce(0) { $0 + $1.argumentsJSON.count }) / 4,
                     isLocalFree: false
                 )
-                return GhostAgentTurnResult(
+                return ACTAAgentTurnResult(
                     responseID: root["id"] as? String,
                     text: parsed.text,
                     functionCalls: parsed.calls,
                     backend: .openAI,
                     usedChain: chained
                 )
-            } catch GhostAgentError.chainRejected {
-                throw GhostAgentError.chainRejected
+            } catch ACTAAgentError.chainRejected {
+                throw ACTAAgentError.chainRejected
             } catch {
                 lastError = error
             }
@@ -1198,10 +1198,10 @@ public final class GhostAIClient: @unchecked Sendable {
     }
 
     private func agentStepLocal(
-        config: GhostAIConfiguration,
-        backend: GhostAgentBackend,
-        request: GhostAgentRequest
-    ) async throws -> GhostAgentTurnResult {
+        config: ACTAAIConfiguration,
+        backend: ACTAAgentBackend,
+        request: ACTAAgentRequest
+    ) async throws -> ACTAAgentTurnResult {
         let prompt = Self.renderLocalAgentPrompt(request: request)
         var images: [Data] = []
         for item in request.fullInput {
@@ -1215,10 +1215,10 @@ public final class GhostAIClient: @unchecked Sendable {
             raw = try await callMLX(prompt: prompt, jpegImages: recentImages, tier: request.tier)
         }
         let parsed = Self.parseLocalAgentReply(raw)
-        return GhostAgentTurnResult(responseID: nil, text: parsed.text, functionCalls: parsed.calls, backend: backend)
+        return ACTAAgentTurnResult(responseID: nil, text: parsed.text, functionCalls: parsed.calls, backend: backend)
     }
 
-    public static func buildOpenAIAgentBody(request: GhostAgentRequest) -> [String: Any] {
+    public static func buildOpenAIAgentBody(request: ACTAAgentRequest) -> [String: Any] {
         let chained = (request.previousResponseID?.isEmpty == false)
         let items = chained ? request.chainedInput : request.fullInput
         var body: [String: Any] = [
@@ -1249,7 +1249,7 @@ public final class GhostAIClient: @unchecked Sendable {
         return body
     }
 
-    static func encodeResponsesItem(_ item: GhostAgentItem) -> [String: Any] {
+    static func encodeResponsesItem(_ item: ACTAAgentItem) -> [String: Any] {
         switch item {
         case .user(let text, let images):
             var content: [[String: Any]] = [["type": "input_text", "text": text]]
@@ -1267,15 +1267,15 @@ public final class GhostAIClient: @unchecked Sendable {
     }
 
     /// Extracts assistant text and `function_call` items from a Responses API payload, skipping `reasoning` items.
-    public static func parseResponsesOutput(_ root: [String: Any]) -> (text: String?, calls: [GhostAgentFunctionCall]) {
+    public static func parseResponsesOutput(_ root: [String: Any]) -> (text: String?, calls: [ACTAAgentFunctionCall]) {
         var texts: [String] = []
-        var calls: [GhostAgentFunctionCall] = []
+        var calls: [ACTAAgentFunctionCall] = []
         for item in (root["output"] as? [[String: Any]]) ?? [] {
             switch item["type"] as? String {
             case "function_call":
                 guard let name = item["name"] as? String else { continue }
                 let callID = (item["call_id"] as? String) ?? (item["id"] as? String) ?? "call_\(UUID().uuidString.prefix(12))"
-                calls.append(GhostAgentFunctionCall(callID: callID, name: name, argumentsJSON: (item["arguments"] as? String) ?? "{}"))
+                calls.append(ACTAAgentFunctionCall(callID: callID, name: name, argumentsJSON: (item["arguments"] as? String) ?? "{}"))
             case "message", nil:
                 for part in (item["content"] as? [[String: Any]]) ?? [] {
                     if let type = part["type"] as? String, type != "output_text", type != "text" { continue }
@@ -1292,7 +1292,7 @@ public final class GhostAIClient: @unchecked Sendable {
         return (joined.isEmpty ? nil : joined, calls)
     }
 
-    static func renderLocalAgentPrompt(request: GhostAgentRequest) -> String {
+    static func renderLocalAgentPrompt(request: ACTAAgentRequest) -> String {
         let catalog = request.tools.map { "- `\($0.name)`: \($0.description) Parameters schema: \($0.parametersSchemaJSON)" }
             .joined(separator: "\n")
         let transcript = request.fullInput.map { item -> String in
@@ -1329,13 +1329,13 @@ public final class GhostAIClient: @unchecked Sendable {
         """
     }
 
-    static func parseLocalAgentReply(_ raw: String) -> (text: String?, calls: [GhostAgentFunctionCall]) {
+    static func parseLocalAgentReply(_ raw: String) -> (text: String?, calls: [ACTAAgentFunctionCall]) {
         let cleaned = extractJSONObject(from: raw)
         guard let obj = (try? JSONSerialization.jsonObject(with: Data(cleaned.utf8))) as? [String: Any] else {
             let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             return (trimmed.isEmpty ? nil : trimmed, [])
         }
-        func makeCall(_ entry: [String: Any]) -> GhostAgentFunctionCall? {
+        func makeCall(_ entry: [String: Any]) -> ACTAAgentFunctionCall? {
             guard let name = (entry["name"] as? String) ?? (entry["tool"] as? String) else { return nil }
             let args = entry["arguments"] ?? entry["args"] ?? [String: Any]()
             let argsJSON: String
@@ -1346,7 +1346,7 @@ public final class GhostAIClient: @unchecked Sendable {
             } else {
                 argsJSON = "{}"
             }
-            return GhostAgentFunctionCall(callID: "call_local_\(UUID().uuidString.prefix(12))", name: name, argumentsJSON: argsJSON)
+            return ACTAAgentFunctionCall(callID: "call_local_\(UUID().uuidString.prefix(12))", name: name, argumentsJSON: argsJSON)
         }
         if let list = obj["tool_calls"] as? [[String: Any]] {
             return (nil, list.compactMap(makeCall))
@@ -1355,12 +1355,12 @@ public final class GhostAIClient: @unchecked Sendable {
             return (nil, [call])
         }
         if obj["answerMarkdown"] != nil {
-            return (nil, [GhostAgentFunctionCall(callID: "call_local_\(UUID().uuidString.prefix(12))", name: "present_answer", argumentsJSON: cleaned)])
+            return (nil, [ACTAAgentFunctionCall(callID: "call_local_\(UUID().uuidString.prefix(12))", name: "present_answer", argumentsJSON: cleaned)])
         }
         return (raw.trimmingCharacters(in: .whitespacesAndNewlines), [])
     }
 
-    private static func itemTextLength(_ item: GhostAgentItem) -> Int {
+    private static func itemTextLength(_ item: ACTAAgentItem) -> Int {
         switch item {
         case .user(let text, _): return text.count
         case .assistantText(let text): return text.count
@@ -1381,7 +1381,7 @@ public final class GhostAIClient: @unchecked Sendable {
 
 // MARK: - 7. Israeli Government Vehicle Registry Client (data.gov.il)
 
-public final class GhostIsraeliVehicleRegistryClient: @unchecked Sendable {
+public final class ACTAIsraeliVehicleRegistryClient: @unchecked Sendable {
     private let urlSession: URLSession
 
     public init() {
@@ -1394,8 +1394,8 @@ public final class GhostIsraeliVehicleRegistryClient: @unchecked Sendable {
         rawPlate: String,
         store: LocalTrackingStore? = nil,
         allowExternalLookup: Bool = false
-    ) async -> GhostVehicleRegistryRecord? {
-        guard let normalized = GhostVehicleRegistryRecord.normalizeIsraeliPlate(rawPlate) else {
+    ) async -> ACTAVehicleRegistryRecord? {
+        guard let normalized = ACTAVehicleRegistryRecord.normalizeIsraeliPlate(rawPlate) else {
             return nil
         }
         if let cached = try? store?.cachedVehicleRegistryRecord(plateNumber: normalized) {
@@ -1406,9 +1406,9 @@ public final class GhostIsraeliVehicleRegistryClient: @unchecked Sendable {
         }
 
         let resources = [
-            GhostVehicleRegistryRecord.privateVehiclesResourceID,
-            GhostVehicleRegistryRecord.motorcyclesResourceID,
-            GhostVehicleRegistryRecord.heavyVehiclesResourceID
+            ACTAVehicleRegistryRecord.privateVehiclesResourceID,
+            ACTAVehicleRegistryRecord.motorcyclesResourceID,
+            ACTAVehicleRegistryRecord.heavyVehiclesResourceID
         ]
 
         for resourceID in resources {
@@ -1420,7 +1420,7 @@ public final class GhostIsraeliVehicleRegistryClient: @unchecked Sendable {
         return nil
     }
 
-    private func queryCKAN(resourceID: String, plateNumber: String) async throws -> GhostVehicleRegistryRecord? {
+    private func queryCKAN(resourceID: String, plateNumber: String) async throws -> ACTAVehicleRegistryRecord? {
         var components = URLComponents(string: "https://data.gov.il/api/3/action/datastore_search")
         components?.queryItems = [
             URLQueryItem(name: "resource_id", value: resourceID),
@@ -1445,7 +1445,7 @@ public final class GhostIsraeliVehicleRegistryClient: @unchecked Sendable {
         let ownership = first["baalut"] as? String
         let validUntil = first["tokef_dt"] as? String
 
-        return GhostVehicleRegistryRecord(
+        return ACTAVehicleRegistryRecord(
             plateNumber: plateNumber,
             manufacturer: manufacturer,
             commercialModel: model,

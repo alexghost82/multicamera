@@ -5,7 +5,7 @@ import Foundation
 
 // MARK: - 1. Pending Queue Items
 
-public struct GhostPendingDescribeItem: Sendable {
+public struct ACTAPendingDescribeItem: Sendable {
     public var trackID: UUID
     public var cameraID: UUID
     public var cameraName: String
@@ -33,7 +33,7 @@ public struct GhostPendingDescribeItem: Sendable {
     }
 }
 
-public struct GhostPendingPlateItem: Sendable {
+public struct ACTAPendingPlateItem: Sendable {
     public var trackID: UUID
     public var identityID: String?
     public var cameraID: UUID
@@ -57,7 +57,7 @@ public struct GhostPendingPlateItem: Sendable {
 
 // MARK: - 2. Critical Alert 4-Frame Ring & Alert Rate Limiter
 
-public struct GhostAlertRingFrame: Sendable {
+public struct ACTAAlertRingFrame: Sendable {
     public var cgImage: CGImage
     public var capturedAt: Date
 
@@ -67,13 +67,13 @@ public struct GhostAlertRingFrame: Sendable {
     }
 }
 
-public struct GhostCameraAlertRingState: Sendable {
+public struct ACTACameraAlertRingState: Sendable {
     public static let ringCapacity: Int = 4
     public static let sampleIntervalSec: TimeInterval = 1.2
     public static let lookbackCapacity: Int = 16
 
-    public var ringFrames: [GhostAlertRingFrame] = []
-    public var lookbackFrames: [GhostAlertRingFrame] = []
+    public var ringFrames: [ACTAAlertRingFrame] = []
+    public var lookbackFrames: [ACTAAlertRingFrame] = []
     public var lastSampledAt: Date = .distantPast
 
     public init() {}
@@ -83,7 +83,7 @@ public struct GhostCameraAlertRingState: Sendable {
             return false
         }
         lastSampledAt = timestamp
-        let item = GhostAlertRingFrame(cgImage: image, capturedAt: timestamp)
+        let item = ACTAAlertRingFrame(cgImage: image, capturedAt: timestamp)
         ringFrames.append(item)
         if ringFrames.count > Self.ringCapacity {
             ringFrames.removeFirst(ringFrames.count - Self.ringCapacity)
@@ -96,16 +96,16 @@ public struct GhostCameraAlertRingState: Sendable {
     }
 }
 
-// MARK: - 3. Narrative Sampler State per Camera ("Ghost Memory")
+// MARK: - 3. Narrative Sampler State per Camera ("ACTA Memory")
 
-public struct GhostCameraNarrativeState: Sendable {
+public struct ACTACameraNarrativeState: Sendable {
     public static let intervalSampleSec: TimeInterval = 5.0
     public static let objectHeartbeatSec: TimeInterval = 8.0
     public static let flushFrameThreshold: Int = 28
     public static let flushTimeoutSec: TimeInterval = 480.0
 
-    public var mode: GhostNarrativeTriggerMode = .object
-    public var sampledFrames: [GhostNarrativeSampledFrame] = []
+    public var mode: ACTANarrativeTriggerMode = .object
+    public var sampledFrames: [ACTANarrativeSampledFrame] = []
     public var chapterStartedAt: Date?
     public var lastSampledAt: Date = .distantPast
     public var lastChapterSummary: String?
@@ -114,7 +114,7 @@ public struct GhostCameraNarrativeState: Sendable {
     public var seenTrackIDsInChapter: Set<String> = []
     public var seenIdentityIDsInChapter: Set<String> = []
 
-    public init(mode: GhostNarrativeTriggerMode = .object) {
+    public init(mode: ACTANarrativeTriggerMode = .object) {
         self.mode = mode
     }
 
@@ -123,15 +123,15 @@ public struct GhostCameraNarrativeState: Sendable {
         activeLabels: [String],
         activeTrackIDs: [String] = [],
         activeIdentityIDs: [String] = [],
-        modeOverride: GhostNarrativeTriggerMode? = nil,
+        modeOverride: ACTANarrativeTriggerMode? = nil,
         at timestamp: Date
-    ) -> (frames: [GhostNarrativeSampledFrame], sightingCount: Int, identityCount: Int)? {
+    ) -> (frames: [ACTANarrativeSampledFrame], sightingCount: Int, identityCount: Int)? {
         let activeMode = modeOverride ?? mode
-        let hasStory = GhostNarrativeSamplerRules.hasStoryObject(labels: activeLabels) || !activeTrackIDs.isEmpty
+        let hasStory = ACTANarrativeSamplerRules.hasStoryObject(labels: activeLabels) || !activeTrackIDs.isEmpty
 
         let newTracks = Set(activeTrackIDs).subtracting(seenTrackIDsInChapter)
         var shouldSample = false
-        var sampleReason: GhostNarrativeSampleReason = .sceneChanged
+        var sampleReason: ACTANarrativeSampleReason = .sceneChanged
 
         switch activeMode {
         case .object:
@@ -147,7 +147,7 @@ public struct GhostCameraNarrativeState: Sendable {
             }
         case .interval:
             if timestamp.timeIntervalSince(lastSampledAt) >= Self.intervalSampleSec {
-                let eval = GhostNarrativeSamplerRules.evaluateSceneChange(
+                let eval = ACTANarrativeSamplerRules.evaluateSceneChange(
                     cgImage: image,
                     previousLuma: previousThumbLuma,
                     previousHistogram: previousHistogram
@@ -169,7 +169,7 @@ public struct GhostCameraNarrativeState: Sendable {
             seenTrackIDsInChapter.formUnion(activeTrackIDs)
             seenIdentityIDsInChapter.formUnion(activeIdentityIDs)
             sampledFrames.append(
-                GhostNarrativeSampledFrame(
+                ACTANarrativeSampledFrame(
                     cgImage: image,
                     capturedAt: timestamp,
                     activeLabels: activeLabels,
@@ -187,13 +187,13 @@ public struct GhostCameraNarrativeState: Sendable {
         return nil
     }
 
-    public mutating func forceClose() -> (frames: [GhostNarrativeSampledFrame], sightingCount: Int, identityCount: Int)? {
+    public mutating func forceClose() -> (frames: [ACTANarrativeSampledFrame], sightingCount: Int, identityCount: Int)? {
         guard !sampledFrames.isEmpty else { return nil }
         return drainForFlush()
     }
 
-    private mutating func drainForFlush() -> (frames: [GhostNarrativeSampledFrame], sightingCount: Int, identityCount: Int) {
-        let thinned = GhostNarrativeSamplerRules.thinFrames(sampledFrames, maxFrames: Self.flushFrameThreshold)
+    private mutating func drainForFlush() -> (frames: [ACTANarrativeSampledFrame], sightingCount: Int, identityCount: Int) {
+        let thinned = ACTANarrativeSamplerRules.thinFrames(sampledFrames, maxFrames: Self.flushFrameThreshold)
         let sCount = seenTrackIDsInChapter.count
         let iCount = seenIdentityIDsInChapter.count
         sampledFrames.removeAll(keepingCapacity: true)
@@ -207,7 +207,7 @@ public struct GhostCameraNarrativeState: Sendable {
 // MARK: - 4. Ghost Analytics Coordinator
 
 /// A live camera snapshot captured when the operator asks Ghost Chat a question.
-public struct GhostLiveCameraFrame: Sendable, Equatable {
+public struct ACTALiveCameraFrame: Sendable, Equatable {
     public var cameraID: UUID?
     public var cameraName: String
     public var jpegData: Data
@@ -219,7 +219,7 @@ public struct GhostLiveCameraFrame: Sendable, Equatable {
     }
 }
 
-struct GhostOperationalMemorySnapshot {
+struct ACTAOperationalMemorySnapshot {
     var vlmAlerts: [VLMAlert] = []
     var alertReviews: [UUID: OperationsAlertReview] = [:]
     var alertAcknowledgements: [UUID: Date] = [:]
@@ -247,7 +247,7 @@ struct GhostOperationalMemorySnapshot {
     }
 }
 
-public final class GhostAnalyticsCoordinator: @unchecked Sendable {
+public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
     // Gate & Poller Constants
     public static let describeGateMinBatch: Int = 8
     public static let describeGateMaxBatch: Int = 88
@@ -265,23 +265,23 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
     public static let alertDedupWindowSec: TimeInterval = 30.0
 
     private let lock = NSLock()
-    public let aiClient: GhostAIClient
-    public let identityResolver: GhostIdentityResolver
-    public let registryClient = GhostIsraeliVehicleRegistryClient()
-    public let memoryGuard = GhostMemoryGuard()
-    public var janitorPolicy = GhostStorageJanitorPolicy()
+    public let aiClient: ACTAAIClient
+    public let identityResolver: ACTAIdentityResolver
+    public let registryClient = ACTAIsraeliVehicleRegistryClient()
+    public let memoryGuard = ACTAMemoryGuard()
+    public var janitorPolicy = ACTAStorageJanitorPolicy()
     private weak var trackingStore: LocalTrackingStore?
     /// Chronological archive of full camera frames exposed to the chat agent.
     public var memoryFrameStore: CameraMemoryStore?
     /// Provider for persistent operational memory (VLM alerts, reviews, watches, ISAPI events, scheduled missions).
-    var operationalMemoryProvider: (() -> GhostOperationalMemorySnapshot)?
-    private var operationalSnapshot = GhostOperationalMemorySnapshot()
+    var operationalMemoryProvider: (() -> ACTAOperationalMemorySnapshot)?
+    private var operationalSnapshot = ACTAOperationalMemorySnapshot()
 
-    func updateOperationalMemorySnapshot(_ snapshot: GhostOperationalMemorySnapshot) {
+    func updateOperationalMemorySnapshot(_ snapshot: ACTAOperationalMemorySnapshot) {
         lock.withLock { operationalSnapshot = snapshot }
     }
 
-    private func currentOperationalMemorySnapshot() -> GhostOperationalMemorySnapshot {
+    private func currentOperationalMemorySnapshot() -> ACTAOperationalMemorySnapshot {
         if let provider = operationalMemoryProvider {
             return provider()
         }
@@ -289,18 +289,18 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
     }
 
     // Stateful Schedulers & Queues
-    private var captureScheduler = GhostCaptureScheduler()
-    private var cropWindowsByTrack: [String: GhostCropWindow] = [:]
-    private var stitcher = GhostTrackletStitcher()
+    private var captureScheduler = ACTACaptureScheduler()
+    private var cropWindowsByTrack: [String: ACTACropWindow] = [:]
+    private var stitcher = ACTATrackletStitcher()
     private var observationStrideCounter: Int = 0
 
-    private var pendingDescribeQueue: [GhostPendingDescribeItem] = []
-    private var pendingPlateQueue: [GhostPendingPlateItem] = []
-    private var facetsByIdentityID: [String: GhostFacetSummary] = [:]
-    private var sexInputsByIdentityTrack: [String: [String: [GhostSexObservationInput]]] = [:]
+    private var pendingDescribeQueue: [ACTAPendingDescribeItem] = []
+    private var pendingPlateQueue: [ACTAPendingPlateItem] = []
+    private var facetsByIdentityID: [String: ACTAFacetSummary] = [:]
+    private var sexInputsByIdentityTrack: [String: [String: [ACTASexObservationInput]]] = [:]
 
-    private var alertRingsByCamera: [UUID: GhostCameraAlertRingState] = [:]
-    private var narrativeStatesByCamera: [UUID: GhostCameraNarrativeState] = [:]
+    private var alertRingsByCamera: [UUID: ACTACameraAlertRingState] = [:]
+    private var narrativeStatesByCamera: [UUID: ACTACameraNarrativeState] = [:]
     private var recentAlertTimestamps: [Date] = []
     private var lastAlertDedupByKey: [String: Date] = [:]
 
@@ -310,26 +310,26 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
     private var lastSpokenBriefingAt: Date = .distantPast
     private var lastJanitorPassAt: Date = .distantPast
 
-    public private(set) var recentSpokenCards: [GhostHCCard] = []
-    public private(set) var recentCriticalAlerts: [(cameraID: UUID, cameraName: String, detection: GhostCriticalAlertDetection, mentorBrief: GhostAlertMentorBrief?, triggeredAt: Date)] = []
+    public private(set) var recentSpokenCards: [ACTAHCCard] = []
+    public private(set) var recentCriticalAlerts: [(cameraID: UUID, cameraName: String, detection: ACTACriticalAlertDetection, mentorBrief: ACTAAlertMentorBrief?, triggeredAt: Date)] = []
 
     public init(
-        aiClient: GhostAIClient,
+        aiClient: ACTAAIClient,
         trackingStore: LocalTrackingStore? = nil,
         memoryFrameStore: CameraMemoryStore? = nil
     ) {
-        let initialProfiles = (try? trackingStore?.loadGhostIdentityProfiles(limit: 500)) ?? []
-        let initialLinks = (try? trackingStore?.loadGhostCameraLinks()) ?? []
-        let initialCannotLinks = (try? trackingStore?.loadGhostCannotLinkPairs()) ?? []
-        let initialDossiers = (try? trackingStore?.loadAllGhostIdentityDossiers()) ?? []
+        let initialProfiles = (try? trackingStore?.loadACTAIdentityProfiles(limit: 500)) ?? []
+        let initialLinks = (try? trackingStore?.loadACTACameraLinks()) ?? []
+        let initialCannotLinks = (try? trackingStore?.loadACTACannotLinkPairs()) ?? []
+        let initialDossiers = (try? trackingStore?.loadAllACTAIdentityDossiers()) ?? []
 
         self.aiClient = aiClient
         self.trackingStore = trackingStore
         self.memoryFrameStore = memoryFrameStore
         self.aiClient.attachCacheStore(trackingStore)
-        self.identityResolver = GhostIdentityResolver(
+        self.identityResolver = ACTAIdentityResolver(
             galleries: initialProfiles,
-            topology: GhostCameraTopology(links: initialLinks)
+            topology: ACTACameraTopology(links: initialLinks)
         )
         for (a, b) in initialCannotLinks {
             self.identityResolver.recordCannotLink(a, b)
@@ -357,7 +357,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
         enqueueDescribe: Bool = true,
         enqueuePlate: Bool = true,
         now: Date = Date()
-    ) -> GhostIdentityResolutionDecision? {
+    ) -> ACTAIdentityResolutionDecision? {
         let memState = memoryGuard.evaluate()
         if memState.strideMultiplier > 1 {
             let skip: Bool = lock.withLock {
@@ -376,7 +376,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
 
         var refinedAlpha: [Float]? = alphaMask
         if let cropImage, let alphaMask, maskWidth > 0, maskHeight > 0 {
-            refinedAlpha = GhostMatteRefiner.refineAlphaMask(
+            refinedAlpha = ACTAMatteRefiner.refineAlphaMask(
                 rawAlpha: alphaMask,
                 maskWidth: maskWidth,
                 maskHeight: maskHeight,
@@ -384,9 +384,9 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             )
         }
 
-        let qualityBreakdown: GhostCropQualityBreakdown
+        let qualityBreakdown: ACTACropQualityBreakdown
         if let cropImage {
-            qualityBreakdown = GhostCropQualityScorer.score(
+            qualityBreakdown = ACTACropQualityScorer.score(
                 cgImage: cropImage,
                 alphaMask: refinedAlpha,
                 confidence: confidence,
@@ -394,7 +394,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                 neighborBoxes: neighborBoxes
             )
         } else {
-            qualityBreakdown = GhostCropQualityBreakdown(
+            qualityBreakdown = ACTACropQualityBreakdown(
                 confidenceScore: confidence,
                 blurScore: 0.5,
                 sizeScore: 0.5,
@@ -405,10 +405,10 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             )
         }
 
-        var chromaPrint: GhostChromaSignature?
+        var chromaPrint: ACTAChromaSignature?
         var hsvHistogram: [Float] = []
         if let cropImage {
-            chromaPrint = GhostChromaPrint.compute(
+            chromaPrint = ACTAChromaPrint.compute(
                 from: cropImage,
                 alphaMask: refinedAlpha,
                 isVehicle: isVehicle
@@ -424,9 +424,9 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             normalizedRect: normalizedRect,
             timestamp: now
         )
-        var window = cropWindowsByTrack[trackKey] ?? GhostCropWindow()
+        var window = cropWindowsByTrack[trackKey] ?? ACTACropWindow()
         let acceptedIntoTopK = window.offer(
-            GhostCropCandidate(
+            ACTACropCandidate(
                 id: UUID(),
                 trackKey: trackKey,
                 capturedAt: now,
@@ -442,7 +442,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                pendingDescribeQueue.count < 256,
                !pendingDescribeQueue.contains(where: { $0.trackID == trackID }) {
                 pendingDescribeQueue.append(
-                    GhostPendingDescribeItem(
+                    ACTAPendingDescribeItem(
                         trackID: trackID,
                         cameraID: cameraID,
                         cameraName: cameraName,
@@ -457,7 +457,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                isVehicle, pendingPlateQueue.count < 128,
                !pendingPlateQueue.contains(where: { $0.trackID == trackID }) {
                 pendingPlateQueue.append(
-                    GhostPendingPlateItem(
+                    ACTAPendingPlateItem(
                         trackID: trackID,
                         cameraID: cameraID,
                         cgImage: cropImage,
@@ -469,9 +469,9 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
         }
         lock.unlock()
 
-        var decision: GhostIdentityResolutionDecision?
+        var decision: ACTAIdentityResolutionDecision?
         if let embedding, embedding.count == 512 {
-            let candidate = GhostMultiCueCandidateObservation(
+            let candidate = ACTAMultiCueCandidateObservation(
                 trackKey: trackKey,
                 cameraID: camKey,
                 kind: kind,
@@ -485,16 +485,16 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             let resolved = identityResolver.resolve(observation: candidate)
             decision = resolved
             if let profile = identityResolver.gallery(for: resolved.identityID) {
-                try? trackingStore?.upsertGhostIdentityProfile(profile)
+                try? trackingStore?.upsertACTAIdentityProfile(profile)
             }
             let currentLinks = identityResolver.currentTopology().allLinks
             if !currentLinks.isEmpty {
-                try? trackingStore?.saveGhostCameraLinks(currentLinks)
+                try? trackingStore?.saveACTACameraLinks(currentLinks)
             }
         }
 
         let resolvedIdentityID = decision?.identityID ?? trackKey
-        try? trackingStore?.saveGhostTrackVisualMetadata(
+        try? trackingStore?.saveACTATrackVisualMetadata(
             trackID: trackID,
             cropQuality: qualityBreakdown.totalScore,
             chromaPrint: chromaPrint,
@@ -502,12 +502,12 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             resolvedSex: .unknown,
             identityState: decision?.state,
             identityScore: decision?.score,
-            ghostIdentityID: decision?.identityID,
+            actaIdentityID: decision?.identityID,
             isBest: acceptedIntoTopK
         )
 
         if chromaPrint != nil {
-            try? trackingStore?.indexGhostTrackKnowledge(
+            try? trackingStore?.indexACTATrackKnowledge(
                 trackID: trackKey,
                 identityID: resolvedIdentityID,
                 cameraID: camKey,
@@ -534,7 +534,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
     }
 
     @discardableResult
-    public func runStorageJanitorIfNeeded(force: Bool = false, now: Date = Date()) -> GhostStorageJanitorReport? {
+    public func runStorageJanitorIfNeeded(force: Bool = false, now: Date = Date()) -> ACTAStorageJanitorReport? {
         let shouldRun: Bool = lock.withLock {
             guard force || now.timeIntervalSince(lastJanitorPassAt) >= Self.storageJanitorIntervalSec else {
                 return false
@@ -543,11 +543,11 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             return true
         }
         guard shouldRun, let store = trackingStore else { return nil }
-        return try? store.runGhostStorageJanitorPass(policy: janitorPolicy, now: now)
+        return try? store.runACTAStorageJanitorPass(policy: janitorPolicy, now: now)
     }
 
     public func flushDescribeGateIfNeeded(force: Bool = false, now: Date = Date()) async {
-        let batchToRun: [GhostPendingDescribeItem] = lock.withLock {
+        let batchToRun: [ACTAPendingDescribeItem] = lock.withLock {
             guard !pendingDescribeQueue.isEmpty else { return [] }
             let oldestWait = now.timeIntervalSince(pendingDescribeQueue.first!.enqueuedAt)
             let shouldFire = force ||
@@ -563,19 +563,19 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
         guard !batchToRun.isEmpty else { return }
 
         let cells = batchToRun.enumerated().map { idx, item in
-            GhostCollageCell(
+            ACTACollageCell(
                 badgeIndex: idx + 1,
                 itemID: item.trackID.uuidString,
                 cgImage: item.cgImage,
                 caption: item.kind
             )
         }
-        guard let collage = GhostCollageBuilder.buildCollage(kind: .describe, cells: cells) else {
+        guard let collage = ACTACollageBuilder.buildCollage(kind: .describe, cells: cells) else {
             return
         }
 
         let lang = aiClient.configuration().preferredLanguage
-        let prompt = GhostPromptLibrary.bulkDescribePrompt(cellCount: cells.count, language: lang)
+        let prompt = ACTAPromptLibrary.bulkDescribePrompt(cellCount: cells.count, language: lang)
 
         let result = await aiClient.generateStructured(
             lane: .background,
@@ -583,11 +583,11 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             taskType: "bulk_describe",
             prompt: prompt,
             jpegImages: [collage.jpegData],
-            responseType: GhostCropDescriptionBatch.self,
+            responseType: ACTACropDescriptionBatch.self,
             fallbackFactory: {
-                GhostCropDescriptionBatch(
+                ACTACropDescriptionBatch(
                     items: batchToRun.enumerated().map { idx, item in
-                        GhostCropDescriptionItem(
+                        ACTACropDescriptionItem(
                             cellIndex: idx + 1,
                             itemID: item.trackID.uuidString,
                             kind: item.kind,
@@ -610,7 +610,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                 }
                 let identityID = matchingGallery?.identityID ?? trackKey
 
-                let obsInput = GhostSexObservationInput(
+                let obsInput = ACTASexObservationInput(
                     trackKey: trackKey,
                     apparentSex: desc.person?.apparentSex,
                     descriptionText: desc.summary,
@@ -625,9 +625,9 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                 sexInputsByIdentityTrack[identityID] = trackMap
 
                 let allSexInputs = trackMap.values.flatMap { $0 }
-                let sexRes = GhostSexResolver.resolve(observations: allSexInputs)
+                let sexRes = ACTASexResolver.resolve(observations: allSexInputs)
 
-                facetsByIdentityID[identityID] = GhostFacetSummary(
+                facetsByIdentityID[identityID] = ACTAFacetSummary(
                     identityID: identityID,
                     kind: sourceItem.kind,
                     resolvedSex: sexRes.sex,
@@ -643,11 +643,11 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                     vehicleColor: desc.vehicle?.primaryColor,
                     makeModel: [desc.vehicle?.make, desc.vehicle?.model].compactMap { $0 }.joined(separator: " "),
                     plateNumber: desc.vehicle?.plateText,
-                    summaryText: GhostOpSec.sanitizeText(desc.summary)
+                    summaryText: ACTAOpSec.sanitizeText(desc.summary)
                 )
 
                 // Persist into Semantic Knowledge Layer (ghost_attribute_index + ghost_identity_dossiers + ghost_visits + FTS5)
-                try? trackingStore?.indexGhostTrackKnowledge(
+                try? trackingStore?.indexACTATrackKnowledge(
                     trackID: trackKey,
                     identityID: identityID,
                     cameraID: sourceItem.cameraID.uuidString,
@@ -668,14 +668,14 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                         profile.plateNumber = plate
                     }
                     identityResolver.upsertGallery(profile)
-                    try? trackingStore?.upsertGhostIdentityProfile(profile)
+                    try? trackingStore?.upsertACTAIdentityProfile(profile)
                 }
             }
         }
     }
 
     public func flushPlateBatchIfNeeded(force: Bool = false, now: Date = Date()) async {
-        let batchToRun: [GhostPendingPlateItem] = lock.withLock {
+        let batchToRun: [ACTAPendingPlateItem] = lock.withLock {
             guard !pendingPlateQueue.isEmpty else { return [] }
             let oldestWait = now.timeIntervalSince(pendingPlateQueue.first!.enqueuedAt)
             let shouldFire = force ||
@@ -691,33 +691,33 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
         guard !batchToRun.isEmpty else { return }
 
         let cells = batchToRun.enumerated().map { idx, item in
-            GhostCollageCell(
+            ACTACollageCell(
                 badgeIndex: idx + 1,
                 itemID: item.trackID.uuidString,
                 cgImage: item.cgImage
             )
         }
-        guard let collage = GhostCollageBuilder.buildCollage(kind: .plate, cells: cells) else {
+        guard let collage = ACTACollageBuilder.buildCollage(kind: .plate, cells: cells) else {
             return
         }
 
         let lang = aiClient.configuration().preferredLanguage
-        let prompt = GhostPromptLibrary.plateCollagePrompt(cellCount: cells.count, language: lang)
+        let prompt = ACTAPromptLibrary.plateCollagePrompt(cellCount: cells.count, language: lang)
         let result = await aiClient.generateStructured(
             lane: .background,
             tier: .nano,
             taskType: "plate_ocr",
             prompt: prompt,
             jpegImages: [collage.jpegData],
-            responseType: GhostPlateCollageResult.self,
-            fallbackFactory: { GhostPlateCollageResult(plates: []) }
+            responseType: ACTAPlateCollageResult.self,
+            fallbackFactory: { ACTAPlateCollageResult(plates: []) }
         )
 
         let allowRegistry = aiClient.configuration().allowPlateRegistryLookup
         for readItem in result.plates where readItem.confidence >= 0.55 {
             guard readItem.cellIndex >= 1, readItem.cellIndex <= batchToRun.count else { continue }
             let source = batchToRun[readItem.cellIndex - 1]
-            if let normalized = GhostVehicleRegistryRecord.normalizeIsraeliPlate(readItem.plateText) {
+            if let normalized = ACTAVehicleRegistryRecord.normalizeIsraeliPlate(readItem.plateText) {
                 _ = await registryClient.lookupPlate(
                     rawPlate: normalized,
                     store: trackingStore,
@@ -727,7 +727,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                 if var profile = identityResolver.allGalleries().first(where: { $0.memberTrackKeys.contains(trackKey) }) {
                     profile.plateNumber = normalized
                     identityResolver.upsertGallery(profile)
-                    try? trackingStore?.upsertGhostIdentityProfile(profile)
+                    try? trackingStore?.upsertACTAIdentityProfile(profile)
                 }
             }
         }
@@ -745,10 +745,10 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
 
         let galleries = identityResolver.allGalleries().filter { $0.kind == "person" && $0.memberTrackKeys.count >= 2 }
         for profile in galleries {
-            let trackObservations: [String: [GhostSexObservationInput]] = lock.withLock {
+            let trackObservations: [String: [ACTASexObservationInput]] = lock.withLock {
                 sexInputsByIdentityTrack[profile.identityID] ?? [:]
             }
-            guard let splitAction = GhostIdentityPuritySplitter.evaluateIdentity(
+            guard let splitAction = ACTAIdentityPuritySplitter.evaluateIdentity(
                 identityID: profile.identityID,
                 trackObservations: trackObservations
             ) else {
@@ -762,7 +762,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             updatedOriginal.resolvedSex = splitAction.majoritySex
             identityResolver.upsertGallery(updatedOriginal)
 
-            let splitProfile = GhostIdentityGalleryProfile(
+            let splitProfile = ACTAIdentityGalleryProfile(
                 identityID: splitAction.newIdentityID,
                 kind: "person",
                 displayCode: "P-SPLIT-\(splitAction.newIdentityID.prefix(4))",
@@ -776,13 +776,13 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             )
             identityResolver.upsertGallery(splitProfile)
             identityResolver.recordCannotLink(updatedOriginal.identityID, splitProfile.identityID)
-            try? trackingStore?.upsertGhostIdentityProfile(updatedOriginal)
-            try? trackingStore?.upsertGhostIdentityProfile(splitProfile)
+            try? trackingStore?.upsertACTAIdentityProfile(updatedOriginal)
+            try? trackingStore?.upsertACTAIdentityProfile(splitProfile)
         }
     }
 
     public func runContinuitySweeperIfNeeded(now: Date = Date()) async {
-        let facetsSnapshot: [String: GhostFacetSummary] = lock.withLock {
+        let facetsSnapshot: [String: ACTAFacetSummary] = lock.withLock {
             let elapsed = now.timeIntervalSince(lastContinuitySweepAt)
             guard elapsed >= Self.continuitySweepIntervalSec || cropsSinceLastSweep >= 8 else {
                 return [:]
@@ -795,7 +795,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
 
         let galleries = identityResolver.allGalleries()
         let cannotLinkSet = Set(identityResolver.allCannotLinkPairs().map { "\($0.0)|\($0.1)" })
-        let evalBatch = GhostContinuitySweeper.evaluateGalleries(
+        let evalBatch = ACTAContinuitySweeper.evaluateGalleries(
             galleries: galleries,
             facetsByIdentity: facetsSnapshot,
             existingCannotLinks: cannotLinkSet
@@ -803,10 +803,10 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
 
         for cannotLink in evalBatch.newCannotLinks {
             identityResolver.recordCannotLink(cannotLink.idA, cannotLink.idB)
-            try? trackingStore?.saveGhostDedupDecision(cannotLink, decidedAt: now)
+            try? trackingStore?.saveACTADedupDecision(cannotLink, decidedAt: now)
         }
         for merge in evalBatch.autoMerges {
-            try? trackingStore?.saveGhostDedupDecision(merge, decidedAt: now)
+            try? trackingStore?.saveACTADedupDecision(merge, decidedAt: now)
         }
 
         // Layer C: Text LLM Deduplication for ambiguous pairs
@@ -815,18 +815,18 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                 "Pair (\(a.identityID), \(b.identityID)): A=[\(fA?.summaryText ?? a.displayCode)], B=[\(fB?.summaryText ?? b.displayCode)]"
             }.joined(separator: "\n")
             let lang = aiClient.configuration().preferredLanguage
-            let prompt = GhostPromptLibrary.textDedupPrompt(pairsDescription: lines, language: lang)
+            let prompt = ACTAPromptLibrary.textDedupPrompt(pairsDescription: lines, language: lang)
             let verdict = await aiClient.generateStructured(
                 lane: .background,
                 tier: .nano,
                 taskType: "text_dedup",
                 prompt: prompt,
-                responseType: GhostTextDedupResult.self,
-                fallbackFactory: { GhostTextDedupResult(pairs: []) }
+                responseType: ACTATextDedupResult.self,
+                fallbackFactory: { ACTATextDedupResult(pairs: []) }
             )
             for p in verdict.pairs where !p.sameIdentity && p.confidence >= 0.75 {
                 identityResolver.recordCannotLink(p.idA, p.idB)
-                let decision = GhostSweeperPairDecision(
+                let decision = ACTASweeperPairDecision(
                     idA: p.idA,
                     idB: p.idB,
                     layer: .layerCTextLLM,
@@ -835,12 +835,12 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                     confidence: p.confidence,
                     reason: p.reason
                 )
-                try? trackingStore?.saveGhostDedupDecision(decision, decidedAt: now)
+                try? trackingStore?.saveACTADedupDecision(decision, decidedAt: now)
             }
         }
     }
 
-    // MARK: - Step C: Real-Time 4-Frame Critical Alert Ring + 16-Frame Alert Mentor + Narrative Sampler ("Ghost Memory")
+    // MARK: - Step C: Real-Time 4-Frame Critical Alert Ring + 16-Frame Alert Mentor + Narrative Sampler ("ACTA Memory")
 
     public func offerCameraFrame(
         cameraID: UUID,
@@ -850,7 +850,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
         activeLabels: [String] = [],
         activeTrackIDs: [String] = [],
         activeIdentityIDs: [String] = [],
-        narrativeMode: GhostNarrativeTriggerMode? = nil,
+        narrativeMode: ACTANarrativeTriggerMode? = nil,
         activeAlertRulesDescription: String = "Weapon, Violence, Fallen Person, Perimeter Intrusion, Fire/Smoke",
         evaluateAlerts: Bool = true,
         sampleNarrative: Bool = true,
@@ -858,13 +858,13 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
         now: Date = Date()
     ) async {
         let effectiveLabels = activeLabels.isEmpty ? (hasActiveObjects ? ["person"] : []) : activeLabels
-        let (ringReady, narrativeFlush, prevNarrativeSummary): ([GhostAlertRingFrame]?, (frames: [GhostNarrativeSampledFrame], sightingCount: Int, identityCount: Int)?, String?) = lock.withLock {
-            var rReady: [GhostAlertRingFrame]?
-            var nFlush: (frames: [GhostNarrativeSampledFrame], sightingCount: Int, identityCount: Int)?
+        let (ringReady, narrativeFlush, prevNarrativeSummary): ([ACTAAlertRingFrame]?, (frames: [ACTANarrativeSampledFrame], sightingCount: Int, identityCount: Int)?, String?) = lock.withLock {
+            var rReady: [ACTAAlertRingFrame]?
+            var nFlush: (frames: [ACTANarrativeSampledFrame], sightingCount: Int, identityCount: Int)?
             var pSummary: String?
 
             if evaluateAlerts {
-                var ringState = alertRingsByCamera[cameraID] ?? GhostCameraAlertRingState()
+                var ringState = alertRingsByCamera[cameraID] ?? ACTACameraAlertRingState()
                 if ringState.offerFrame(cgImage, at: now) {
                     rReady = ringState.ringFrames
                 }
@@ -872,7 +872,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             }
 
             if sampleNarrative {
-                var narState = narrativeStatesByCamera[cameraID] ?? GhostCameraNarrativeState()
+                var narState = narrativeStatesByCamera[cameraID] ?? ACTACameraNarrativeState()
                 if let flushed = narState.offerFrame(
                     cgImage,
                     activeLabels: effectiveLabels,
@@ -912,14 +912,14 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
         }
     }
 
-    /// Immediately closes and summarizes the in-progress Ghost Memory chapter for a camera (e.g., on camera stop or operator button).
+    /// Immediately closes and summarizes the in-progress ACTA Memory chapter for a camera (e.g., on camera stop or operator button).
     @discardableResult
     public func forceCloseNarrativeChapter(
         cameraID: UUID,
         cameraName: String,
         retainCollageJPEG: Bool = true
-    ) async -> GhostNarrativeChapterRecord? {
-        let (flushed, prevSummary): ((frames: [GhostNarrativeSampledFrame], sightingCount: Int, identityCount: Int)?, String?) = lock.withLock {
+    ) async -> ACTANarrativeChapterRecord? {
+        let (flushed, prevSummary): ((frames: [ACTANarrativeSampledFrame], sightingCount: Int, identityCount: Int)?, String?) = lock.withLock {
             guard var state = narrativeStatesByCamera[cameraID],
                   let drained = state.forceClose() else {
                 return (nil, nil)
@@ -952,16 +952,16 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
     private func evaluateCriticalAlertRing(
         cameraID: UUID,
         cameraName: String,
-        frames: [GhostAlertRingFrame],
+        frames: [ACTAAlertRingFrame],
         activeRulesDescription: String,
         now: Date
     ) async {
         let cells = frames.enumerated().map { idx, frame in
-            GhostCollageCell(badgeIndex: idx + 1, itemID: "F-\(idx + 1)", cgImage: frame.cgImage)
+            ACTACollageCell(badgeIndex: idx + 1, itemID: "F-\(idx + 1)", cgImage: frame.cgImage)
         }
-        guard let collage = GhostCollageBuilder.buildCollage(kind: .narrative, cells: cells) else { return }
+        guard let collage = ACTACollageBuilder.buildCollage(kind: .narrative, cells: cells) else { return }
         let lang = aiClient.configuration().preferredLanguage
-        let prompt = GhostPromptLibrary.criticalAlertRingPrompt(
+        let prompt = ACTAPromptLibrary.criticalAlertRingPrompt(
             cameraName: cameraName,
             activeRulesDescription: activeRulesDescription,
             language: lang
@@ -974,8 +974,8 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             prompt: prompt,
             jpegImages: [collage.jpegData],
             useContentCache: false,
-            responseType: GhostCriticalAlertBatch.self,
-            fallbackFactory: { GhostCriticalAlertBatch(sceneStatus: "clear", alerts: []) }
+            responseType: ACTACriticalAlertBatch.self,
+            fallbackFactory: { ACTACriticalAlertBatch(sceneStatus: "clear", alerts: []) }
         )
 
         for detection in batch.alerts where detection.triggered && detection.confidence >= 0.65 {
@@ -1012,22 +1012,22 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
         alertID: String,
         cameraID: UUID,
         cameraName: String,
-        detection: GhostCriticalAlertDetection
-    ) async -> GhostAlertMentorBrief? {
-        let lookbackFrames: [GhostAlertRingFrame] = lock.withLock {
+        detection: ACTACriticalAlertDetection
+    ) async -> ACTAAlertMentorBrief? {
+        let lookbackFrames: [ACTAAlertRingFrame] = lock.withLock {
             alertRingsByCamera[cameraID]?.lookbackFrames ?? []
         }
         guard !lookbackFrames.isEmpty else { return nil }
 
         let cells = lookbackFrames.enumerated().map { idx, f in
-            GhostCollageCell(badgeIndex: idx + 1, itemID: "LB-\(idx + 1)", cgImage: f.cgImage)
+            ACTACollageCell(badgeIndex: idx + 1, itemID: "LB-\(idx + 1)", cgImage: f.cgImage)
         }
-        guard let collage = GhostCollageBuilder.buildCollage(kind: .narrative, cells: cells) else {
+        guard let collage = ACTACollageBuilder.buildCollage(kind: .narrative, cells: cells) else {
             return nil
         }
 
         let lang = aiClient.configuration().preferredLanguage
-        let prompt = GhostPromptLibrary.alertMentorPrompt(
+        let prompt = ACTAPromptLibrary.alertMentorPrompt(
             alertID: alertID,
             cameraName: cameraName,
             initialAlertTitle: detection.title,
@@ -1040,9 +1040,9 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             taskType: "alert_mentor",
             prompt: prompt,
             jpegImages: [collage.jpegData],
-            responseType: GhostAlertMentorBrief.self,
+            responseType: ACTAAlertMentorBrief.self,
             fallbackFactory: {
-                GhostAlertMentorBrief(
+                ACTAAlertMentorBrief(
                     alertID: alertID,
                     confirmedThreat: true,
                     tacticalHeadline: detection.title,
@@ -1053,7 +1053,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                 )
             }
         )
-        try? trackingStore?.saveGhostAlertMentorBrief(cameraID: cameraID, brief: brief)
+        try? trackingStore?.saveACTAAlertMentorBrief(cameraID: cameraID, brief: brief)
         return brief
     }
 
@@ -1061,30 +1061,30 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
     private func flushNarrativeChapter(
         cameraID: UUID,
         cameraName: String,
-        sampledFrames: [GhostNarrativeSampledFrame],
+        sampledFrames: [ACTANarrativeSampledFrame],
         sightingCount: Int,
         identityCount: Int,
         previousSummary: String?,
         retainCollageJPEG: Bool = true
-    ) async -> GhostNarrativeChapterRecord? {
+    ) async -> ACTANarrativeChapterRecord? {
         guard let startedAt = sampledFrames.first?.capturedAt,
               let endedAt = sampledFrames.last?.capturedAt else { return nil }
-        let thinned = GhostNarrativeSamplerRules.thinFrames(sampledFrames, maxFrames: GhostCameraNarrativeState.flushFrameThreshold)
+        let thinned = ACTANarrativeSamplerRules.thinFrames(sampledFrames, maxFrames: ACTACameraNarrativeState.flushFrameThreshold)
         let cells = thinned.enumerated().map { idx, f in
-            GhostCollageCell(badgeIndex: idx + 1, itemID: "N-\(idx + 1)", cgImage: f.cgImage)
+            ACTACollageCell(badgeIndex: idx + 1, itemID: "N-\(idx + 1)", cgImage: f.cgImage)
         }
-        guard let collage = GhostCollageBuilder.buildCollage(kind: .narrative, cells: cells) else { return nil }
+        guard let collage = ACTACollageBuilder.buildCollage(kind: .narrative, cells: cells) else { return nil }
 
         // If previousSummary is nil in RAM (e.g. after app restart), fetch the latest chapter for this camera from SQLite
         let effectivePreviousSummary: String? = previousSummary ?? {
-            guard let latest = try? trackingStore?.loadGhostNarrativeChapterRecords(cameraID: cameraID, limit: 1).first else {
+            guard let latest = try? trackingStore?.loadACTANarrativeChapterRecords(cameraID: cameraID, limit: 1).first else {
                 return nil
             }
             return latest.effectiveSummary
         }()
 
         let lang = aiClient.configuration().preferredLanguage
-        let prompt = GhostPromptLibrary.narrativeChapterPrompt(
+        let prompt = ACTAPromptLibrary.narrativeChapterPrompt(
             cameraName: cameraName,
             frameCount: thinned.count,
             previousChapterSummary: effectivePreviousSummary,
@@ -1097,10 +1097,10 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             taskType: "narrative_chapter",
             prompt: prompt,
             jpegImages: [collage.jpegData],
-            responseType: GhostTemporalNarrativeResult.self,
+            responseType: ACTATemporalNarrativeResult.self,
             fallbackFactory: {
                 let deltaText = effectivePreviousSummary.map { "Без существенных отклонений от предыдущей главы (\($0.prefix(40)))." }
-                return GhostTemporalNarrativeResult(
+                return ACTATemporalNarrativeResult(
                     chapterTitle: "\(cameraName) — Штатная обстановка",
                     summary: "Зафиксировано \(thinned.count) ключевых кадров, объектов: \(max(sightingCount, identityCount)). Движение в пределах нормы.",
                     deltaFromPrevious: deltaText,
@@ -1114,7 +1114,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             narrativeStatesByCamera[cameraID]?.lastChapterSummary = chapter.summary
         }
 
-        let record = GhostNarrativeChapterRecord(
+        let record = ACTANarrativeChapterRecord(
             chapterID: UUID().uuidString,
             cameraID: cameraID,
             cameraName: cameraName,
@@ -1130,7 +1130,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             identityCount: identityCount,
             collagePath: nil
         )
-        try? trackingStore?.saveGhostNarrativeChapterRecord(
+        try? trackingStore?.saveACTANarrativeChapterRecord(
             record,
             collageJPEG: retainCollageJPEG ? collage.jpegData : nil
         )
@@ -1139,7 +1139,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
 
     // MARK: - Step D: Spoken Briefing Service (18s Priority Feed)
 
-    public func generateSpokenBriefingIfDue(now: Date = Date()) async -> GhostHCCard? {
+    public func generateSpokenBriefingIfDue(now: Date = Date()) async -> ACTAHCCard? {
         let contextToAnnounce: (text: String, urgency: String)? = lock.withLock {
             guard now.timeIntervalSince(lastSpokenBriefingAt) >= Self.spokenBriefingIntervalSec else {
                 return nil
@@ -1161,7 +1161,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
 
         guard let contextToAnnounce else { return nil }
         let lang = aiClient.configuration().preferredLanguage
-        let prompt = GhostPromptLibrary.spokenBriefingCardPrompt(
+        let prompt = ACTAPromptLibrary.spokenBriefingCardPrompt(
             eventContext: contextToAnnounce.text,
             language: lang
         )
@@ -1170,10 +1170,10 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             tier: .nano,
             taskType: "spoken_briefing",
             prompt: prompt,
-            responseType: GhostHCCard.self,
+            responseType: ACTAHCCard.self,
             fallbackFactory: {
-                GhostHCCard(
-                    spokenLine: GhostOpSec.sanitizeText(contextToAnnounce.text),
+                ACTAHCCard(
+                    spokenLine: ACTAOpSec.sanitizeText(contextToAnnounce.text),
                     badgeLabel: contextToAnnounce.urgency.uppercased(),
                     urgency: contextToAnnounce.urgency
                 )
@@ -1194,18 +1194,18 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
     public static let presentAnswerToolName = "present_answer"
 
     /// Tool catalog exposed to the model; the model decides which ones to call.
-    public static let agentTools: [GhostAgentToolSpec] = {
+    public static let agentTools: [ACTAAgentToolSpec] = {
         let timeHint = "ISO-8601 timestamp with offset (e.g. 2026-05-01T14:00:00+03:00) or relative like -2h, -30m, -1d"
         let cameraHint = "Camera name or camera UUID"
-        var tools: [GhostAgentToolSpec] = [
+        var tools: [ACTAAgentToolSpec] = [
             .object(
                 name: "get_timeline",
-                description: "Chronological merged timeline (ascending) of Ghost Memory narrative chapters, archived memory frames and critical alerts in a time window. Default window: last 24h.",
+                description: "Chronological merged timeline (ascending) of ACTA Memory narrative chapters, archived memory frames and critical alerts in a time window. Default window: last 24h.",
                 properties: [("since", "string", timeHint), ("until", "string", timeHint), ("camera", "string", cameraHint), ("limit", "integer", "Max entries (default 60)")]
             ),
             .object(
                 name: "list_narrative_chapters",
-                description: "Lists Ghost Memory narrative chapters (what happened on a camera during a period) in chronological order with titles and summaries.",
+                description: "Lists ACTA Memory narrative chapters (what happened on a camera during a period) in chronological order with titles and summaries.",
                 properties: [("camera", "string", cameraHint), ("since", "string", timeHint), ("until", "string", timeHint), ("limit", "integer", "Max chapters (default 12)"), ("pinned_only", "boolean", "Only operator pinned/marked chapters")]
             ),
             .object(
@@ -1303,13 +1303,13 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             ),
             .object(
                 name: "run_readonly_sql",
-                description: "Read-only SELECT over the Ghost knowledge & tracking SQLite tables (`tracked_objects`, `operator_identity_groups`, `automatic_camera_scans`, `ghost_identity_dossiers`, `ghost_attribute_index`, `ghost_visits`, `ghost_narrative_chapters`, `ghost_alert_mentor_briefs`, `ghost_camera_links`, `ghost_vehicle_registry_cache`).",
+                description: "Read-only SELECT over the ACTA knowledge & tracking SQLite tables (`tracked_objects`, `operator_identity_groups`, `automatic_camera_scans`, `ghost_identity_dossiers`, `ghost_attribute_index`, `ghost_visits`, `ghost_narrative_chapters`, `ghost_alert_mentor_briefs`, `ghost_camera_links`, `ghost_vehicle_registry_cache`).",
                 properties: [("sql", "string", "A single SELECT statement")],
                 required: ["sql"]
             )
         ]
         tools.append(
-            GhostAgentToolSpec(
+            ACTAAgentToolSpec(
                 name: presentAnswerToolName,
                 description: "Terminal tool: presents the final answer to the operator. Call exactly once when you are done.",
                 parametersSchemaJSON: """
@@ -1373,7 +1373,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
         return (nil, raw)
     }
 
-    private func agentChapterSummary(_ record: GhostNarrativeChapterRecord) -> [String: Any] {
+    private func agentChapterSummary(_ record: ACTANarrativeChapterRecord) -> [String: Any] {
         [
             "chapter_id": record.chapterID,
             "camera_id": record.cameraID.uuidString,
@@ -1408,7 +1408,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
         arguments: [String: String] = [:],
         threadID: String = "default",
         liveCameraImages: [Data] = [],
-        liveFrames: [GhostLiveCameraFrame] = [],
+        liveFrames: [ACTALiveCameraFrame] = [],
         cameraNames: [UUID: String] = [:],
         now: Date = Date()
     ) async -> (outputJSON: String, resultRows: Int, savedClipID: String?, attachedImages: [Data]) {
@@ -1419,7 +1419,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
         var attachedImages: [Data] = []
         var errorMsg: String?
 
-        let allLiveFrames = liveFrames + liveCameraImages.map { GhostLiveCameraFrame(cameraID: nil, cameraName: "live", jpegData: $0) }
+        let allLiveFrames = liveFrames + liveCameraImages.map { ACTALiveCameraFrame(cameraID: nil, cameraName: "live", jpegData: $0) }
         let camera = Self.resolveAgentCamera(arguments["camera"] ?? arguments["camera_id"], cameraNames: cameraNames)
         let knowledgeCameraID = camera.uuid?.uuidString ?? camera.raw
         let since = Self.parseAgentTime(arguments["since"], now: now)
@@ -1438,7 +1438,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                 for key in ["upper_color", "lower_color", "vehicle_color", "color", "sex", "age_group", "upper_wear", "lower_wear", "headwear", "bag", "make", "model", "plate_number"] {
                     if let v = arguments[key], !v.isEmpty { facets[key] = v }
                 }
-                let matches = (try trackingStore?.searchGhostIdentitiesByAttributes(
+                let matches = (try trackingStore?.searchACTAIdentitiesByAttributes(
                     kind: arguments["kind"],
                     facets: facets,
                     freeTextQuery: arguments["query"],
@@ -1452,7 +1452,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
 
             case "get_identity_dossier":
                 let id = arguments["identity_id"] ?? ""
-                if let d = try trackingStore?.getGhostIdentityDossier(identityID: id) {
+                if let d = try trackingStore?.getACTAIdentityDossier(identityID: id) {
                     rowsCount = 1
                     outputDict["dossier"] = [
                         "identity_id": d.identityID,
@@ -1468,7 +1468,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
 
             case "get_identity_route":
                 let id = arguments["identity_id"] ?? ""
-                if let route = try trackingStore?.getGhostIdentityRoute(identityID: id, topology: identityResolver.currentTopology()) {
+                if let route = try trackingStore?.getACTAIdentityRoute(identityID: id, topology: identityResolver.currentTopology()) {
                     rowsCount = route.legs.count
                     outputDict["ordered_cameras"] = route.orderedCameras
                     outputDict["sightings_count"] = route.sightingsCount
@@ -1498,7 +1498,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                 outputDict["present"] = present.map { ["identity_id": $0.identityID, "summary": $0.summaryLine] }
 
             case "list_visits":
-                let visits = (try trackingStore?.listGhostVisits(
+                let visits = (try trackingStore?.listACTAVisits(
                     identityID: arguments["identity_id"],
                     cameraID: knowledgeCameraID,
                     limit: intArg("limit", 25, 1...200)
@@ -1516,7 +1516,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
 
             case "find_companions":
                 let id = arguments["identity_id"] ?? ""
-                let companions = (try trackingStore?.findGhostCompanions(identityID: id)) ?? []
+                let companions = (try trackingStore?.findACTACompanions(identityID: id)) ?? []
                 rowsCount = companions.count
                 outputDict["companions"] = companions.map {
                     [
@@ -1529,7 +1529,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             case "list_narrative_chapters", "get_channel_narrative":
                 let limit = intArg("limit", 12, 1...50)
                 let pinnedOnly = arguments["pinned_only"] == "true"
-                var chapters = (try trackingStore?.loadGhostNarrativeChapterRecords(
+                var chapters = (try trackingStore?.loadACTANarrativeChapterRecords(
                     cameraID: camera.uuid,
                     since: since,
                     until: until,
@@ -1543,7 +1543,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
 
             case "get_narrative_chapter":
                 let chapterID = arguments["chapter_id"] ?? ""
-                if let record = try trackingStore?.loadGhostNarrativeChapterRecord(chapterID: chapterID) {
+                if let record = try trackingStore?.loadACTANarrativeChapterRecord(chapterID: chapterID) {
                     rowsCount = 1
                     var dict = agentChapterSummary(record)
                     dict["frame_count"] = record.frameCount
@@ -1560,7 +1560,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                         ]
                     }
                     if arguments["include_collage"] != "false",
-                       let collage = trackingStore?.ghostNarrativeCollageData(for: record) {
+                       let collage = trackingStore?.actaNarrativeCollageData(for: record) {
                         attachedImages.append(collage)
                         dict["collage_attached"] = true
                     }
@@ -1616,7 +1616,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                 let windowEnd = until ?? now
                 let windowStart = since ?? windowEnd.addingTimeInterval(-86_400)
                 var entries: [(Date, [String: Any])] = []
-                let chapters = (try trackingStore?.loadGhostNarrativeChapterRecords(
+                let chapters = (try trackingStore?.loadACTANarrativeChapterRecords(
                     cameraID: camera.uuid, since: windowStart, until: windowEnd, limit: 150
                 )) ?? []
                 for chapter in chapters {
@@ -1649,7 +1649,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                         "confirmed": alert.mentorBrief?.confirmedThreat ?? true
                     ]))
                 }
-                let persistedBriefs = (try? trackingStore?.loadGhostAlertMentorBriefs(
+                let persistedBriefs = (try? trackingStore?.loadACTAAlertMentorBriefs(
                     cameraID: camera.uuid, since: windowStart, until: windowEnd, limit: 50
                 )) ?? []
                 for row in persistedBriefs {
@@ -1740,7 +1740,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                         "confirmed": item.mentorBrief?.confirmedThreat ?? true
                     ]))
                 }
-                let persistedBriefs = (try? trackingStore?.loadGhostAlertMentorBriefs(
+                let persistedBriefs = (try? trackingStore?.loadACTAAlertMentorBriefs(
                     cameraID: camera.uuid, since: since, until: until, limit: limit
                 )) ?? []
                 for row in persistedBriefs {
@@ -1797,7 +1797,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                         .components(separatedBy: CharacterSet.alphanumerics.inverted)
                         .filter { $0.count >= 2 }
                 }()
-                let expandedQueryTokens = queryRaw.isEmpty ? Set<String>() : GhostLexicon.expandQueryTerms(queryRaw)
+                let expandedQueryTokens = queryRaw.isEmpty ? Set<String>() : ACTALexicon.expandQueryTerms(queryRaw)
 
                 let allTracks = (try trackingStore?.recentTracks(limit: 500)) ?? []
                 var matchedTrackDicts: [[String: Any]] = []
@@ -1832,7 +1832,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                     if !queryTokens.isEmpty {
                         let matchedDirect = queryTokens.allSatisfy { tok in
                             searchable.contains(tok)
-                                || (GhostColorNormalizer.normalizeColorToken(tok).map { searchable.contains($0) } ?? false)
+                                || (ACTAColorNormalizer.normalizeColorToken(tok).map { searchable.contains($0) } ?? false)
                         }
                         let matchedExpanded = !expandedQueryTokens.isEmpty && expandedQueryTokens.contains { searchable.contains($0) }
                         if !matchedDirect && !matchedExpanded { continue }
@@ -1928,7 +1928,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                             "has_clip": alert.clipID != nil
                         ]
                     }
-                    let mentorBriefs = (try? trackingStore?.loadGhostAlertMentorBriefs(
+                    let mentorBriefs = (try? trackingStore?.loadACTAAlertMentorBriefs(
                         cameraID: camera.uuid, since: since, until: until, limit: limit
                     )) ?? []
                     let mentorDicts: [[String: Any]] = mentorBriefs.map { row in
@@ -2031,7 +2031,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                     if let uuid = camera.uuid, frame.cameraID == uuid { return true }
                     return frame.cameraName.lowercased().contains((camera.raw ?? "").lowercased())
                 }
-                let recentChapters = (try? trackingStore?.loadGhostNarrativeChapterRecords(cameraID: camera.uuid, limit: 3)) ?? []
+                let recentChapters = (try? trackingStore?.loadACTANarrativeChapterRecords(cameraID: camera.uuid, limit: 3)) ?? []
                 let historyBlock = recentChapters.map { "[\($0.cameraName)] \($0.effectiveSummary)" }.joined(separator: " | ")
                 let visualHit = !selected.isEmpty || (arguments["force_hit"] == "true")
                 let conf = visualHit ? 0.86 : 0.40
@@ -2045,7 +2045,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                 attachedImages.append(contentsOf: selected.prefix(4).map(\.jpegData))
                 rowsCount = 1
                 if visualHit && conf >= 0.55, let firstFrame = selected.first, let store = trackingStore {
-                    if let clip = try? store.saveGhostChatClip(
+                    if let clip = try? store.saveACTAChatClip(
                         threadID: threadID,
                         cameraID: firstFrame.cameraID?.uuidString ?? (camera.raw ?? "live"),
                         clipData: firstFrame.jpegData,
@@ -2059,7 +2059,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
 
             case "run_readonly_sql":
                 let sql = arguments["sql"] ?? "SELECT identity_id, summary_line FROM ghost_identity_dossiers LIMIT 10"
-                let rows = (try trackingStore?.executeReadOnlyGhostSQL(sql)) ?? []
+                let rows = (try trackingStore?.executeReadOnlyACTASQL(sql)) ?? []
                 rowsCount = rows.count
                 outputDict["rows"] = rows
 
@@ -2077,8 +2077,8 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
         let outputData = (try? JSONSerialization.data(withJSONObject: outputDict)) ?? Data("{}".utf8)
         let outputJSON = String(data: outputData, encoding: .utf8) ?? "{}"
 
-        try? trackingStore?.recordGhostToolCallAudit(
-            GhostToolCallAuditRecord(
+        try? trackingStore?.recordACTAToolCallAudit(
+            ACTAToolCallAuditRecord(
                 threadID: threadID,
                 toolName: toolName,
                 argsJSON: argsJSON,
@@ -2095,33 +2095,33 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
     /// Tool-calling research agent: the model picks tools each step until it calls `present_answer`.
     /// OpenAI turns are chained with the real Responses `id`; the terminal `present_answer` call is
     /// recorded as owed `function_call_output` debt and settled at the start of the next turn.
-    public func askGhostChatAgent(
+    public func askACTAChatAgent(
         question: String,
         threadID: String = "default",
         focusedIdentityID: String? = nil,
         liveCameraImages: [Data] = [],
-        liveFrames: [GhostLiveCameraFrame] = [],
+        liveFrames: [ACTALiveCameraFrame] = [],
         cameraNames: [UUID: String] = [:],
         maxSteps: Int = 6,
         onProgress: (@Sendable (String) -> Void)? = nil,
         now: Date = Date()
-    ) async -> GhostChatPresentAnswer {
-        let strippedQuestion = GhostOpSec.stripPersona(question)
-        let detectedLang = GhostPromptLanguage.detect(
+    ) async -> ACTAChatPresentAnswer {
+        let strippedQuestion = ACTAOpSec.stripPersona(question)
+        let detectedLang = ACTAPromptLanguage.detect(
             from: strippedQuestion,
             fallback: aiClient.configuration().preferredLanguage
         )
-        let expandedTerms = GhostLexicon.expandQueryTerms(strippedQuestion)
-        let allLiveFrames = liveFrames + liveCameraImages.map { GhostLiveCameraFrame(cameraID: nil, cameraName: "live", jpegData: $0) }
+        let expandedTerms = ACTALexicon.expandQueryTerms(strippedQuestion)
+        let allLiveFrames = liveFrames + liveCameraImages.map { ACTALiveCameraFrame(cameraID: nil, cameraName: "live", jpegData: $0) }
 
         // 1. Ensure thread exists, record user message, and push explicit focus if supplied
-        _ = try? trackingStore?.ensureGhostChatThread(
+        _ = try? trackingStore?.ensureACTAChatThread(
             threadID: threadID,
             title: String(strippedQuestion.prefix(60)),
             now: now
         )
-        _ = try? trackingStore?.appendGhostChatMessage(
-            GhostChatMessageRecord(
+        _ = try? trackingStore?.appendACTAChatMessage(
+            ACTAChatMessageRecord(
                 threadID: threadID,
                 role: "user",
                 text: strippedQuestion,
@@ -2129,7 +2129,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             )
         )
         if let focusedIdentityID, !focusedIdentityID.isEmpty {
-            try? trackingStore?.pushGhostThreadFocus(
+            try? trackingStore?.pushACTAThreadFocus(
                 threadID: threadID,
                 kind: "identity",
                 refID: focusedIdentityID,
@@ -2139,16 +2139,16 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
         }
 
         // 2. Read (without consuming) the chain head and owed outputs; they are replaced only after a successful turn.
-        let storedThread = (try? trackingStore?.loadGhostChatThread(threadID: threadID)) ?? nil
+        let storedThread = (try? trackingStore?.loadACTAChatThread(threadID: threadID)) ?? nil
         var chainHead: String? = storedThread?.lastResponseID
-        let debtItems: [GhostAgentItem] = (storedThread?.pendingOutputs ?? []).map {
+        let debtItems: [ACTAAgentItem] = (storedThread?.pendingOutputs ?? []).map {
             .functionOutput(callID: $0.callID, output: $0.outputJSON)
         }
 
         // 3. Focus block, prior conversation (sent only when the server-side chain is unavailable)
-        let focusBlock = (try? trackingStore?.loadGhostThreadFocusBlock(threadID: threadID, limit: 6)) ?? ""
-        let priorMessages = (try? trackingStore?.loadGhostChatMessages(threadID: threadID)) ?? []
-        let history: [GhostAgentItem] = priorMessages.dropLast().suffix(12).map { message in
+        let focusBlock = (try? trackingStore?.loadACTAThreadFocusBlock(threadID: threadID, limit: 6)) ?? ""
+        let priorMessages = (try? trackingStore?.loadACTAChatMessages(threadID: threadID)) ?? []
+        let history: [ACTAAgentItem] = priorMessages.dropLast().suffix(12).map { message in
             message.role == "assistant" ? .assistantText(message.text) : .user(text: message.text, images: [])
         }
 
@@ -2157,7 +2157,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             return "- \(name) (id=\(id.uuidString))\(live)"
         }.joined(separator: "\n")
         let instructions = """
-        \(GhostPromptLibrary.ghostChatSystemPrompt(language: detectedLang))
+        \(ACTAPromptLibrary.actaChatSystemPrompt(language: detectedLang))
 
         Current local time: \(Self.agentISO(now)) (\(TimeZone.current.identifier)).
         Cameras:
@@ -2167,15 +2167,15 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
         Expanded multilingual search terms for this question: \(Array(expandedTerms).sorted().prefix(16).joined(separator: ", "))
         """
 
-        let focusEntries = (try? trackingStore?.loadGhostThreadFocusEntries(threadID: threadID, limit: 6)) ?? []
+        let focusEntries = (try? trackingStore?.loadACTAThreadFocusEntries(threadID: threadID, limit: 6)) ?? []
         let galleries = identityResolver.allGalleries().sorted { $0.lastSeenAt > $1.lastSeenAt }
-        let dossiers = (try? trackingStore?.loadAllGhostIdentityDossiers()) ?? []
-        let recentChapters = (try? trackingStore?.loadGhostNarrativeChapterRecords(limit: 5)) ?? []
+        let dossiers = (try? trackingStore?.loadAllACTAIdentityDossiers()) ?? []
+        let recentChapters = (try? trackingStore?.loadACTANarrativeChapterRecords(limit: 5)) ?? []
         let recentMemFrames = (try? loadAgentMemoryFrames(cameraID: nil, since: nil, until: nil, now: now)) ?? []
         let recentTracks = (try? trackingStore?.recentTracks(limit: 10)) ?? []
         let recentScans = (try? trackingStore?.automaticScans(limit: 5, now: max(now, Date()))) ?? []
         let opSnapshot = currentOperationalMemorySnapshot()
-        let fallbackAnswer: () -> GhostChatPresentAnswer = {
+        let fallbackAnswer: () -> ACTAChatPresentAnswer = {
             let topCode = focusEntries.first?.refID ?? dossiers.first?.identityID ?? galleries.first?.displayCode ?? "N/A"
             var citedIDs: [String] = []
             if topCode != "N/A" { citedIDs.append(topCode) }
@@ -2213,7 +2213,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             case .en:
                 fallbackText = "Analyzed \(totalDossiers) identity dossiers, chronological memory (\(recentChapters.count) chapters, \(recentMemFrames.count) archived frames), track history (\(recentTracks.count) tracks, \(recentScans.count) scans), and operational events (alerts: \(opAlertsCount), ISAPI: \(isapiCount), mission runs: \(missionRunsCount)). Investigation focus: `\(topCode)`.\(chapterSnippet)\(frameSnippet)\(trackSnippet)"
             }
-            return GhostChatPresentAnswer(
+            return ACTAChatPresentAnswer(
                 answerMarkdown: fallbackText,
                 citedIdentityIDs: citedIDs,
                 citedCameraIDs: citedCams,
@@ -2223,21 +2223,21 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
 
         // 4. Agent loop
         let isOffline = aiClient.configuration().mode == .dryRun
-        var turnItems: [GhostAgentItem] = [.user(text: strippedQuestion, images: [])]
+        var turnItems: [ACTAAgentItem] = [.user(text: strippedQuestion, images: [])]
         var serverKnownCount = 0
         var debtSettled = false
-        var pinnedBackend: GhostAgentBackend?
-        var modelAnswer: GhostChatPresentAnswer?
-        var finalCalls: [GhostAgentFunctionCall] = []
+        var pinnedBackend: ACTAAgentBackend?
+        var modelAnswer: ACTAChatPresentAnswer?
+        var finalCalls: [ACTAAgentFunctionCall] = []
         var finalResponseID: String?
-        var finalBackend: GhostAgentBackend?
+        var finalBackend: ACTAAgentBackend?
         var liveLookClipID: String?
         let stepBudget = max(1, maxSteps)
 
         stepLoop: for step in 0..<stepBudget {
             let isLastStep = step == stepBudget - 1
-            func makeRequest(previous: String?) -> GhostAgentRequest {
-                GhostAgentRequest(
+            func makeRequest(previous: String?) -> ACTAAgentRequest {
+                ACTAAgentRequest(
                     tier: .full,
                     instructions: instructions,
                     fullInput: history + turnItems,
@@ -2248,13 +2248,13 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                 )
             }
 
-            let result: GhostAgentTurnResult
+            let result: ACTAAgentTurnResult
             if isOffline {
                 result = offlineAgentStep(step: step, question: strippedQuestion, hasLiveFrames: !allLiveFrames.isEmpty, fallback: fallbackAnswer)
             } else {
                 do {
                     result = try await aiClient.runAgentStep(lane: .chat, request: makeRequest(previous: chainHead), pinnedBackend: pinnedBackend)
-                } catch GhostAgentError.chainRejected {
+                } catch ACTAAgentError.chainRejected {
                     chainHead = nil
                     serverKnownCount = 0
                     guard let retried = try? await aiClient.runAgentStep(lane: .chat, request: makeRequest(previous: nil), pinnedBackend: pinnedBackend) else {
@@ -2278,12 +2278,12 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             if let text = result.text, !text.isEmpty, !result.functionCalls.isEmpty {
                 turnItems.append(.assistantText(text))
             }
-            turnItems.append(contentsOf: result.functionCalls.map(GhostAgentItem.functionCall))
+            turnItems.append(contentsOf: result.functionCalls.map(ACTAAgentItem.functionCall))
             serverKnownCount = turnItems.count
 
             if let terminal = result.functionCalls.first(where: { $0.name == Self.presentAnswerToolName }) {
-                modelAnswer = (try? JSONDecoder().decode(GhostChatPresentAnswer.self, from: Data(terminal.argumentsJSON.utf8)))
-                    ?? result.text.map { GhostChatPresentAnswer(answerMarkdown: $0, confidence: 0.6) }
+                modelAnswer = (try? JSONDecoder().decode(ACTAChatPresentAnswer.self, from: Data(terminal.argumentsJSON.utf8)))
+                    ?? result.text.map { ACTAChatPresentAnswer(answerMarkdown: $0, confidence: 0.6) }
                     ?? fallbackAnswer()
                 finalCalls = result.functionCalls
                 finalResponseID = result.responseID
@@ -2291,7 +2291,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             }
             if result.functionCalls.isEmpty {
                 if let text = result.text, !text.isEmpty {
-                    modelAnswer = GhostChatPresentAnswer(answerMarkdown: text, confidence: 0.7)
+                    modelAnswer = ACTAChatPresentAnswer(answerMarkdown: text, confidence: 0.7)
                     finalResponseID = result.responseID
                 }
                 break stepLoop
@@ -2320,11 +2320,11 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             }
         }
 
-        let sanitized = GhostOpSec.sanitizeAnswer(modelAnswer ?? fallbackAnswer())
+        let sanitized = ACTAOpSec.sanitizeAnswer(modelAnswer ?? fallbackAnswer())
 
         // 5. Auto-update thread focus with cited identities and bind cited cameras
         for citedID in sanitized.citedIdentityIDs {
-            try? trackingStore?.pushGhostThreadFocus(
+            try? trackingStore?.pushACTAThreadFocus(
                 threadID: threadID,
                 kind: "identity",
                 refID: citedID,
@@ -2332,7 +2332,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
             )
         }
         if !sanitized.citedCameraIDs.isEmpty {
-            try? trackingStore?.bindGhostThreadCameras(
+            try? trackingStore?.bindACTAThreadCameras(
                 threadID: threadID,
                 cameraIDs: sanitized.citedCameraIDs,
                 now: now
@@ -2341,8 +2341,8 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
 
         // 6. Save proposed operator actions (`ghost_chat_actions`)
         for action in sanitized.proposedActions {
-            try? trackingStore?.saveGhostChatAction(
-                GhostChatActionRecord(
+            try? trackingStore?.saveACTAChatAction(
+                ACTAChatActionRecord(
                     actionID: action.actionID,
                     threadID: threadID,
                     actionType: action.actionType,
@@ -2356,8 +2356,8 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
 
         // 7. Persist assistant message; chain only on a real Responses API id (or deterministic offline response id), owing outputs for every call in it.
         let presentCall = finalCalls.first { $0.name == Self.presentAnswerToolName }
-        _ = try? trackingStore?.appendGhostChatMessage(
-            GhostChatMessageRecord(
+        _ = try? trackingStore?.appendACTAChatMessage(
+            ACTAChatMessageRecord(
                 threadID: threadID,
                 role: "assistant",
                 text: sanitized.answerMarkdown,
@@ -2369,14 +2369,14 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
         )
         if modelAnswer != nil, (finalBackend == .openAI || finalBackend == .offline), let finalResponseID {
             let debt = finalCalls.map { call in
-                GhostPendingOutputDebt(
+                ACTAPendingOutputDebt(
                     callID: call.callID,
                     outputJSON: call.name == Self.presentAnswerToolName ? "{\"status\":\"presented\"}" : "{\"status\":\"skipped\"}"
                 )
             }
-            try? trackingStore?.setGhostThreadChainHead(threadID: threadID, lastResponseID: finalResponseID, pendingOutputs: debt, now: now)
+            try? trackingStore?.setACTAThreadChainHead(threadID: threadID, lastResponseID: finalResponseID, pendingOutputs: debt, now: now)
         } else {
-            try? trackingStore?.setGhostThreadChainHead(threadID: threadID, lastResponseID: nil, pendingOutputs: [], now: now)
+            try? trackingStore?.setACTAThreadChainHead(threadID: threadID, lastResponseID: nil, pendingOutputs: [], now: now)
         }
 
         return sanitized
@@ -2387,11 +2387,11 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
         step: Int,
         question: String,
         hasLiveFrames: Bool,
-        fallback: () -> GhostChatPresentAnswer
-    ) -> GhostAgentTurnResult {
-        func call(_ name: String, _ args: [String: Any]) -> GhostAgentFunctionCall {
+        fallback: () -> ACTAChatPresentAnswer
+    ) -> ACTAAgentTurnResult {
+        func call(_ name: String, _ args: [String: Any]) -> ACTAAgentFunctionCall {
             let data = (try? JSONSerialization.data(withJSONObject: args)) ?? Data("{}".utf8)
-            return GhostAgentFunctionCall(callID: "call_offline_\(step)_\(name)", name: name, argumentsJSON: String(decoding: data, as: UTF8.self))
+            return ACTAAgentFunctionCall(callID: "call_offline_\(step)_\(name)", name: name, argumentsJSON: String(decoding: data, as: UTF8.self))
         }
         if step == 0 {
             var calls = [
@@ -2401,25 +2401,25 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                 call("get_operational_events", ["limit": 15])
             ]
             if hasLiveFrames { calls.append(call("live_look", [:])) }
-            return GhostAgentTurnResult(responseID: "resp_offline_0", text: nil, functionCalls: calls, backend: .offline)
+            return ACTAAgentTurnResult(responseID: "resp_offline_0", text: nil, functionCalls: calls, backend: .offline)
         }
         let answerJSON = (try? JSONEncoder().encode(fallback())).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
-        return GhostAgentTurnResult(
+        return ACTAAgentTurnResult(
             responseID: "resp_offline_\(step)",
             text: nil,
-            functionCalls: [GhostAgentFunctionCall(callID: "call_offline_present", name: Self.presentAnswerToolName, argumentsJSON: answerJSON)],
+            functionCalls: [ACTAAgentFunctionCall(callID: "call_offline_present", name: Self.presentAnswerToolName, argumentsJSON: answerJSON)],
             backend: .offline
         )
     }
 
-    /// Confirms or rejects a proposed `GhostChatActionRecord` and executes the mutation if confirmed.
+    /// Confirms or rejects a proposed `ACTAChatActionRecord` and executes the mutation if confirmed.
     @discardableResult
     public func reviewAndExecuteChatAction(
         actionID: String,
         confirmed: Bool,
         now: Date = Date()
-    ) -> GhostChatActionRecord? {
-        guard let updated = try? trackingStore?.resolveGhostChatAction(actionID: actionID, confirmed: confirmed, now: now) else {
+    ) -> ACTAChatActionRecord? {
+        guard let updated = try? trackingStore?.resolveACTAChatAction(actionID: actionID, confirmed: confirmed, now: now) else {
             return nil
         }
         guard confirmed else { return updated }
@@ -2431,10 +2431,10 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                 if var profile = identityResolver.gallery(for: id) ?? identityResolver.allGalleries().first(where: { $0.displayCode == id }) {
                     profile.displayName = newName
                     identityResolver.upsertGallery(profile)
-                    try? trackingStore?.upsertGhostIdentityProfile(profile)
-                    _ = try? trackingStore?.rebuildGhostIdentityDossier(identityID: profile.identityID, displayName: newName, kind: profile.kind, now: now)
+                    try? trackingStore?.upsertACTAIdentityProfile(profile)
+                    _ = try? trackingStore?.rebuildACTAIdentityDossier(identityID: profile.identityID, displayName: newName, kind: profile.kind, now: now)
                 } else {
-                    _ = try? trackingStore?.rebuildGhostIdentityDossier(identityID: id, displayName: newName, now: now)
+                    _ = try? trackingStore?.rebuildACTAIdentityDossier(identityID: id, displayName: newName, now: now)
                 }
             }
 
@@ -2447,8 +2447,8 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                 targetProf.memberTrackKeys.formUnion(sourceProf.memberTrackKeys)
                 identityResolver.upsertGallery(targetProf)
                 identityResolver.removeGallery(identityID: sourceID)
-                try? trackingStore?.upsertGhostIdentityProfile(targetProf)
-                try? trackingStore?.deleteGhostIdentityProfile(identityID: sourceID)
+                try? trackingStore?.upsertACTAIdentityProfile(targetProf)
+                try? trackingStore?.deleteACTAIdentityProfile(identityID: sourceID)
             }
 
         case "split_identity":
@@ -2458,7 +2458,7 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                 prof.memberTrackKeys.remove(trackID)
                 identityResolver.upsertGallery(prof)
                 let newID = UUID().uuidString
-                let splitProf = GhostIdentityGalleryProfile(
+                let splitProf = ACTAIdentityGalleryProfile(
                     identityID: newID,
                     kind: prof.kind,
                     displayCode: "P-SPLIT-\(newID.prefix(4))",
@@ -2470,8 +2470,8 @@ public final class GhostAnalyticsCoordinator: @unchecked Sendable {
                 )
                 identityResolver.upsertGallery(splitProf)
                 identityResolver.recordCannotLink(id, newID)
-                try? trackingStore?.upsertGhostIdentityProfile(prof)
-                try? trackingStore?.upsertGhostIdentityProfile(splitProf)
+                try? trackingStore?.upsertACTAIdentityProfile(prof)
+                try? trackingStore?.upsertACTAIdentityProfile(splitProf)
             }
 
         default:

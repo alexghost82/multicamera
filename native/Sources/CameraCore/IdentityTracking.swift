@@ -358,7 +358,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
             try ensureColumn("identity_score", declaration: "REAL")
             try ensureColumn("ghost_identity_id", declaration: "TEXT")
             try ensureColumn("is_best", declaration: "INTEGER DEFAULT 0")
-            try ensureGhostTables()
+            try ensureACTATables()
             try execute("""
                 CREATE TABLE IF NOT EXISTS operator_identity_groups (
                     track_id TEXT PRIMARY KEY,
@@ -883,7 +883,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
             throw error
         }
         lock.unlock()
-        try? syncLocalTrackToGhostKnowledge(trackID: trackID, now: time)
+        try? syncLocalTrackToACTAKnowledge(trackID: trackID, now: time)
     }
 
     public func saveVehicleTextEvidence(_ evidence: VehicleTextEvidence) throws {
@@ -905,7 +905,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
             throw error
         }
         lock.unlock()
-        try? syncLocalTrackToGhostKnowledge(trackID: evidence.trackID, now: evidence.readAt)
+        try? syncLocalTrackToACTAKnowledge(trackID: evidence.trackID, now: evidence.readAt)
     }
 
     public func vehicleTextEvidence(for trackID: UUID) throws -> VehicleTextEvidence? {
@@ -1298,7 +1298,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         try execute("ALTER TABLE \(table) ADD COLUMN \(column) \(declaration)")
     }
 
-    private func ensureGhostTables() throws {
+    private func ensureACTATables() throws {
         try execute("""
             CREATE TABLE IF NOT EXISTS ghost_identities (
                 identity_id TEXT PRIMARY KEY,
@@ -1554,15 +1554,15 @@ public final class LocalTrackingStore: @unchecked Sendable {
         try execute("CREATE INDEX IF NOT EXISTS ghost_chat_clips_expires ON ghost_chat_clips(expires_at ASC)")
     }
 
-    public func saveGhostTrackVisualMetadata(
+    public func saveACTATrackVisualMetadata(
         trackID: UUID,
         cropQuality: Double,
-        chromaPrint: GhostChromaSignature?,
+        chromaPrint: ACTAChromaSignature?,
         hsvHistogram: [Float] = [],
-        resolvedSex: GhostResolvedSex = .unknown,
-        identityState: GhostIdentityMatchState? = nil,
+        resolvedSex: ACTAResolvedSex = .unknown,
+        identityState: ACTAIdentityMatchState? = nil,
         identityScore: Double? = nil,
-        ghostIdentityID: String? = nil,
+        actaIdentityID: String? = nil,
         isBest: Bool? = nil
     ) throws {
         lock.lock()
@@ -1615,7 +1615,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         bind(resolvedSex.rawValue, at: 9, to: statement)
         if let identityState { bind(identityState.rawValue, at: 10, to: statement) } else { sqlite3_bind_null(statement, 10) }
         if let identityScore { sqlite3_bind_double(statement, 11, identityScore) } else { sqlite3_bind_null(statement, 11) }
-        if let ghostIdentityID { bind(ghostIdentityID, at: 12, to: statement) } else { sqlite3_bind_null(statement, 12) }
+        if let actaIdentityID { bind(actaIdentityID, at: 12, to: statement) } else { sqlite3_bind_null(statement, 12) }
         if let isBest { sqlite3_bind_int(statement, 13, isBest ? 1 : 0) } else { sqlite3_bind_null(statement, 13) }
         bind(trackID.uuidString, at: 14, to: statement)
         guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseError() }
@@ -1623,7 +1623,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
 
     // MARK: - AI Request Content-Hash Cache
 
-    public func cachedGhostAIResponse(requestHash: String) throws -> String? {
+    public func cachedACTAAIResponse(requestHash: String) throws -> String? {
         lock.lock()
         defer { lock.unlock() }
         let stmt = try prepare("SELECT response_json FROM ghost_ai_cache WHERE request_hash = ? LIMIT 1")
@@ -1633,7 +1633,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         return text(stmt, 0)
     }
 
-    public func saveGhostAICacheResponse(
+    public func saveACTAAICacheResponse(
         requestHash: String,
         taskType: String,
         promptVersion: String = "v1",
@@ -1657,7 +1657,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
 
     // MARK: - Identity Profiles, Topology & Dedup Decisions
 
-    public func upsertGhostIdentityProfile(_ profile: GhostIdentityGalleryProfile) throws {
+    public func upsertACTAIdentityProfile(_ profile: ACTAIdentityGalleryProfile) throws {
         let data = try JSONEncoder().encode(profile)
         guard let json = String(data: data, encoding: .utf8) else { return }
         lock.lock()
@@ -1680,7 +1680,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseError() }
     }
 
-    public func deleteGhostIdentityProfile(identityID: String) throws {
+    public func deleteACTAIdentityProfile(identityID: String) throws {
         lock.lock()
         defer { lock.unlock() }
         let stmt = try prepare("DELETE FROM ghost_identities WHERE identity_id = ?")
@@ -1689,25 +1689,25 @@ public final class LocalTrackingStore: @unchecked Sendable {
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
     }
 
-    public func loadGhostIdentityProfiles(limit: Int = 500) throws -> [GhostIdentityGalleryProfile] {
+    public func loadACTAIdentityProfiles(limit: Int = 500) throws -> [ACTAIdentityGalleryProfile] {
         lock.lock()
         defer { lock.unlock() }
         let statement = try prepare("SELECT profile_json FROM ghost_identities ORDER BY updated_at DESC LIMIT ?")
         defer { sqlite3_finalize(statement) }
         sqlite3_bind_int(statement, 1, Int32(max(1, min(5000, limit))))
-        var profiles: [GhostIdentityGalleryProfile] = []
+        var profiles: [ACTAIdentityGalleryProfile] = []
         let decoder = JSONDecoder()
         while sqlite3_step(statement) == SQLITE_ROW {
             let json = text(statement, 0)
             if let data = json.data(using: .utf8),
-               let profile = try? decoder.decode(GhostIdentityGalleryProfile.self, from: data) {
+               let profile = try? decoder.decode(ACTAIdentityGalleryProfile.self, from: data) {
                 profiles.append(profile)
             }
         }
         return profiles
     }
 
-    public func saveGhostCameraLinks(_ links: [GhostCameraTransitionLink]) throws {
+    public func saveACTACameraLinks(_ links: [ACTACameraTransitionLink]) throws {
         lock.lock()
         defer { lock.unlock() }
         let stmt = try prepare("""
@@ -1733,7 +1733,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         }
     }
 
-    public func loadGhostCameraLinks() throws -> [GhostCameraTransitionLink] {
+    public func loadACTACameraLinks() throws -> [ACTACameraTransitionLink] {
         lock.lock()
         defer { lock.unlock() }
         let stmt = try prepare("""
@@ -1741,10 +1741,10 @@ public final class LocalTrackingStore: @unchecked Sendable {
             FROM ghost_camera_links
             """)
         defer { sqlite3_finalize(stmt) }
-        var links: [GhostCameraTransitionLink] = []
+        var links: [ACTACameraTransitionLink] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             links.append(
-                GhostCameraTransitionLink(
+                ACTACameraTransitionLink(
                     fromCameraID: text(stmt, 0),
                     toCameraID: text(stmt, 1),
                     transitionCount: Int(sqlite3_column_int(stmt, 2)),
@@ -1758,8 +1758,8 @@ public final class LocalTrackingStore: @unchecked Sendable {
         return links
     }
 
-    public func saveGhostDedupDecision(
-        _ decision: GhostSweeperPairDecision,
+    public func saveACTADedupDecision(
+        _ decision: ACTASweeperPairDecision,
         evidenceHash: String? = nil,
         decidedAt: Date = Date()
     ) throws {
@@ -1785,7 +1785,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
     }
 
-    public func loadGhostCannotLinkPairs() throws -> [(String, String)] {
+    public func loadACTACannotLinkPairs() throws -> [(String, String)] {
         lock.lock()
         defer { lock.unlock() }
         let stmt = try prepare("SELECT id_a, id_b FROM ghost_dedup_decisions WHERE record_cannot_link = 1")
@@ -1797,21 +1797,21 @@ public final class LocalTrackingStore: @unchecked Sendable {
         return pairs
     }
 
-    // MARK: - Narrative Chapters ("Ghost Memory") & Operator Controls
+    // MARK: - Narrative Chapters ("ACTA Memory") & Operator Controls
 
-    public func saveGhostNarrativeChapter(
+    public func saveACTANarrativeChapter(
         id: UUID = UUID(),
         cameraID: UUID,
         cameraName: String,
         startedAt: Date,
         endedAt: Date,
-        chapter: GhostTemporalNarrativeResult,
+        chapter: ACTATemporalNarrativeResult,
         frameCount: Int = 0,
         sightingCount: Int = 0,
         identityCount: Int = 0,
         collageJPEG: Data? = nil
     ) throws {
-        let record = GhostNarrativeChapterRecord(
+        let record = ACTANarrativeChapterRecord(
             chapterID: id.uuidString,
             cameraID: cameraID,
             cameraName: cameraName,
@@ -1827,11 +1827,11 @@ public final class LocalTrackingStore: @unchecked Sendable {
             identityCount: identityCount,
             collagePath: nil
         )
-        try saveGhostNarrativeChapterRecord(record, collageJPEG: collageJPEG)
+        try saveACTANarrativeChapterRecord(record, collageJPEG: collageJPEG)
     }
 
-    public func saveGhostNarrativeChapterRecord(
-        _ record: GhostNarrativeChapterRecord,
+    public func saveACTANarrativeChapterRecord(
+        _ record: ACTANarrativeChapterRecord,
         collageJPEG: Data? = nil
     ) throws {
         let data = try JSONEncoder().encode(record.narrative)
@@ -1891,7 +1891,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseError() }
     }
 
-    public func setGhostNarrativePinned(chapterID: String, pinned: Bool) throws {
+    public func setACTANarrativePinned(chapterID: String, pinned: Bool) throws {
         lock.lock()
         defer { lock.unlock() }
         let stmt = try prepare("""
@@ -1908,7 +1908,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
     }
 
     /// Saves or clears operator custom text on a narrative chapter while preserving `ai_summary` and keeping `operator_marked = 1`.
-    public func setGhostNarrativeOperatorText(chapterID: String, operatorText: String?) throws {
+    public func setACTANarrativeOperatorText(chapterID: String, operatorText: String?) throws {
         lock.lock()
         defer { lock.unlock() }
         let trimmed = operatorText?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1928,25 +1928,25 @@ public final class LocalTrackingStore: @unchecked Sendable {
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
     }
 
-    public func loadGhostNarrativeChapterRecord(chapterID: String) throws -> GhostNarrativeChapterRecord? {
-        try loadGhostNarrativeChapterRecords(chapterID: chapterID, limit: 1).first
+    public func loadACTANarrativeChapterRecord(chapterID: String) throws -> ACTANarrativeChapterRecord? {
+        try loadACTANarrativeChapterRecords(chapterID: chapterID, limit: 1).first
     }
 
     /// Reads the JPEG collage persisted next to a narrative chapter, if any.
-    public func ghostNarrativeCollageData(for record: GhostNarrativeChapterRecord) -> Data? {
+    public func actaNarrativeCollageData(for record: ACTANarrativeChapterRecord) -> Data? {
         guard let name = record.collagePath,
               URL(fileURLWithPath: name).lastPathComponent == name,
               name.hasSuffix(".jpg") else { return nil }
         return try? Data(contentsOf: cropDirectory.appendingPathComponent(name))
     }
 
-    public func loadGhostNarrativeChapterRecords(
+    public func loadACTANarrativeChapterRecords(
         chapterID: String? = nil,
         cameraID: UUID? = nil,
         since: Date? = nil,
         until: Date? = nil,
         limit: Int = 50
-    ) throws -> [GhostNarrativeChapterRecord] {
+    ) throws -> [ACTANarrativeChapterRecord] {
         lock.lock()
         defer { lock.unlock() }
         var clauses: [String] = []
@@ -1985,7 +1985,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         }
         sqlite3_bind_int(stmt, bindIdx, Int32(max(1, min(500, limit))))
 
-        var records: [GhostNarrativeChapterRecord] = []
+        var records: [ACTANarrativeChapterRecord] = []
         let decoder = JSONDecoder()
         while sqlite3_step(stmt) == SQLITE_ROW {
             let cid = text(stmt, 0)
@@ -1996,7 +1996,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
             let eAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 4))
             let json = text(stmt, 5)
             guard let data = json.data(using: .utf8),
-                  let chapter = try? decoder.decode(GhostTemporalNarrativeResult.self, from: data) else { continue }
+                  let chapter = try? decoder.decode(ACTATemporalNarrativeResult.self, from: data) else { continue }
             let aiSum = sqlite3_column_type(stmt, 6) == SQLITE_NULL ? chapter.summary : text(stmt, 6)
             let opText = sqlite3_column_type(stmt, 7) == SQLITE_NULL ? nil : text(stmt, 7)
             let opMarked = sqlite3_column_int(stmt, 8) != 0
@@ -2006,7 +2006,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
             let identityCount = Int(sqlite3_column_int(stmt, 12))
             let collagePath = sqlite3_column_type(stmt, 13) == SQLITE_NULL ? nil : text(stmt, 13)
             records.append(
-                GhostNarrativeChapterRecord(
+                ACTANarrativeChapterRecord(
                     chapterID: cid,
                     cameraID: camUUID,
                     cameraName: camName,
@@ -2027,8 +2027,8 @@ public final class LocalTrackingStore: @unchecked Sendable {
         return records
     }
 
-    public func loadGhostNarrativeChapters(cameraID: UUID? = nil, limit: Int = 50) throws -> [(id: String, cameraID: String, cameraName: String, startedAt: Date, endedAt: Date, chapter: GhostTemporalNarrativeResult)] {
-        let records = try loadGhostNarrativeChapterRecords(cameraID: cameraID, limit: limit)
+    public func loadACTANarrativeChapters(cameraID: UUID? = nil, limit: Int = 50) throws -> [(id: String, cameraID: String, cameraName: String, startedAt: Date, endedAt: Date, chapter: ACTATemporalNarrativeResult)] {
+        let records = try loadACTANarrativeChapterRecords(cameraID: cameraID, limit: limit)
         return records.map {
             var chap = $0.narrative
             chap.summary = $0.effectiveSummary
@@ -2038,18 +2038,18 @@ public final class LocalTrackingStore: @unchecked Sendable {
 
     // MARK: - Semantic Knowledge Layer (Attribute Index, Dossiers, Visits, Routes, FTS5)
 
-    public func indexGhostTrackKnowledge(
+    public func indexACTATrackKnowledge(
         trackID: String,
         identityID: String,
         cameraID: String,
         capturedAt: Date,
         cropQuality: Double,
-        description: GhostCropDescription?,
-        chromaSignature: GhostChromaSignature?,
+        description: ACTACropDescription?,
+        chromaSignature: ACTAChromaSignature?,
         displayName: String? = nil,
         kind: String = "person"
     ) throws {
-        let entries = GhostAttributeIndexEntry.extractEntries(
+        let entries = ACTAAttributeIndexEntry.extractEntries(
             trackID: trackID,
             identityID: identityID,
             cameraID: cameraID,
@@ -2115,22 +2115,22 @@ public final class LocalTrackingStore: @unchecked Sendable {
         }
         lock.unlock()
 
-        _ = try rebuildGhostIdentityDossier(
+        _ = try rebuildACTAIdentityDossier(
             identityID: identityID,
             displayName: displayName,
             kind: description?.kind ?? kind,
             now: capturedAt
         )
-        _ = try rebuildGhostVisits(identityID: identityID)
+        _ = try rebuildACTAVisits(identityID: identityID)
     }
 
     @discardableResult
-    public func rebuildGhostIdentityDossier(
+    public func rebuildACTAIdentityDossier(
         identityID: String,
         displayName: String? = nil,
         kind: String = "person",
         now: Date = Date()
-    ) throws -> GhostIdentityDossier {
+    ) throws -> ACTAIdentityDossier {
         lock.lock()
         defer { lock.unlock() }
 
@@ -2141,10 +2141,10 @@ public final class LocalTrackingStore: @unchecked Sendable {
             """)
         defer { sqlite3_finalize(stmt) }
         bind(identityID, at: 1, to: stmt)
-        var entries: [GhostAttributeIndexEntry] = []
+        var entries: [ACTAAttributeIndexEntry] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             entries.append(
-                GhostAttributeIndexEntry(
+                ACTAAttributeIndexEntry(
                     trackID: text(stmt, 0),
                     identityID: text(stmt, 1),
                     cameraID: text(stmt, 2),
@@ -2178,7 +2178,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
                 resolvedKind = text(profStmt, 0)
                 let code = text(profStmt, 1)
                 if let pData = text(profStmt, 2).data(using: .utf8),
-                   let prof = try? JSONDecoder().decode(GhostIdentityGalleryProfile.self, from: pData) {
+                   let prof = try? JSONDecoder().decode(ACTAIdentityGalleryProfile.self, from: pData) {
                     resolvedDisplayName = prof.displayName ?? code
                 } else {
                     resolvedDisplayName = code
@@ -2186,7 +2186,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
             }
         }
 
-        let dossier = GhostIdentityDossierBuilder.build(
+        let dossier = ACTAIdentityDossierBuilder.build(
             identityID: identityID,
             displayName: resolvedDisplayName,
             kind: resolvedKind,
@@ -2230,7 +2230,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         return dossier
     }
 
-    public func getGhostIdentityDossier(identityID: String) throws -> GhostIdentityDossier? {
+    public func getACTAIdentityDossier(identityID: String) throws -> ACTAIdentityDossier? {
         lock.lock()
         defer { lock.unlock() }
         let stmt = try prepare("""
@@ -2251,7 +2251,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         let summary = text(stmt, 5)
         let blob = text(stmt, 6)
         let uAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 7))
-        return GhostIdentityDossier(
+        return ACTAIdentityDossier(
             identityID: id,
             displayName: dn,
             kind: kind,
@@ -2263,7 +2263,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         )
     }
 
-    public func loadAllGhostIdentityDossiers() throws -> [GhostIdentityDossier] {
+    public func loadAllACTAIdentityDossiers() throws -> [ACTAIdentityDossier] {
         lock.lock()
         defer { lock.unlock() }
         let stmt = try prepare("""
@@ -2272,7 +2272,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
             ORDER BY updated_at DESC
             """)
         defer { sqlite3_finalize(stmt) }
-        var list: [GhostIdentityDossier] = []
+        var list: [ACTAIdentityDossier] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let id = text(stmt, 0)
             let dn = sqlite3_column_type(stmt, 1) == SQLITE_NULL ? nil : text(stmt, 1)
@@ -2283,7 +2283,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
             let blob = text(stmt, 6)
             let uAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 7))
             list.append(
-                GhostIdentityDossier(
+                ACTAIdentityDossier(
                     identityID: id,
                     displayName: dn,
                     kind: kind,
@@ -2299,12 +2299,12 @@ public final class LocalTrackingStore: @unchecked Sendable {
     }
 
     @discardableResult
-    public func rebuildGhostVisits(
+    public func rebuildACTAVisits(
         identityID: String? = nil,
         visitGapSeconds: TimeInterval = 120.0
-    ) throws -> [GhostVisitSession] {
+    ) throws -> [ACTAVisitSession] {
         let sightings = try loadSightingsForKnowledge(identityID: identityID)
-        let visits = GhostVisitBuilder.buildVisits(sightings: sightings, visitGapSeconds: visitGapSeconds)
+        let visits = ACTAVisitBuilder.buildVisits(sightings: sightings, visitGapSeconds: visitGapSeconds)
 
         lock.lock()
         defer { lock.unlock() }
@@ -2342,10 +2342,10 @@ public final class LocalTrackingStore: @unchecked Sendable {
         return visits
     }
 
-    private func loadSightingsForKnowledge(identityID: String? = nil) throws -> [GhostSightingForVisit] {
+    private func loadSightingsForKnowledge(identityID: String? = nil) throws -> [ACTASightingForVisit] {
         lock.lock()
         defer { lock.unlock() }
-        var results: [GhostSightingForVisit] = []
+        var results: [ACTASightingForVisit] = []
         var seenTracks = Set<String>()
 
         let sql: String
@@ -2372,7 +2372,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
             let gid = text(stmt, 1)
             seenTracks.insert(tid)
             results.append(
-                GhostSightingForVisit(
+                ACTASightingForVisit(
                     trackID: tid,
                     identityID: gid,
                     cameraID: text(stmt, 2),
@@ -2396,7 +2396,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
             guard !seenTracks.contains(tid) else { continue }
             seenTracks.insert(tid)
             results.append(
-                GhostSightingForVisit(
+                ACTASightingForVisit(
                     trackID: tid,
                     identityID: text(attrStmt, 1),
                     cameraID: text(attrStmt, 2),
@@ -2412,7 +2412,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
 
     /// Deterministically rebuilds `ghost_Identity_dossiers`, `ghost_visits`, and FTS5 indices from stored attribute entries and tracks.
     /// Never wipes `ghost_narrative_chapters` or `ghost_chat_threads`.
-    public func rebuildAllGhostKnowledge(
+    public func rebuildAllACTAKnowledge(
         visitGapSeconds: TimeInterval = 120.0,
         now: Date = Date()
     ) throws {
@@ -2433,13 +2433,13 @@ public final class LocalTrackingStore: @unchecked Sendable {
         lock.unlock()
 
         for id in identityIDs {
-            _ = try rebuildGhostIdentityDossier(identityID: id, now: now)
+            _ = try rebuildACTAIdentityDossier(identityID: id, now: now)
         }
-        _ = try rebuildGhostVisits(identityID: nil, visitGapSeconds: visitGapSeconds)
+        _ = try rebuildACTAVisits(identityID: nil, visitGapSeconds: visitGapSeconds)
     }
 
     /// Conjunctive facet + FTS5/LIKE search across `ghost_attribute_index` and `ghost_identity_dossiers`.
-    public func searchGhostIdentitiesByAttributes(
+    public func searchACTAIdentitiesByAttributes(
         kind: String? = nil,
         facets: [String: String] = [:],
         freeTextQuery: String? = nil,
@@ -2447,8 +2447,8 @@ public final class LocalTrackingStore: @unchecked Sendable {
         since: Date? = nil,
         until: Date? = nil,
         limit: Int = 25
-    ) throws -> [GhostIdentityDossier] {
-        let allDossiers = try loadAllGhostIdentityDossiers()
+    ) throws -> [ACTAIdentityDossier] {
+        let allDossiers = try loadAllACTAIdentityDossiers()
         var candidateIDs = Set(allDossiers.map(\.identityID))
 
         if let kind = kind?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !kind.isEmpty {
@@ -2461,7 +2461,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         // Conjunctive facet filter via ghost_attribute_index + dossier facets
         for (rawFacet, rawVal) in facets {
             let facet = rawFacet.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            let normVal = (facet.contains("color") ? GhostColorNormalizer.normalizeColorToken(rawVal) : nil)
+            let normVal = (facet.contains("color") ? ACTAColorNormalizer.normalizeColorToken(rawVal) : nil)
                 ?? rawVal.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             guard !facet.isEmpty, !normVal.isEmpty else { continue }
 
@@ -2530,7 +2530,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
                 let hay = (d.summaryLine + " " + d.textBlob).lowercased()
                 let matchedAll = tokens.allSatisfy { tok in
                     if hay.contains(tok) { return true }
-                    if let normColor = GhostColorNormalizer.normalizeColorToken(tok), hay.contains(normColor) {
+                    if let normColor = ACTAColorNormalizer.normalizeColorToken(tok), hay.contains(normColor) {
                         return true
                     }
                     return false
@@ -2543,7 +2543,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         }
 
         let dossierMap = Dictionary(uniqueKeysWithValues: allDossiers.map { ($0.identityID, $0) })
-        var orderedResults: [GhostIdentityDossier] = []
+        var orderedResults: [ACTAIdentityDossier] = []
         for id in ftsRankOrder where candidateIDs.contains(id) {
             if let d = dossierMap[id] {
                 orderedResults.append(d)
@@ -2555,18 +2555,18 @@ public final class LocalTrackingStore: @unchecked Sendable {
         return Array(orderedResults.prefix(max(1, limit)))
     }
 
-    public func getGhostIdentityRoute(
+    public func getACTAIdentityRoute(
         identityID: String,
-        topology: GhostCameraTopology? = nil
-    ) throws -> GhostIdentityRoute {
+        topology: ACTACameraTopology? = nil
+    ) throws -> ACTAIdentityRoute {
         let sightings = try loadSightingsForKnowledge(identityID: identityID)
-        let topo: GhostCameraTopology
+        let topo: ACTACameraTopology
         if let topology {
             topo = topology
         } else {
-            topo = GhostCameraTopology(links: (try? loadGhostCameraLinks()) ?? [])
+            topo = ACTACameraTopology(links: (try? loadACTACameraLinks()) ?? [])
         }
-        return GhostRouteBuilder.buildRoute(identityID: identityID, sightings: sightings, topology: topo)
+        return ACTARouteBuilder.buildRoute(identityID: identityID, sightings: sightings, topology: topo)
     }
 
     public func whoWasPresent(
@@ -2574,7 +2574,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         since: Date,
         until: Date,
         kind: String? = nil
-    ) throws -> [GhostIdentityDossier] {
+    ) throws -> [ACTAIdentityDossier] {
         let sightings = try loadSightingsForKnowledge()
         let activeIDs = Set(
             sightings.filter { s in
@@ -2584,7 +2584,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
                 return s.lastSeenAt >= since && s.firstSeenAt <= until
             }.map(\.identityID)
         )
-        let dossiers = try loadAllGhostIdentityDossiers()
+        let dossiers = try loadAllACTAIdentityDossiers()
         return dossiers.filter { d in
             guard activeIDs.contains(d.identityID) else { return false }
             if let kind = kind?.lowercased(), !kind.isEmpty {
@@ -2594,13 +2594,13 @@ public final class LocalTrackingStore: @unchecked Sendable {
         }
     }
 
-    public func listGhostVisits(
+    public func listACTAVisits(
         identityID: String? = nil,
         cameraID: String? = nil,
         since: Date? = nil,
         until: Date? = nil,
         limit: Int = 50
-    ) throws -> [GhostVisitSession] {
+    ) throws -> [ACTAVisitSession] {
         lock.lock()
         defer { lock.unlock() }
         let stmt = try prepare("""
@@ -2610,7 +2610,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
             LIMIT 500
             """)
         defer { sqlite3_finalize(stmt) }
-        var visits: [GhostVisitSession] = []
+        var visits: [ACTAVisitSession] = []
         let decoder = JSONDecoder()
         while sqlite3_step(stmt) == SQLITE_ROW {
             let vid = text(stmt, 0)
@@ -2628,7 +2628,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
             if let until, sAt > until { continue }
 
             visits.append(
-                GhostVisitSession(
+                ACTAVisitSession(
                     visitID: vid,
                     identityID: iid,
                     startedAt: sAt,
@@ -2644,27 +2644,27 @@ public final class LocalTrackingStore: @unchecked Sendable {
         return visits
     }
 
-    public func findGhostCompanions(
+    public func findACTACompanions(
         identityID: String,
         maxGapSeconds: TimeInterval = 15.0
-    ) throws -> [GhostCompanionRecord] {
+    ) throws -> [ACTACompanionRecord] {
         let sightings = try loadSightingsForKnowledge()
-        return GhostCompanionFinder.findCompanions(
+        return ACTACompanionFinder.findCompanions(
             for: identityID,
             allSightings: sightings,
             maxGapSeconds: maxGapSeconds
         )
     }
 
-    public func executeReadOnlyGhostSQL(_ rawSQL: String, maxLimit: Int = 200) throws -> [[String: String]] {
+    public func executeReadOnlyACTASQL(_ rawSQL: String, maxLimit: Int = 200) throws -> [[String: String]] {
         let safeMaxLimit = max(1, min(maxLimit, 1000))
-        let safeSQL = try GhostReadOnlySQLGuard.validateAndCap(rawSQL, maxLimit: safeMaxLimit)
+        let safeSQL = try ACTAReadOnlySQLGuard.validateAndCap(rawSQL, maxLimit: safeMaxLimit)
         lock.lock()
         defer { lock.unlock() }
         let stmt = try prepare(safeSQL)
         defer { sqlite3_finalize(stmt) }
         guard sqlite3_stmt_readonly(stmt) != 0 else {
-            throw NSError(domain: "GhostReadOnlySQLGuard", code: 5, userInfo: [NSLocalizedDescriptionKey: "SQLite statement is not read-only"])
+            throw NSError(domain: "ACTAReadOnlySQLGuard", code: 5, userInfo: [NSLocalizedDescriptionKey: "SQLite statement is not read-only"])
         }
         let colCount = sqlite3_column_count(stmt)
         var rows: [[String: String]] = []
@@ -2683,14 +2683,14 @@ public final class LocalTrackingStore: @unchecked Sendable {
     // MARK: - Agent Conversation History, Focus Memory, Chain Debt & Merge
 
     @discardableResult
-    public func ensureGhostChatThread(
+    public func ensureACTAChatThread(
         threadID: String = UUID().uuidString,
         title: String = "Investigation",
         operatorName: String = "operator",
         kind: String = "general",
         severity: String = "normal",
         now: Date = Date()
-    ) throws -> GhostChatThreadRecord {
+    ) throws -> ACTAChatThreadRecord {
         lock.lock()
         defer { lock.unlock() }
         let stmt = try prepare("""
@@ -2708,7 +2708,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         sqlite3_bind_double(stmt, 6, now.timeIntervalSince1970)
         sqlite3_bind_double(stmt, 7, now.timeIntervalSince1970)
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
-        return try loadGhostChatThreadUnlocked(threadID: threadID) ?? GhostChatThreadRecord(
+        return try loadACTAChatThreadUnlocked(threadID: threadID) ?? ACTAChatThreadRecord(
             threadID: threadID,
             title: title,
             operatorName: operatorName,
@@ -2719,7 +2719,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         )
     }
 
-    private func loadGhostChatThreadUnlocked(threadID: String) throws -> GhostChatThreadRecord? {
+    private func loadACTAChatThreadUnlocked(threadID: String) throws -> ACTAChatThreadRecord? {
         let stmt = try prepare("""
             SELECT thread_id, title, operator_name, kind, severity, pinned, last_response_id, pending_outputs_json, created_at, updated_at
             FROM ghost_chat_threads
@@ -2737,7 +2737,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         let pinned = sqlite3_column_int(stmt, 5) != 0
         let lastResp = sqlite3_column_type(stmt, 6) == SQLITE_NULL ? nil : text(stmt, 6)
         let pendingJSON = sqlite3_column_type(stmt, 7) == SQLITE_NULL ? nil : text(stmt, 7)
-        let pending = pendingJSON.flatMap { try? JSONDecoder().decode([GhostPendingOutputDebt].self, from: Data($0.utf8)) } ?? []
+        let pending = pendingJSON.flatMap { try? JSONDecoder().decode([ACTAPendingOutputDebt].self, from: Data($0.utf8)) } ?? []
         let cAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 8))
         let uAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 9))
 
@@ -2753,7 +2753,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         bind(tid, at: 1, to: linkStmt)
         while sqlite3_step(linkStmt) == SQLITE_ROW { linked.append(text(linkStmt, 0)) }
 
-        return GhostChatThreadRecord(
+        return ACTAChatThreadRecord(
             threadID: tid,
             title: title,
             operatorName: opName,
@@ -2769,13 +2769,13 @@ public final class LocalTrackingStore: @unchecked Sendable {
         )
     }
 
-    public func loadGhostChatThread(threadID: String) throws -> GhostChatThreadRecord? {
+    public func loadACTAChatThread(threadID: String) throws -> ACTAChatThreadRecord? {
         lock.lock()
         defer { lock.unlock() }
-        return try loadGhostChatThreadUnlocked(threadID: threadID)
+        return try loadACTAChatThreadUnlocked(threadID: threadID)
     }
 
-    public func listGhostChatThreads(limit: Int = 50) throws -> [GhostChatThreadRecord] {
+    public func listACTAChatThreads(limit: Int = 50) throws -> [ACTAChatThreadRecord] {
         lock.lock()
         defer { lock.unlock() }
         let stmt = try prepare("SELECT thread_id FROM ghost_chat_threads ORDER BY pinned DESC, updated_at DESC LIMIT ?")
@@ -2783,20 +2783,20 @@ public final class LocalTrackingStore: @unchecked Sendable {
         sqlite3_bind_int(stmt, 1, Int32(max(1, min(500, limit))))
         var ids: [String] = []
         while sqlite3_step(stmt) == SQLITE_ROW { ids.append(text(stmt, 0)) }
-        return try ids.compactMap { try loadGhostChatThreadUnlocked(threadID: $0) }
+        return try ids.compactMap { try loadACTAChatThreadUnlocked(threadID: $0) }
     }
 
-    /// Appends a message to `ghost_chat_messages`. Automatically applies `GhostOpSec.stripPersona` to user prompts and `GhostOpSec.sanitizeText` to assistant outputs.
+    /// Appends a message to `ghost_chat_messages`. Automatically applies `ACTAOpSec.stripPersona` to user prompts and `ACTAOpSec.sanitizeText` to assistant outputs.
     @discardableResult
-    public func appendGhostChatMessage(_ message: GhostChatMessageRecord) throws -> GhostChatMessageRecord {
-        _ = try ensureGhostChatThread(threadID: message.threadID, now: message.createdAt)
+    public func appendACTAChatMessage(_ message: ACTAChatMessageRecord) throws -> ACTAChatMessageRecord {
+        _ = try ensureACTAChatThread(threadID: message.threadID, now: message.createdAt)
         var sanitized = message
         if sanitized.role == "user" {
-            sanitized.text = GhostOpSec.stripPersona(sanitized.text)
+            sanitized.text = ACTAOpSec.stripPersona(sanitized.text)
         } else if sanitized.role == "assistant" {
-            sanitized.text = GhostOpSec.sanitizeText(sanitized.text)
+            sanitized.text = ACTAOpSec.sanitizeText(sanitized.text)
             if let ans = sanitized.structuredAnswer {
-                sanitized.structuredAnswer = GhostOpSec.sanitizeAnswer(ans)
+                sanitized.structuredAnswer = ACTAOpSec.sanitizeAnswer(ans)
             }
         }
         let structuredJSON = sanitized.structuredAnswer.flatMap { try? String(data: JSONEncoder().encode($0), encoding: .utf8) }
@@ -2827,7 +2827,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         return sanitized
     }
 
-    public func loadGhostChatMessages(threadID: String, limit: Int = 200) throws -> [GhostChatMessageRecord] {
+    public func loadACTAChatMessages(threadID: String, limit: Int = 200) throws -> [ACTAChatMessageRecord] {
         lock.lock()
         defer { lock.unlock() }
         let stmt = try prepare("""
@@ -2840,7 +2840,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         defer { sqlite3_finalize(stmt) }
         bind(threadID, at: 1, to: stmt)
         sqlite3_bind_int(stmt, 2, Int32(max(1, min(1000, limit))))
-        var messages: [GhostChatMessageRecord] = []
+        var messages: [ACTAChatMessageRecord] = []
         let decoder = JSONDecoder()
         while sqlite3_step(stmt) == SQLITE_ROW {
             let mid = text(stmt, 0)
@@ -2848,12 +2848,12 @@ public final class LocalTrackingStore: @unchecked Sendable {
             let role = text(stmt, 2)
             let content = text(stmt, 3)
             let structJSON = sqlite3_column_type(stmt, 4) == SQLITE_NULL ? nil : text(stmt, 4)
-            let ans = structJSON.flatMap { try? decoder.decode(GhostChatFinalAnswer.self, from: Data($0.utf8)) }
+            let ans = structJSON.flatMap { try? decoder.decode(ACTAChatFinalAnswer.self, from: Data($0.utf8)) }
             let cAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 5))
             let clipID = sqlite3_column_type(stmt, 6) == SQLITE_NULL ? nil : text(stmt, 6)
             let callID = sqlite3_column_type(stmt, 7) == SQLITE_NULL ? nil : text(stmt, 7)
             messages.append(
-                GhostChatMessageRecord(
+                ACTAChatMessageRecord(
                     messageID: mid,
                     threadID: tid,
                     role: role,
@@ -2868,13 +2868,13 @@ public final class LocalTrackingStore: @unchecked Sendable {
         return messages
     }
 
-    public func setGhostThreadChainHead(
+    public func setACTAThreadChainHead(
         threadID: String,
         lastResponseID: String?,
-        pendingOutputs: [GhostPendingOutputDebt] = [],
+        pendingOutputs: [ACTAPendingOutputDebt] = [],
         now: Date = Date()
     ) throws {
-        _ = try ensureGhostChatThread(threadID: threadID, now: now)
+        _ = try ensureACTAChatThread(threadID: threadID, now: now)
         let pendingJSON = pendingOutputs.isEmpty ? nil : (try? String(data: JSONEncoder().encode(pendingOutputs), encoding: .utf8))
         lock.lock()
         defer { lock.unlock() }
@@ -2894,10 +2894,10 @@ public final class LocalTrackingStore: @unchecked Sendable {
     }
 
     /// Reads and atomically clears `pending_outputs_json` for a thread when settling OpenAI Responses API `function_call_output` debt.
-    public func consumeGhostThreadPendingOutputs(threadID: String) throws -> (lastResponseID: String?, owedOutputs: [GhostPendingOutputDebt]) {
+    public func consumeACTAThreadPendingOutputs(threadID: String) throws -> (lastResponseID: String?, owedOutputs: [ACTAPendingOutputDebt]) {
         lock.lock()
         defer { lock.unlock() }
-        guard let thread = try loadGhostChatThreadUnlocked(threadID: threadID) else {
+        guard let thread = try loadACTAChatThreadUnlocked(threadID: threadID) else {
             return (nil, [])
         }
         if !thread.pendingOutputs.isEmpty {
@@ -2909,7 +2909,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         return (thread.lastResponseID, thread.pendingOutputs)
     }
 
-    public func pushGhostThreadFocus(
+    public func pushACTAThreadFocus(
         threadID: String,
         kind: String = "identity",
         refID: String,
@@ -2918,7 +2918,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         now: Date = Date()
     ) throws {
         guard !refID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        _ = try ensureGhostChatThread(threadID: threadID, now: now)
+        _ = try ensureACTAChatThread(threadID: threadID, now: now)
         lock.lock()
         defer { lock.unlock() }
         let stmt = try prepare("""
@@ -2939,7 +2939,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
     }
 
-    public func loadGhostThreadFocusEntries(threadID: String, limit: Int = 6) throws -> [GhostThreadFocusEntry] {
+    public func loadACTAThreadFocusEntries(threadID: String, limit: Int = 6) throws -> [ACTAThreadFocusEntry] {
         lock.lock()
         defer { lock.unlock() }
         let stmt = try prepare("""
@@ -2952,10 +2952,10 @@ public final class LocalTrackingStore: @unchecked Sendable {
         defer { sqlite3_finalize(stmt) }
         bind(threadID, at: 1, to: stmt)
         sqlite3_bind_int(stmt, 2, Int32(max(1, min(50, limit))))
-        var entries: [GhostThreadFocusEntry] = []
+        var entries: [ACTAThreadFocusEntry] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             entries.append(
-                GhostThreadFocusEntry(
+                ACTAThreadFocusEntry(
                     threadID: text(stmt, 0),
                     kind: text(stmt, 1),
                     refID: text(stmt, 2),
@@ -2969,13 +2969,13 @@ public final class LocalTrackingStore: @unchecked Sendable {
     }
 
     /// Builds the system-prompt focus block (`Active Entity Focus`) for pronoun resolution ("he", "she", "that car", "он", "она", "эта машина").
-    public func loadGhostThreadFocusBlock(threadID: String, limit: Int = 6) throws -> String {
-        let entries = try loadGhostThreadFocusEntries(threadID: threadID, limit: limit)
+    public func loadACTAThreadFocusBlock(threadID: String, limit: Int = 6) throws -> String {
+        let entries = try loadACTAThreadFocusEntries(threadID: threadID, limit: limit)
         guard !entries.isEmpty else { return "" }
         var lines: [String] = ["Active Entity Focus (use to resolve pronouns like he/she/they/that vehicle):"]
         for entry in entries {
             let pinTag = entry.pinned ? " [PINNED]" : ""
-            if entry.kind == "identity", let dossier = try? getGhostIdentityDossier(identityID: entry.refID) {
+            if entry.kind == "identity", let dossier = try? getACTAIdentityDossier(identityID: entry.refID) {
                 lines.append("- \(dossier.summaryLine)\(pinTag)")
             } else {
                 let lbl = entry.label.map { " (\($0))" } ?? ""
@@ -2985,9 +2985,9 @@ public final class LocalTrackingStore: @unchecked Sendable {
         return lines.joined(separator: "\n")
     }
 
-    public func bindGhostThreadCameras(threadID: String, cameraIDs: [String], now: Date = Date()) throws {
+    public func bindACTAThreadCameras(threadID: String, cameraIDs: [String], now: Date = Date()) throws {
         guard !cameraIDs.isEmpty else { return }
-        _ = try ensureGhostChatThread(threadID: threadID, now: now)
+        _ = try ensureACTAChatThread(threadID: threadID, now: now)
         lock.lock()
         defer { lock.unlock() }
         let stmt = try prepare("""
@@ -3005,7 +3005,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         }
     }
 
-    public func linkGhostThreads(threadA: String, threadB: String, now: Date = Date()) throws {
+    public func linkACTAThreads(threadA: String, threadB: String, now: Date = Date()) throws {
         guard threadA != threadB else { return }
         lock.lock()
         defer { lock.unlock() }
@@ -3025,13 +3025,13 @@ public final class LocalTrackingStore: @unchecked Sendable {
     }
 
     /// Transactionally merges `sourceThreadID` into `targetThreadID`, re-parenting all messages, tool calls, clips, actions, focus entries, cameras, and links, and resetting `last_response_id = NULL` and `pending_outputs_json = NULL` so the next turn rebuilds a full history transcript.
-    public func mergeGhostThreads(
+    public func mergeACTAThreads(
         sourceThreadID: String,
         intoTargetThreadID targetThreadID: String,
         now: Date = Date()
     ) throws {
         guard sourceThreadID != targetThreadID else { return }
-        _ = try ensureGhostChatThread(threadID: targetThreadID, now: now)
+        _ = try ensureACTAChatThread(threadID: targetThreadID, now: now)
 
         lock.lock()
         defer { lock.unlock() }
@@ -3124,7 +3124,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         }
     }
 
-    public func recordGhostToolCallAudit(_ record: GhostToolCallAuditRecord) throws {
+    public func recordACTAToolCallAudit(_ record: ACTAToolCallAuditRecord) throws {
         lock.lock()
         defer { lock.unlock() }
         let stmt = try prepare("""
@@ -3145,7 +3145,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
     }
 
-    public func saveGhostChatAction(_ action: GhostChatActionRecord) throws {
+    public func saveACTAChatAction(_ action: ACTAChatActionRecord) throws {
         let paramsJSON = (try? String(data: JSONEncoder().encode(action.parameters), encoding: .utf8)) ?? "{}"
         lock.lock()
         defer { lock.unlock() }
@@ -3166,7 +3166,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
     }
 
-    public func listGhostChatActions(threadID: String? = nil, status: String? = nil) throws -> [GhostChatActionRecord] {
+    public func listACTAChatActions(threadID: String? = nil, status: String? = nil) throws -> [ACTAChatActionRecord] {
         lock.lock()
         defer { lock.unlock() }
         var clauses: [String] = []
@@ -3184,7 +3184,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         var idx: Int32 = 1
         if let threadID { bind(threadID, at: idx, to: stmt); idx += 1 }
         if let status { bind(status, at: idx, to: stmt); idx += 1 }
-        var list: [GhostChatActionRecord] = []
+        var list: [ACTAChatActionRecord] = []
         let decoder = JSONDecoder()
         while sqlite3_step(stmt) == SQLITE_ROW {
             let aid = text(stmt, 0)
@@ -3196,7 +3196,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
             let cAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 6))
             let rAt = sqlite3_column_type(stmt, 7) == SQLITE_NULL ? nil : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 7))
             list.append(
-                GhostChatActionRecord(
+                ACTAChatActionRecord(
                     actionID: aid,
                     threadID: tid,
                     actionType: atype,
@@ -3211,7 +3211,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         return list
     }
 
-    public func resolveGhostChatAction(actionID: String, confirmed: Bool, now: Date = Date()) throws -> GhostChatActionRecord? {
+    public func resolveACTAChatAction(actionID: String, confirmed: Bool, now: Date = Date()) throws -> ACTAChatActionRecord? {
         lock.lock()
         let status = confirmed ? "confirmed" : "rejected"
         do {
@@ -3226,18 +3226,18 @@ public final class LocalTrackingStore: @unchecked Sendable {
             throw error
         }
         lock.unlock()
-        return try listGhostChatActions().first(where: { $0.actionID == actionID })
+        return try listACTAChatActions().first(where: { $0.actionID == actionID })
     }
 
     @discardableResult
-    public func saveGhostChatClip(
+    public func saveACTAChatClip(
         clipID: String = UUID().uuidString,
         threadID: String,
         cameraID: String,
         clipData: Data,
         fileExtension: String = "jpg",
         createdAt: Date = Date()
-    ) throws -> GhostChatClipRecord {
+    ) throws -> ACTAChatClipRecord {
         try FileManager.default.createDirectory(
             at: cropDirectory,
             withIntermediateDirectories: true,
@@ -3248,7 +3248,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         try clipData.write(to: fileURL, options: [.atomic])
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
 
-        let record = GhostChatClipRecord(
+        let record = ACTAChatClipRecord(
             clipID: clipID,
             threadID: threadID,
             cameraID: cameraID,
@@ -3273,7 +3273,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         return record
     }
 
-    public func loadGhostChatClips(threadID: String) throws -> [GhostChatClipRecord] {
+    public func loadACTAChatClips(threadID: String) throws -> [ACTAChatClipRecord] {
         lock.lock()
         defer { lock.unlock() }
         let stmt = try prepare("""
@@ -3284,10 +3284,10 @@ public final class LocalTrackingStore: @unchecked Sendable {
             """)
         defer { sqlite3_finalize(stmt) }
         bind(threadID, at: 1, to: stmt)
-        var list: [GhostChatClipRecord] = []
+        var list: [ACTAChatClipRecord] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             list.append(
-                GhostChatClipRecord(
+                ACTAChatClipRecord(
                     clipID: text(stmt, 0),
                     threadID: text(stmt, 1),
                     cameraID: text(stmt, 2),
@@ -3307,11 +3307,11 @@ public final class LocalTrackingStore: @unchecked Sendable {
     /// 2. Identifies protected tracks: `is_best = 1`, the highest-quality crop of every identity, and tracks belonging to operator-named identities.
     /// 3. Enforces per-identity crop cap (`maxCropsPerIdentity = 48`, or `1` when `dataSaverEnabled`) and age/disk pressure by degrading `cutout_path -> NULL` and `crop_path -> NULL` on disk while **preserving** the SQLite row, `reid_embedding` (512D), and `chroma_blob`.
     /// 4. Prunes old `ghost_chat_tool_calls` and `ghost_ai_cache` older than `logRetentionDays`, while never touching `ghost_narrative_chapters` or `ghost_chat_threads`.
-    public func runGhostStorageJanitorPass(
-        policy: GhostStorageJanitorPolicy = GhostStorageJanitorPolicy(),
+    public func runACTAStorageJanitorPass(
+        policy: ACTAStorageJanitorPolicy = ACTAStorageJanitorPolicy(),
         now: Date = Date()
-    ) throws -> GhostStorageJanitorReport {
-        var report = GhostStorageJanitorReport()
+    ) throws -> ACTAStorageJanitorReport {
+        var report = ACTAStorageJanitorReport()
 
         // Check free disk space
         if let attrs = try? FileManager.default.attributesOfFileSystem(forPath: cropDirectory.deletingLastPathComponent().path),
@@ -3322,7 +3322,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
             }
         }
 
-        let Profiles = (try? loadGhostIdentityProfiles(limit: 5000)) ?? []
+        let Profiles = (try? loadACTAIdentityProfiles(limit: 5000)) ?? []
         let namedIdentityIDs = Set(Profiles.compactMap { prof -> String? in
             guard let name = prof.displayName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else { return nil }
             return prof.identityID
@@ -3455,7 +3455,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         return report
     }
 
-    public func cacheVehicleRegistryRecord(_ record: GhostVehicleRegistryRecord) throws {
+    public func cacheVehicleRegistryRecord(_ record: ACTAVehicleRegistryRecord) throws {
         let data = try JSONEncoder().encode(record)
         guard let json = String(data: data, encoding: .utf8) else { return }
         lock.lock()
@@ -3471,7 +3471,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseError() }
     }
 
-    public func cachedVehicleRegistryRecord(plateNumber: String) throws -> GhostVehicleRegistryRecord? {
+    public func cachedVehicleRegistryRecord(plateNumber: String) throws -> ACTAVehicleRegistryRecord? {
         lock.lock()
         defer { lock.unlock() }
         let statement = try prepare("SELECT record_json FROM ghost_vehicle_registry_cache WHERE plate_number = ? LIMIT 1")
@@ -3480,10 +3480,10 @@ public final class LocalTrackingStore: @unchecked Sendable {
         guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
         let json = text(statement, 0)
         guard let data = json.data(using: .utf8) else { return nil }
-        return try? JSONDecoder().decode(GhostVehicleRegistryRecord.self, from: data)
+        return try? JSONDecoder().decode(ACTAVehicleRegistryRecord.self, from: data)
     }
 
-    public func saveGhostAlertMentorBrief(cameraID: UUID, brief: GhostAlertMentorBrief, createdAt: Date = Date()) throws {
+    public func saveACTAAlertMentorBrief(cameraID: UUID, brief: ACTAAlertMentorBrief, createdAt: Date = Date()) throws {
         let data = try JSONEncoder().encode(brief)
         guard let json = String(data: data, encoding: .utf8) else { return }
         lock.lock()
@@ -3500,7 +3500,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseError() }
     }
 
-    public func loadGhostAlertMentorBrief(alertID: String) throws -> GhostAlertMentorBrief? {
+    public func loadACTAAlertMentorBrief(alertID: String) throws -> ACTAAlertMentorBrief? {
         lock.lock()
         defer { lock.unlock() }
         let statement = try prepare("SELECT brief_json FROM ghost_alert_mentor_briefs WHERE alert_id = ? LIMIT 1")
@@ -3508,15 +3508,15 @@ public final class LocalTrackingStore: @unchecked Sendable {
         bind(alertID, at: 1, to: statement)
         guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
         guard let data = text(statement, 0).data(using: .utf8) else { return nil }
-        return try? JSONDecoder().decode(GhostAlertMentorBrief.self, from: data)
+        return try? JSONDecoder().decode(ACTAAlertMentorBrief.self, from: data)
     }
 
-    public func loadGhostAlertMentorBriefs(
+    public func loadACTAAlertMentorBriefs(
         cameraID: UUID? = nil,
         since: Date? = nil,
         until: Date? = nil,
         limit: Int = 50
-    ) throws -> [(alertID: String, cameraID: String, brief: GhostAlertMentorBrief, createdAt: Date)] {
+    ) throws -> [(alertID: String, cameraID: String, brief: ACTAAlertMentorBrief, createdAt: Date)] {
         lock.lock()
         defer { lock.unlock() }
         var clauses: [String] = []
@@ -3546,7 +3546,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
             idx += 1
         }
         sqlite3_bind_int(statement, idx, Int32(max(1, min(500, limit))))
-        var rows: [(alertID: String, cameraID: String, brief: GhostAlertMentorBrief, createdAt: Date)] = []
+        var rows: [(alertID: String, cameraID: String, brief: ACTAAlertMentorBrief, createdAt: Date)] = []
         let decoder = JSONDecoder()
         while sqlite3_step(statement) == SQLITE_ROW {
             let aid = text(statement, 0)
@@ -3554,17 +3554,17 @@ public final class LocalTrackingStore: @unchecked Sendable {
             let json = text(statement, 2)
             let cAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 3))
             if let data = json.data(using: .utf8),
-               let brief = try? decoder.decode(GhostAlertMentorBrief.self, from: data) {
+               let brief = try? decoder.decode(ACTAAlertMentorBrief.self, from: data) {
                 rows.append((alertID: aid, cameraID: cid, brief: brief, createdAt: cAt))
             }
         }
         return rows
     }
 
-    /// Synchronizes a track's local VLM `description_json` and OCR `vehicle_text_json` into the Ghost knowledge tables
+    /// Synchronizes a track's local VLM `description_json` and OCR `vehicle_text_json` into the ACTA knowledge tables
     /// (`ghost_attribute_index`, `ghost_crop_fts`, `ghost_identity_dossiers`, `ghost_visits`) so that all saved track
     /// descriptions and vehicle texts are immediately searchable by the Ghost agent tools.
-    public func syncLocalTrackToGhostKnowledge(trackID: UUID, now: Date = Date()) throws {
+    public func syncLocalTrackToACTAKnowledge(trackID: UUID, now: Date = Date()) throws {
         let trackIDStr = trackID.uuidString
         var cameraIDStr = ""
         var labelStr = "person"
@@ -3601,17 +3601,17 @@ public final class LocalTrackingStore: @unchecked Sendable {
                 let vJSON = text(stmt, 5)
                 vehicleEvidence = try? JSONDecoder().decode(VehicleTextEvidence.self, from: Data(vJSON.utf8))
             }
-            let ghostID = sqlite3_column_type(stmt, 6) == SQLITE_NULL ? "" : text(stmt, 6)
+            let actaID = sqlite3_column_type(stmt, 6) == SQLITE_NULL ? "" : text(stmt, 6)
             let groupID = sqlite3_column_type(stmt, 7) == SQLITE_NULL ? "" : text(stmt, 7)
-            if !ghostID.isEmpty {
-                resolvedIdentityID = ghostID
+            if !actaID.isEmpty {
+                resolvedIdentityID = actaID
             } else if !groupID.isEmpty {
                 resolvedIdentityID = groupID
             } else {
                 resolvedIdentityID = trackIDStr
             }
 
-            if ghostID.isEmpty {
+            if actaID.isEmpty {
                 let upd = try prepare("UPDATE tracked_objects SET ghost_identity_id = ? WHERE track_id = ?")
                 defer { sqlite3_finalize(upd) }
                 bind(resolvedIdentityID, at: 1, to: upd)
@@ -3625,8 +3625,8 @@ public final class LocalTrackingStore: @unchecked Sendable {
         lock.unlock()
 
         let kind = (Self.category(labelStr) == "vehicle") ? "vehicle" : "person"
-        var entries: [GhostAttributeIndexEntry] = [
-            GhostAttributeIndexEntry(
+        var entries: [ACTAAttributeIndexEntry] = [
+            ACTAAttributeIndexEntry(
                 trackID: trackIDStr,
                 identityID: resolvedIdentityID,
                 cameraID: cameraIDStr,
@@ -3643,7 +3643,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
             guard let cleaned = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
                   !cleaned.isEmpty, cleaned != "none", cleaned != "null", cleaned != "unknown" else { return }
             entries.append(
-                GhostAttributeIndexEntry(
+                ACTAAttributeIndexEntry(
                     trackID: trackIDStr,
                     identityID: resolvedIdentityID,
                     cameraID: cameraIDStr,
@@ -3663,19 +3663,19 @@ public final class LocalTrackingStore: @unchecked Sendable {
                 let val = attr.value
                 switch key {
                 case "upper_color", "top_color", "shirt_color", "jacket_color":
-                    let norm = GhostColorNormalizer.normalizeColorToken(val) ?? val
+                    let norm = ACTAColorNormalizer.normalizeColorToken(val) ?? val
                     appendFacet("upper_color", norm, confidence: attr.confidence)
                     appendFacet("color", norm, confidence: attr.confidence * 0.9)
                 case "lower_color", "bottom_color", "pants_color":
-                    let norm = GhostColorNormalizer.normalizeColorToken(val) ?? val
+                    let norm = ACTAColorNormalizer.normalizeColorToken(val) ?? val
                     appendFacet("lower_color", norm, confidence: attr.confidence)
                     appendFacet("color", norm, confidence: attr.confidence * 0.85)
                 case "vehicle_color", "car_color", "primary_color":
-                    let norm = GhostColorNormalizer.normalizeColorToken(val) ?? val
+                    let norm = ACTAColorNormalizer.normalizeColorToken(val) ?? val
                     appendFacet("vehicle_color", norm, confidence: attr.confidence)
                     appendFacet("color", norm, confidence: attr.confidence)
                 case "color":
-                    let norm = GhostColorNormalizer.normalizeColorToken(val) ?? val
+                    let norm = ACTAColorNormalizer.normalizeColorToken(val) ?? val
                     appendFacet(kind == "vehicle" ? "vehicle_color" : "upper_color", norm, confidence: attr.confidence)
                     appendFacet("color", norm, confidence: attr.confidence)
                 case "gender", "sex", "apparent_sex":
@@ -3684,7 +3684,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
                     appendFacet("age_group", val, confidence: attr.confidence)
                 case "clothing", "upper_clothing", "upper_wear", "top":
                     appendFacet("upper_wear", val, confidence: attr.confidence)
-                    if let norm = GhostColorNormalizer.normalizeColorToken(val), norm != val.lowercased() {
+                    if let norm = ACTAColorNormalizer.normalizeColorToken(val), norm != val.lowercased() {
                         appendFacet("upper_color", norm, confidence: attr.confidence * 0.85)
                         appendFacet("color", norm, confidence: attr.confidence * 0.8)
                     }
@@ -3701,7 +3701,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
                 case "vehicle_type", "body_type", "type":
                     appendFacet(kind == "vehicle" ? "vehicle_category" : key, val, confidence: attr.confidence)
                 case "plate", "plate_number", "license_plate":
-                    appendFacet("plate_number", GhostVehicleRegistryRecord.normalizeIsraeliPlate(val) ?? val, confidence: attr.confidence)
+                    appendFacet("plate_number", ACTAVehicleRegistryRecord.normalizeIsraeliPlate(val) ?? val, confidence: attr.confidence)
                 default:
                     appendFacet(key, val, confidence: attr.confidence)
                 }
@@ -3712,7 +3712,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
             for candidate in vehicleEvidence.candidates.prefix(5) {
                 let conf = Double(candidate.confidence)
                 appendFacet("vehicle_text", candidate.text, confidence: conf)
-                if let normPlate = GhostVehicleRegistryRecord.normalizeIsraeliPlate(candidate.text) {
+                if let normPlate = ACTAVehicleRegistryRecord.normalizeIsraeliPlate(candidate.text) {
                     appendFacet("plate_number", normPlate, confidence: conf)
                 } else if candidate.text.count >= 5, candidate.text.count <= 10 {
                     appendFacet("plate_number", candidate.text, confidence: conf * 0.9)
@@ -3778,7 +3778,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         }
         lock.unlock()
 
-        _ = try rebuildGhostIdentityDossier(identityID: resolvedIdentityID, kind: kind, now: lastSeenDate)
-        _ = try rebuildGhostVisits(identityID: resolvedIdentityID)
+        _ = try rebuildACTAIdentityDossier(identityID: resolvedIdentityID, kind: kind, now: lastSeenDate)
+        _ = try rebuildACTAVisits(identityID: resolvedIdentityID)
     }
 }

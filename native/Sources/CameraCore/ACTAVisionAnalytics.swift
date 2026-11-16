@@ -6,25 +6,25 @@ import UniformTypeIdentifiers
 
 // MARK: - 1. Capture Scheduler (workers/capture.py)
 
-public enum GhostCaptureReason: String, Codable, Sendable {
+public enum ACTACaptureReason: String, Codable, Sendable {
     case firstAppearance = "first_appearance"
     case bootstrapSecond = "bootstrap_second"
     case movement = "movement"
 }
 
-public struct GhostCaptureDecision: Equatable, Sendable {
+public struct ACTACaptureDecision: Equatable, Sendable {
     public let shouldCapture: Bool
-    public let reason: GhostCaptureReason?
+    public let reason: ACTACaptureReason?
     public let inheritedFromTrackID: UUID?
 
-    public init(shouldCapture: Bool, reason: GhostCaptureReason? = nil, inheritedFromTrackID: UUID? = nil) {
+    public init(shouldCapture: Bool, reason: ACTACaptureReason? = nil, inheritedFromTrackID: UUID? = nil) {
         self.shouldCapture = shouldCapture
         self.reason = reason
         self.inheritedFromTrackID = inheritedFromTrackID
     }
 }
 
-public final class GhostCaptureScheduler: @unchecked Sendable {
+public final class ACTACaptureScheduler: @unchecked Sendable {
     public struct Config: Equatable, Sendable {
         public var bootstrapSeconds: TimeInterval = 1.0
         public var intervalSeconds: TimeInterval = 4.0
@@ -61,9 +61,9 @@ public final class GhostCaptureScheduler: @unchecked Sendable {
         label: String,
         box: CGRect,
         now: TimeInterval
-    ) -> GhostCaptureDecision {
+    ) -> ACTACaptureDecision {
         guard now.isFinite, box.width > 0, box.height > 0 else {
-            return GhostCaptureDecision(shouldCapture: false)
+            return ACTACaptureDecision(shouldCapture: false)
         }
         lock.lock()
         defer { lock.unlock() }
@@ -81,11 +81,11 @@ public final class GhostCaptureScheduler: @unchecked Sendable {
                     existing.lastCaptureBox = box
                     cameraStates[trackID] = existing
                     statesByCamera[cameraID] = cameraStates
-                    return GhostCaptureDecision(shouldCapture: true, reason: .bootstrapSecond)
+                    return ACTACaptureDecision(shouldCapture: true, reason: .bootstrapSecond)
                 }
                 cameraStates[trackID] = existing
                 statesByCamera[cameraID] = cameraStates
-                return GhostCaptureDecision(shouldCapture: false)
+                return ACTACaptureDecision(shouldCapture: false)
             }
             let elapsed = now - existing.lastCaptureAt
             let diag = hypot(box.width, box.height)
@@ -96,11 +96,11 @@ public final class GhostCaptureScheduler: @unchecked Sendable {
                 existing.lastCaptureBox = box
                 cameraStates[trackID] = existing
                 statesByCamera[cameraID] = cameraStates
-                return GhostCaptureDecision(shouldCapture: true, reason: .movement)
+                return ACTACaptureDecision(shouldCapture: true, reason: .movement)
             }
             cameraStates[trackID] = existing
             statesByCamera[cameraID] = cameraStates
-            return GhostCaptureDecision(shouldCapture: false)
+            return ACTACaptureDecision(shouldCapture: false)
         }
 
         // Check if this new trackID is an ID-switch continuation of a recently seen track
@@ -121,7 +121,7 @@ public final class GhostCaptureScheduler: @unchecked Sendable {
         )
         cameraStates[trackID] = initial
         statesByCamera[cameraID] = cameraStates
-        return GhostCaptureDecision(shouldCapture: true, reason: .firstAppearance)
+        return ACTACaptureDecision(shouldCapture: true, reason: .firstAppearance)
     }
 
     public func reset(cameraID: UUID? = nil) {
@@ -140,7 +140,7 @@ public final class GhostCaptureScheduler: @unchecked Sendable {
         label: String,
         box: CGRect,
         now: TimeInterval
-    ) -> GhostCaptureDecision? {
+    ) -> ACTACaptureDecision? {
         var bestID: UUID?
         var bestIoU: CGFloat = 0
         for (candidateID, state) in cameraStates where candidateID != newTrackID && state.label == label {
@@ -159,7 +159,7 @@ public final class GhostCaptureScheduler: @unchecked Sendable {
         inherited.lastSeen = now
         inherited.lastObservedBox = box
         cameraStates[newTrackID] = inherited
-        return GhostCaptureDecision(shouldCapture: false, reason: nil, inheritedFromTrackID: oldID)
+        return ACTACaptureDecision(shouldCapture: false, reason: nil, inheritedFromTrackID: oldID)
     }
 
     private func pruneLocked(cameraID: UUID, now: TimeInterval) {
@@ -181,7 +181,7 @@ public final class GhostCaptureScheduler: @unchecked Sendable {
 
 // MARK: - 2. Rolling Best-K Crop Window (identity/window.py)
 
-public struct GhostCropWindow: Sendable {
+public struct ACTACropWindow: Sendable {
     public struct Entry: Equatable, Sendable {
         public let cropID: UUID
         public let quality: Double
@@ -220,7 +220,7 @@ public struct GhostCropWindow: Sendable {
 
 // MARK: - 3. Crop Quality Scorer & Matte Refiner (vision/cropper.py, vision/refiner.py)
 
-public struct GhostCropQualityMetrics: Codable, Equatable, Sendable {
+public struct ACTACropQualityMetrics: Codable, Equatable, Sendable {
     public let quality: Double
     public let confidenceScore: Double
     public let blurScore: Double
@@ -231,7 +231,7 @@ public struct GhostCropQualityMetrics: Codable, Equatable, Sendable {
     public let hasMask: Bool
 }
 
-public enum GhostCropQualityScorer {
+public enum ACTACropQualityScorer {
     public static let minCropQuality: Double = 0.28
     public static let aiMinCropQuality: Double = 0.42
 
@@ -246,7 +246,7 @@ public enum GhostCropQualityScorer {
         siblingBoxes: [CGRect] = [],
         isVehicle: Bool = false,
         hasMask: Bool
-    ) -> GhostCropQualityMetrics {
+    ) -> ACTACropQualityMetrics {
         let confScore = clamp(detectionConfidence, 0, 1)
         let blurRaw = laplacianVariance(rgbaPixels: rgbaPixels, width: width, height: height, useMask: hasMask)
         let blurScore = clamp(blurRaw / 250.0, 0, 1)
@@ -295,7 +295,7 @@ public enum GhostCropQualityScorer {
         let maskFactor = hasMask ? 1.0 : 0.7
         let quality = clamp(weighted * maskFactor, 0, 1)
 
-        return GhostCropQualityMetrics(
+        return ACTACropQualityMetrics(
             quality: quality,
             confidenceScore: confScore,
             blurScore: blurScore,
@@ -341,7 +341,7 @@ public enum GhostCropQualityScorer {
     }
 }
 
-public enum GhostMatteRefiner {
+public enum ACTAMatteRefiner {
     /// Edge-aware guided alpha refinement + contrast stretch [0.35, 0.65] + feathering (vision/refiner.py)
     public static func refineRGBA(_ rgba: inout [UInt8], width: Int, height: Int) {
         let count = width * height
@@ -408,7 +408,7 @@ public enum GhostMatteRefiner {
 
 // MARK: - 4. Chroma-Print v1 & Color Attributes (vision/chroma.py, vision/attributes.py)
 
-public struct GhostChromaSignature: Codable, Equatable, Sendable {
+public struct ACTAChromaSignature: Codable, Equatable, Sendable {
     public static let vectorDimension = 410 // 10 regions x 41 Lab color bins
     public static let binsPerRegion = 41    // 36 chromatic (12 Hue x 3 Lightness) + 5 achromatic
     public static let regionCount = 10      // 6 horizontal bands + 3 radial rings + 1 global
@@ -443,7 +443,7 @@ public struct GhostChromaSignature: Codable, Equatable, Sendable {
     }
 }
 
-public enum GhostChromaPrint {
+public enum ACTAChromaPrint {
     public static let skipSimilarityThreshold: Double = 0.97
     public static let rescueSimilarityThreshold: Double = 0.90
     public static let guardSimilarityThreshold: Double = 0.55
@@ -464,11 +464,11 @@ public enum GhostChromaPrint {
             return Float(sqrt(-2.0 * log(u1)) * cos(2.0 * .pi * u2))
         }
         return (0..<64).map { _ in
-            (0..<GhostChromaSignature.vectorDimension).map { _ in nextGaussian() }
+            (0..<ACTAChromaSignature.vectorDimension).map { _ in nextGaussian() }
         }
     }()
 
-    public static func compute(from imageData: Data, isVehicle: Bool = false) -> GhostChromaSignature? {
+    public static func compute(from imageData: Data, isVehicle: Bool = false) -> ACTAChromaSignature? {
         guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
               let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
             return nil
@@ -496,7 +496,7 @@ public enum GhostChromaPrint {
         return compute(rgba: rgba, width: width, height: height, isVehicle: isVehicle)
     }
 
-    public static func compute(rgba: [UInt8], width: Int, height: Int, isVehicle: Bool = false) -> GhostChromaSignature? {
+    public static func compute(rgba: [UInt8], width: Int, height: Int, isVehicle: Bool = false) -> ACTAChromaSignature? {
         let totalPixels = width * height
         guard width >= 8, height >= 8, rgba.count >= totalPixels * 4 else { return nil }
 
@@ -599,7 +599,7 @@ public enum GhostChromaPrint {
         }
 
         // 4. Assemble 410-d vector with LOMO max-pooling across the 3 horizontal sub-windows per band
-        var rawVector = [Float](repeating: 0, count: GhostChromaSignature.vectorDimension)
+        var rawVector = [Float](repeating: 0, count: ACTAChromaSignature.vectorDimension)
         for band in 0..<6 {
             let base = band * 41
             for bin in 0..<41 {
@@ -670,7 +670,7 @@ public enum GhostChromaPrint {
         let fullHex = hexColor(from: fullRGBSum)
         let aspect = Double(height) / Double(max(1, width))
 
-        return GhostChromaSignature(
+        return ACTAChromaSignature(
             blob: blob,
             code: code,
             bucket: bucket,
@@ -683,12 +683,12 @@ public enum GhostChromaPrint {
     }
 
     public static func similarity(_ a: Data, _ b: Data) -> Double {
-        guard a.count == GhostChromaSignature.vectorDimension,
-              b.count == GhostChromaSignature.vectorDimension else { return 0 }
+        guard a.count == ACTAChromaSignature.vectorDimension,
+              b.count == ACTAChromaSignature.vectorDimension else { return 0 }
         var dot = 0.0
         var normA = 0.0
         var normB = 0.0
-        for i in 0..<GhostChromaSignature.vectorDimension {
+        for i in 0..<ACTAChromaSignature.vectorDimension {
             let va = Double(a[i])
             let vb = Double(b[i])
             dot += va * vb
@@ -789,7 +789,7 @@ public enum GhostChromaPrint {
 
 // MARK: - 5. Universal Collage Builder (ai/collage.py)
 
-public struct GhostCollageSpec: Equatable, Sendable {
+public struct ACTACollageSpec: Equatable, Sendable {
     public let tileWidth: Int
     public let tileHeight: Int
     public let maxCols: Int
@@ -804,13 +804,13 @@ public struct GhostCollageSpec: Equatable, Sendable {
         self.jpegQuality = jpegQuality
     }
 
-    public static let describe = GhostCollageSpec(tileWidth: 176, tileHeight: 228, maxCols: 10, gutter: 4, jpegQuality: 0.82)
-    public static let portrait = GhostCollageSpec(tileWidth: 200, tileHeight: 260, maxCols: 6, gutter: 4, jpegQuality: 0.85)
-    public static let plate = GhostCollageSpec(tileWidth: 360, tileHeight: 112, maxCols: 3, gutter: 4, jpegQuality: 0.92)
-    public static let narrative = GhostCollageSpec(tileWidth: 240, tileHeight: 135, maxCols: 8, gutter: 4, jpegQuality: 0.80)
+    public static let describe = ACTACollageSpec(tileWidth: 176, tileHeight: 228, maxCols: 10, gutter: 4, jpegQuality: 0.82)
+    public static let portrait = ACTACollageSpec(tileWidth: 200, tileHeight: 260, maxCols: 6, gutter: 4, jpegQuality: 0.85)
+    public static let plate = ACTACollageSpec(tileWidth: 360, tileHeight: 112, maxCols: 3, gutter: 4, jpegQuality: 0.92)
+    public static let narrative = ACTACollageSpec(tileWidth: 240, tileHeight: 135, maxCols: 8, gutter: 4, jpegQuality: 0.80)
 }
 
-public struct GhostCollageTile: Sendable {
+public struct ACTACollageTile: Sendable {
     public let index: Int
     public let imageData: Data
     public let subtitle: String?
@@ -822,8 +822,8 @@ public struct GhostCollageTile: Sendable {
     }
 }
 
-public enum GhostCollageBuilder {
-    public static func build(tiles: [GhostCollageTile], spec: GhostCollageSpec) -> Data? {
+public enum ACTACollageBuilder {
+    public static func build(tiles: [ACTACollageTile], spec: ACTACollageSpec) -> Data? {
         guard !tiles.isEmpty else { return nil }
         let cols = min(spec.maxCols, tiles.count)
         let rows = (tiles.count + cols - 1) / cols
@@ -916,19 +916,19 @@ public struct NormalizedRect: Codable, Sendable, Equatable {
     }
 }
 
-public struct GhostCropCandidate: Codable, Sendable, Equatable {
+public struct ACTACropCandidate: Codable, Sendable, Equatable {
     public var id: UUID
     public var trackKey: String
     public var capturedAt: Date
     public var quality: Double
-    public var reason: GhostCaptureReason
+    public var reason: ACTACaptureReason
 
     public init(
         id: UUID = UUID(),
         trackKey: String,
         capturedAt: Date = Date(),
         quality: Double,
-        reason: GhostCaptureReason = .firstAppearance
+        reason: ACTACaptureReason = .firstAppearance
     ) {
         self.id = id
         self.trackKey = trackKey
@@ -938,7 +938,7 @@ public struct GhostCropCandidate: Codable, Sendable, Equatable {
     }
 }
 
-extension GhostCaptureScheduler {
+extension ACTACaptureScheduler {
     private static func deterministicUUID(_ key: String) -> UUID {
         if let uuid = UUID(uuidString: key) { return uuid }
         var bytes = [UInt8](repeating: 0, count: 16)
@@ -960,7 +960,7 @@ extension GhostCaptureScheduler {
         label: String,
         normalizedRect: NormalizedRect,
         timestamp: Date
-    ) -> GhostCaptureReason? {
+    ) -> ACTACaptureReason? {
         let decision = evaluate(
             cameraID: Self.deterministicUUID(cameraID),
             trackID: Self.deterministicUUID(trackKey),
@@ -972,8 +972,8 @@ extension GhostCaptureScheduler {
     }
 }
 
-extension GhostCropWindow {
-    public mutating func offer(_ candidate: GhostCropCandidate, now: Date = Date()) -> Bool {
+extension ACTACropWindow {
+    public mutating func offer(_ candidate: ACTACropCandidate, now: Date = Date()) -> Bool {
         shouldAccept(
             cropID: candidate.id,
             quality: candidate.quality,
@@ -982,7 +982,7 @@ extension GhostCropWindow {
     }
 }
 
-public struct GhostCropQualityBreakdown: Codable, Sendable, Equatable {
+public struct ACTACropQualityBreakdown: Codable, Sendable, Equatable {
     public var confidenceScore: Double
     public var blurScore: Double
     public var sizeScore: Double
@@ -1018,14 +1018,14 @@ public struct GhostCropQualityBreakdown: Codable, Sendable, Equatable {
     }
 }
 
-extension GhostCropQualityScorer {
+extension ACTACropQualityScorer {
     public static func score(
         cgImage: CGImage,
         alphaMask: [Float]? = nil,
         confidence: Double,
         normalizedBox: NormalizedRect,
         neighborBoxes: [NormalizedRect] = []
-    ) -> GhostCropQualityBreakdown {
+    ) -> ACTACropQualityBreakdown {
         let width = cgImage.width
         let height = cgImage.height
         var rgba = [UInt8](repeating: 0, count: width * height * 4)
@@ -1058,7 +1058,7 @@ extension GhostCropQualityScorer {
             siblingBoxes: neighborBoxes.map(\.cgRect),
             hasMask: hasMask
         )
-        return GhostCropQualityBreakdown(
+        return ACTACropQualityBreakdown(
             confidenceScore: metrics.confidenceScore,
             blurScore: metrics.blurScore,
             sizeScore: metrics.sizeScore,
@@ -1070,7 +1070,7 @@ extension GhostCropQualityScorer {
     }
 }
 
-extension GhostMatteRefiner {
+extension ACTAMatteRefiner {
     public static func refineAlphaMask(
         rawAlpha: [Float],
         maskWidth: Int,
@@ -1103,22 +1103,22 @@ extension GhostMatteRefiner {
     }
 }
 
-extension GhostChromaSignature {
+extension ACTAChromaSignature {
     public static let descriptorDimension: Int = vectorDimension
 
-    public func cosineSimilarity(to other: GhostChromaSignature) -> Double {
-        GhostChromaPrint.similarity(self.blob, other.blob)
+    public func cosineSimilarity(to other: ACTAChromaSignature) -> Double {
+        ACTAChromaPrint.similarity(self.blob, other.blob)
     }
 }
 
-extension GhostChromaPrint {
-    public static let descriptorDimension: Int = GhostChromaSignature.vectorDimension
+extension ACTAChromaPrint {
+    public static let descriptorDimension: Int = ACTAChromaSignature.vectorDimension
 
     public static func compute(
         from cgImage: CGImage,
         alphaMask: [Float]? = nil,
         isVehicle: Bool = false
-    ) -> GhostChromaSignature? {
+    ) -> ACTAChromaSignature? {
         let width = cgImage.width
         let height = cgImage.height
         guard width >= 8, height >= 8 else { return nil }
@@ -1158,13 +1158,13 @@ extension GhostChromaPrint {
     }
 }
 
-public enum GhostCollageKind: String, Codable, Sendable {
+public enum ACTACollageKind: String, Codable, Sendable {
     case describe
     case portrait
     case plate
     case narrative
 
-    public var spec: GhostCollageSpec {
+    public var spec: ACTACollageSpec {
         switch self {
         case .describe: return .describe
         case .portrait: return .portrait
@@ -1174,7 +1174,7 @@ public enum GhostCollageKind: String, Codable, Sendable {
     }
 }
 
-public struct GhostCollageCell: Sendable {
+public struct ACTACollageCell: Sendable {
     public var badgeIndex: Int
     public var itemID: String
     public var cgImage: CGImage
@@ -1188,18 +1188,18 @@ public struct GhostCollageCell: Sendable {
     }
 }
 
-public struct GhostRenderedCollage: Sendable {
+public struct ACTARenderedCollage: Sendable {
     public var jpegData: Data
-    public var cells: [GhostCollageCell]
+    public var cells: [ACTACollageCell]
 
-    public init(jpegData: Data, cells: [GhostCollageCell]) {
+    public init(jpegData: Data, cells: [ACTACollageCell]) {
         self.jpegData = jpegData
         self.cells = cells
     }
 }
 
-extension GhostCollageBuilder {
-    public static func buildCollage(kind: GhostCollageKind, cells: [GhostCollageCell]) -> GhostRenderedCollage? {
+extension ACTACollageBuilder {
+    public static func buildCollage(kind: ACTACollageKind, cells: [ACTACollageCell]) -> ACTARenderedCollage? {
         if cells.isEmpty {
             let colorSpace = CGColorSpaceCreateDeviceRGB()
             guard let ctx = CGContext(
@@ -1215,16 +1215,16 @@ extension GhostCollageBuilder {
             guard let dest = CGImageDestinationCreateWithData(out, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
             CGImageDestinationAddImage(dest, cg, nil)
             guard CGImageDestinationFinalize(dest) else { return nil }
-            return GhostRenderedCollage(jpegData: out as Data, cells: [])
+            return ACTARenderedCollage(jpegData: out as Data, cells: [])
         }
-        let tiles: [GhostCollageTile] = cells.compactMap { cell in
+        let tiles: [ACTACollageTile] = cells.compactMap { cell in
             let out = NSMutableData()
             guard let dest = CGImageDestinationCreateWithData(out, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
             CGImageDestinationAddImage(dest, cell.cgImage, nil)
             guard CGImageDestinationFinalize(dest) else { return nil }
-            return GhostCollageTile(index: cell.badgeIndex, imageData: out as Data, subtitle: cell.caption)
+            return ACTACollageTile(index: cell.badgeIndex, imageData: out as Data, subtitle: cell.caption)
         }
         guard let data = build(tiles: tiles, spec: kind.spec) else { return nil }
-        return GhostRenderedCollage(jpegData: data, cells: cells)
+        return ACTARenderedCollage(jpegData: data, cells: cells)
     }
 }

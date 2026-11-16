@@ -7,7 +7,7 @@ struct CameraMemoryView: View {
     @Environment(\.locale) private var locale
     @State private var selectedFrame: CameraMemoryFrame?
     @State private var selectedImage: NSImage?
-    @State private var editingChapter: GhostNarrativeChapterRecord?
+    @State private var editingChapter: ACTANarrativeChapterRecord?
     @State private var operatorTextDraft: String = ""
     @State private var showPinnedOnly: Bool = false
     @State private var loadError = ""
@@ -17,8 +17,8 @@ struct CameraMemoryView: View {
         model.featurePreferences.enabledFeatures.contains(.chronologicalMemory)
     }
 
-    private var filteredChapters: [GhostNarrativeChapterRecord] {
-        showPinnedOnly ? model.ghostNarrativeChapters.filter(\.pinned) : model.ghostNarrativeChapters
+    private var filteredChapters: [ACTANarrativeChapterRecord] {
+        showPinnedOnly ? model.actaNarrativeChapters.filter(\.pinned) : model.actaNarrativeChapters
     }
 
     var body: some View {
@@ -66,7 +66,7 @@ struct CameraMemoryView: View {
                 Text(locale.appLanguage.localizedMessage(loadError)).font(.system(size: 12)).foregroundStyle(ACTATheme.danger)
             }
 
-            ghostMemorySection
+            actaMemorySection
 
             if model.cameraMemoryFrames.isEmpty {
                 ContentUnavailableView(
@@ -132,7 +132,7 @@ struct CameraMemoryView: View {
         }
         .sheet(item: $editingChapter) { chapter in
             VStack(alignment: .leading, spacing: 12) {
-                Text("Edit Ghost Memory Chapter · \(chapter.cameraName)")
+                Text("Edit ACTA Memory Chapter · \(chapter.cameraName)")
                     .font(.headline)
                 Text("Original AI summary: \(chapter.aiSummary)")
                     .font(.caption)
@@ -142,7 +142,7 @@ struct CameraMemoryView: View {
                     .frame(minHeight: 100)
                 HStack {
                     Button("Restore AI Summary") {
-                        model.saveGhostNarrativeOperatorText(chapter, text: nil)
+                        model.saveACTANarrativeOperatorText(chapter, text: nil)
                         editingChapter = nil
                     }
                     Spacer()
@@ -150,7 +150,7 @@ struct CameraMemoryView: View {
                         editingChapter = nil
                     }
                     Button("Save Operator Text") {
-                        model.saveGhostNarrativeOperatorText(chapter, text: operatorTextDraft)
+                        model.saveACTANarrativeOperatorText(chapter, text: operatorTextDraft)
                         editingChapter = nil
                     }
                     .buttonStyle(.borderedProminent)
@@ -169,10 +169,10 @@ struct CameraMemoryView: View {
     }
 
     @ViewBuilder
-    private var ghostMemorySection: some View {
+    private var actaMemorySection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Label("Ghost Memory · Narrative Chapters (\(filteredChapters.count))", systemImage: "book.pages")
+                Label("ACTA Memory · Narrative Chapters (\(filteredChapters.count))", systemImage: "book.pages")
                     .font(.system(size: 14, weight: .semibold))
                 Spacer()
                 Toggle("Pinned only", isOn: $showPinnedOnly)
@@ -180,12 +180,12 @@ struct CameraMemoryView: View {
                     .font(.system(size: 11))
                 if let firstCam = model.config.cameras.first(where: \.enabled) {
                     Button("Close chapter now") {
-                        model.forceCloseGhostNarrativeChapter(cameraID: firstCam.id)
+                        model.forceCloseACTANarrativeChapter(cameraID: firstCam.id)
                     }
                     .font(.system(size: 11))
                 }
                 Button("Rebuild Knowledge") {
-                    model.rebuildGhostKnowledgeLayer()
+                    model.rebuildACTAKnowledgeLayer()
                 }
                 .font(.system(size: 11))
             }
@@ -194,7 +194,7 @@ struct CameraMemoryView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(Array(filteredChapters.prefix(15))) { chapter in
-                            ghostChapterRow(chapter)
+                            actaChapterRow(chapter)
                         }
                     }
                 }
@@ -204,7 +204,7 @@ struct CameraMemoryView: View {
     }
 
     @ViewBuilder
-    private func ghostChapterRow(_ chapter: GhostNarrativeChapterRecord) -> some View {
+    private func actaChapterRow(_ chapter: ACTANarrativeChapterRecord) -> some View {
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
@@ -235,7 +235,7 @@ struct CameraMemoryView: View {
             }
             Spacer()
             Button {
-                model.toggleGhostNarrativePin(chapter)
+                model.toggleACTANarrativePin(chapter)
             } label: {
                 Image(systemName: chapter.pinned ? "pin.fill" : "pin")
             }

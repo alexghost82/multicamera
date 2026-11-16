@@ -2,12 +2,12 @@ import Foundation
 
 // MARK: - 1. Language & Localization Routing
 
-public enum GhostPromptLanguage: String, Codable, Sendable, CaseIterable {
+public enum ACTAPromptLanguage: String, Codable, Sendable, CaseIterable {
     case ru
     case en
     case he
 
-    public static func detect(from text: String, fallback: GhostPromptLanguage = .ru) -> GhostPromptLanguage {
+    public static func detect(from text: String, fallback: ACTAPromptLanguage = .ru) -> ACTAPromptLanguage {
         for scalar in text.unicodeScalars {
             if (0x0590...0x05FF).contains(scalar.value) {
                 return .he
@@ -34,7 +34,7 @@ public enum GhostPromptLanguage: String, Codable, Sendable, CaseIterable {
 
 // MARK: - 2. OpSec Sanitizer & Persona Stripper
 
-public enum GhostOpSec {
+public enum ACTAOpSec {
     private static let vendorTerms: [(pattern: String, replacement: String)] = [
         ("(?i)\\bopenai\\b", "AI Engine"),
         ("(?i)\\bgpt-5[-a-z0-9.]*\\b", "Vision-Core"),
@@ -87,7 +87,7 @@ public enum GhostOpSec {
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    public static func sanitizeAnswer(_ answer: GhostChatPresentAnswer) -> GhostChatPresentAnswer {
+    public static func sanitizeAnswer(_ answer: ACTAChatPresentAnswer) -> ACTAChatPresentAnswer {
         var copy = answer
         copy.answerMarkdown = sanitizeText(answer.answerMarkdown)
         copy.followUpSuggestions = answer.followUpSuggestions.map { sanitizeText($0) }
@@ -97,7 +97,7 @@ public enum GhostOpSec {
 
 // MARK: - 3. Trilingual Lexicon (RU / EN / HE)
 
-public enum GhostLexicon {
+public enum ACTALexicon {
     public static let attributeSynonyms: [String: [String]] = [
         "male": ["male", "man", "boy", "guy", "мужчина", "парень", "мужской", "גבר", "בחור", "זכר"],
         "female": ["female", "woman", "girl", "lady", "женщина", "девушка", "женский", "אישה", "בחורה", "נקבה"],
@@ -149,8 +149,8 @@ public enum GhostLexicon {
 
 // MARK: - 4. Structured AI Output Schemas (16 Tasks)
 
-// Task 1: Bulk Describe (`GhostCropDescriptionBatch`)
-public struct GhostPersonAttributes: Codable, Sendable, Equatable {
+// Task 1: Bulk Describe (`ACTACropDescriptionBatch`)
+public struct ACTAPersonAttributes: Codable, Sendable, Equatable {
     public var apparentSex: String?
     public var ageGroup: String?
     public var build: String?
@@ -205,7 +205,7 @@ public struct GhostPersonAttributes: Codable, Sendable, Equatable {
     }
 }
 
-public struct GhostVehicleAttributes: Codable, Sendable, Equatable {
+public struct ACTAVehicleAttributes: Codable, Sendable, Equatable {
     public var vehicleType: String?
     public var primaryColor: String?
     public var secondaryColor: String?
@@ -239,14 +239,14 @@ public struct GhostVehicleAttributes: Codable, Sendable, Equatable {
     }
 }
 
-public struct GhostCropDescriptionItem: Codable, Sendable, Equatable {
+public struct ACTACropDescriptionItem: Codable, Sendable, Equatable {
     public var cellIndex: Int
     public var itemID: String?
     public var kind: String // "person" or "vehicle"
     public var summary: String
     public var confidence: Double
-    public var person: GhostPersonAttributes?
-    public var vehicle: GhostVehicleAttributes?
+    public var person: ACTAPersonAttributes?
+    public var vehicle: ACTAVehicleAttributes?
 
     public init(
         cellIndex: Int,
@@ -254,8 +254,8 @@ public struct GhostCropDescriptionItem: Codable, Sendable, Equatable {
         kind: String,
         summary: String,
         confidence: Double = 0.85,
-        person: GhostPersonAttributes? = nil,
-        vehicle: GhostVehicleAttributes? = nil
+        person: ACTAPersonAttributes? = nil,
+        vehicle: ACTAVehicleAttributes? = nil
     ) {
         self.cellIndex = cellIndex
         self.itemID = itemID
@@ -267,20 +267,20 @@ public struct GhostCropDescriptionItem: Codable, Sendable, Equatable {
     }
 }
 
-public typealias GhostPersonFacet = GhostPersonAttributes
-public typealias GhostVehicleFacet = GhostVehicleAttributes
-public typealias GhostCropDescription = GhostCropDescriptionItem
+public typealias ACTAPersonFacet = ACTAPersonAttributes
+public typealias ACTAVehicleFacet = ACTAVehicleAttributes
+public typealias ACTACropDescription = ACTACropDescriptionItem
 
-public struct GhostCropDescriptionBatch: Codable, Sendable, Equatable {
-    public var items: [GhostCropDescriptionItem]
+public struct ACTACropDescriptionBatch: Codable, Sendable, Equatable {
+    public var items: [ACTACropDescriptionItem]
 
-    public init(items: [GhostCropDescriptionItem] = []) {
+    public init(items: [ACTACropDescriptionItem] = []) {
         self.items = items
     }
 }
 
-// Task 2: Plate OCR Collage (`GhostPlateCollageResult`) & Israeli Registry (`data.gov.il`)
-public struct GhostPlateReadItem: Codable, Sendable, Equatable {
+// Task 2: Plate OCR Collage (`ACTAPlateCollageResult`) & Israeli Registry (`data.gov.il`)
+public struct ACTAPlateReadItem: Codable, Sendable, Equatable {
     public var cellIndex: Int
     public var itemID: String?
     public var plateText: String
@@ -308,15 +308,15 @@ public struct GhostPlateReadItem: Codable, Sendable, Equatable {
     }
 }
 
-public struct GhostPlateCollageResult: Codable, Sendable, Equatable {
-    public var plates: [GhostPlateReadItem]
+public struct ACTAPlateCollageResult: Codable, Sendable, Equatable {
+    public var plates: [ACTAPlateReadItem]
 
-    public init(plates: [GhostPlateReadItem] = []) {
+    public init(plates: [ACTAPlateReadItem] = []) {
         self.plates = plates
     }
 }
 
-public struct GhostVehicleRegistryRecord: Codable, Sendable, Equatable {
+public struct ACTAVehicleRegistryRecord: Codable, Sendable, Equatable {
     public static let privateVehiclesResourceID = "053cea08-09bc-40ec-8f7a-156f0677aff3"
     public static let motorcyclesResourceID = "bf9df4e2-d90d-4c0a-a400-19e15af8e95f"
     public static let heavyVehiclesResourceID = "cd3acc5c-03c3-4c89-9c54-d40f93c0d790"
@@ -363,8 +363,8 @@ public struct GhostVehicleRegistryRecord: Codable, Sendable, Equatable {
     }
 }
 
-// Task 3 & 4: Continuity Sweeper Layer C (`GhostTextDedupResult`) & Layer D (`GhostCollageDedupResult`)
-public struct GhostTextDedupPairVerdict: Codable, Sendable, Equatable {
+// Task 3 & 4: Continuity Sweeper Layer C (`ACTATextDedupResult`) & Layer D (`ACTACollageDedupResult`)
+public struct ACTATextDedupPairVerdict: Codable, Sendable, Equatable {
     public var idA: String
     public var idB: String
     public var sameIdentity: Bool
@@ -380,15 +380,15 @@ public struct GhostTextDedupPairVerdict: Codable, Sendable, Equatable {
     }
 }
 
-public struct GhostTextDedupResult: Codable, Sendable, Equatable {
-    public var pairs: [GhostTextDedupPairVerdict]
+public struct ACTATextDedupResult: Codable, Sendable, Equatable {
+    public var pairs: [ACTATextDedupPairVerdict]
 
-    public init(pairs: [GhostTextDedupPairVerdict] = []) {
+    public init(pairs: [ACTATextDedupPairVerdict] = []) {
         self.pairs = pairs
     }
 }
 
-public struct GhostCollageDedupGroup: Codable, Sendable, Equatable {
+public struct ACTACollageDedupGroup: Codable, Sendable, Equatable {
     public var cellIndices: [Int]
     public var identityIDs: [String]
     public var confidence: Double
@@ -402,18 +402,18 @@ public struct GhostCollageDedupGroup: Codable, Sendable, Equatable {
     }
 }
 
-public struct GhostCollageDedupResult: Codable, Sendable, Equatable {
-    public var mergeGroups: [GhostCollageDedupGroup]
+public struct ACTACollageDedupResult: Codable, Sendable, Equatable {
+    public var mergeGroups: [ACTACollageDedupGroup]
     public var distinctPairs: [[Int]]
 
-    public init(mergeGroups: [GhostCollageDedupGroup] = [], distinctPairs: [[Int]] = []) {
+    public init(mergeGroups: [ACTACollageDedupGroup] = [], distinctPairs: [[Int]] = []) {
         self.mergeGroups = mergeGroups
         self.distinctPairs = distinctPairs
     }
 }
 
-// Task 5: Ghost Memory Temporal Narrative (`GhostTemporalNarrativeResult`)
-public struct GhostNarrativeEventItem: Codable, Sendable, Equatable {
+// Task 5: ACTA Memory Temporal Narrative (`ACTATemporalNarrativeResult`)
+public struct ACTANarrativeEventItem: Codable, Sendable, Equatable {
     public var frameBadgeIndex: Int
     public var timestampOffsetSec: Double
     public var headline: String
@@ -438,19 +438,19 @@ public struct GhostNarrativeEventItem: Codable, Sendable, Equatable {
     }
 }
 
-public struct GhostTemporalNarrativeResult: Codable, Sendable, Equatable {
+public struct ACTATemporalNarrativeResult: Codable, Sendable, Equatable {
     public var chapterTitle: String
     public var summary: String
     public var deltaFromPrevious: String?
     public var atmosphere: String
-    public var events: [GhostNarrativeEventItem]
+    public var events: [ACTANarrativeEventItem]
 
     public init(
         chapterTitle: String,
         summary: String,
         deltaFromPrevious: String? = nil,
         atmosphere: String = "normal",
-        events: [GhostNarrativeEventItem] = []
+        events: [ACTANarrativeEventItem] = []
     ) {
         self.chapterTitle = chapterTitle
         self.summary = summary
@@ -461,7 +461,7 @@ public struct GhostTemporalNarrativeResult: Codable, Sendable, Equatable {
 }
 
 // Task 6 & 7 & 8: Critical Alert 4-Frame Ring, Alert Mentor 16-Frame Brief & Demo Scan 5-Frame
-public struct GhostCriticalAlertDetection: Codable, Sendable, Equatable {
+public struct ACTACriticalAlertDetection: Codable, Sendable, Equatable {
     public var ruleCode: String
     public var category: String
     public var triggered: Bool
@@ -492,17 +492,17 @@ public struct GhostCriticalAlertDetection: Codable, Sendable, Equatable {
     }
 }
 
-public struct GhostCriticalAlertBatch: Codable, Sendable, Equatable {
+public struct ACTACriticalAlertBatch: Codable, Sendable, Equatable {
     public var sceneStatus: String
-    public var alerts: [GhostCriticalAlertDetection]
+    public var alerts: [ACTACriticalAlertDetection]
 
-    public init(sceneStatus: String = "clear", alerts: [GhostCriticalAlertDetection] = []) {
+    public init(sceneStatus: String = "clear", alerts: [ACTACriticalAlertDetection] = []) {
         self.sceneStatus = sceneStatus
         self.alerts = alerts
     }
 }
 
-public struct GhostAlertMentorBrief: Codable, Sendable, Equatable {
+public struct ACTAAlertMentorBrief: Codable, Sendable, Equatable {
     public var alertID: String
     public var confirmedThreat: Bool
     public var falsePositiveReason: String?
@@ -533,17 +533,17 @@ public struct GhostAlertMentorBrief: Codable, Sendable, Equatable {
     }
 }
 
-public struct GhostDemoScanVerdict: Codable, Sendable, Equatable {
+public struct ACTADemoScanVerdict: Codable, Sendable, Equatable {
     public var triggered: Bool
     public var headline: String
     public var narrative: String
-    public var detections: [GhostCriticalAlertDetection]
+    public var detections: [ACTACriticalAlertDetection]
 
     public init(
         triggered: Bool,
         headline: String,
         narrative: String,
-        detections: [GhostCriticalAlertDetection] = []
+        detections: [ACTACriticalAlertDetection] = []
     ) {
         self.triggered = triggered
         self.headline = headline
@@ -552,8 +552,8 @@ public struct GhostDemoScanVerdict: Codable, Sendable, Equatable {
     }
 }
 
-// Task 9: Standing Watch / Mission Verification (`GhostMissionVerdict`)
-public struct GhostMissionVerdict: Codable, Sendable, Equatable {
+// Task 9: Standing Watch / Mission Verification (`ACTAMissionVerdict`)
+public struct ACTAMissionVerdict: Codable, Sendable, Equatable {
     public var watchID: String
     public var matched: Bool
     public var confidence: Double
@@ -579,7 +579,7 @@ public struct GhostMissionVerdict: Codable, Sendable, Equatable {
 }
 
 // Task 10 & 11: Camera Intel Profile & Camera Role Auto-Setup
-public struct GhostCameraIntelProfile: Codable, Sendable, Equatable {
+public struct ACTACameraIntelProfile: Codable, Sendable, Equatable {
     public var cameraID: String
     public var environmentType: String // "indoor", "outdoor", "perimeter", "entry", "parking"
     public var vantagePoint: String
@@ -604,7 +604,7 @@ public struct GhostCameraIntelProfile: Codable, Sendable, Equatable {
     }
 }
 
-public struct GhostCameraRoleConfig: Codable, Sendable, Equatable {
+public struct ACTACameraRoleConfig: Codable, Sendable, Equatable {
     public var cameraID: String
     public var roleTitle: String
     public var securityZone: String
@@ -630,7 +630,7 @@ public struct GhostCameraRoleConfig: Codable, Sendable, Equatable {
 }
 
 // Task 12, 13, 14: Voice Refine, Brief Title, Spoken Briefing HC Card
-public struct GhostVoiceRefine: Codable, Sendable, Equatable {
+public struct ACTAVoiceRefine: Codable, Sendable, Equatable {
     public var rawTranscript: String
     public var cleanedCommand: String
     public var detectedLanguage: String
@@ -644,7 +644,7 @@ public struct GhostVoiceRefine: Codable, Sendable, Equatable {
     }
 }
 
-public struct GhostBriefTitle: Codable, Sendable, Equatable {
+public struct ACTABriefTitle: Codable, Sendable, Equatable {
     public var title: String
 
     public init(title: String) {
@@ -652,7 +652,7 @@ public struct GhostBriefTitle: Codable, Sendable, Equatable {
     }
 }
 
-public struct GhostHCCard: Codable, Sendable, Equatable {
+public struct ACTAHCCard: Codable, Sendable, Equatable {
     public var spokenLine: String
     public var badgeLabel: String
     public var urgency: String // "routine", "watch", "critical"
@@ -675,7 +675,7 @@ public struct GhostHCCard: Codable, Sendable, Equatable {
 }
 
 // Task 15 & 16: Ghost Chat & Research Agent (`present_answer` & proposed actions)
-public struct GhostProposedAction: Codable, Sendable, Equatable, Identifiable {
+public struct ACTAProposedAction: Codable, Sendable, Equatable, Identifiable {
     public var id: String
     public var actionID: String { id }
     public var actionType: String // "merge_identities", "split_identity", "create_watch", "rename_identity", "bookmark_alert"
@@ -729,13 +729,13 @@ public struct GhostProposedAction: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
-public struct GhostChatPresentAnswer: Codable, Sendable, Equatable {
+public struct ACTAChatPresentAnswer: Codable, Sendable, Equatable {
     public var answerMarkdown: String
     public var citedIdentityIDs: [String]
     public var citedCameraIDs: [String]
     public var confidence: Double
     public var followUpSuggestions: [String]
-    public var proposedActions: [GhostProposedAction]
+    public var proposedActions: [ACTAProposedAction]
 
     public init(
         answerMarkdown: String,
@@ -743,7 +743,7 @@ public struct GhostChatPresentAnswer: Codable, Sendable, Equatable {
         citedCameraIDs: [String] = [],
         confidence: Double = 0.90,
         followUpSuggestions: [String] = [],
-        proposedActions: [GhostProposedAction] = []
+        proposedActions: [ACTAProposedAction] = []
     ) {
         self.answerMarkdown = answerMarkdown
         self.citedIdentityIDs = citedIdentityIDs
@@ -764,16 +764,16 @@ public struct GhostChatPresentAnswer: Codable, Sendable, Equatable {
         citedCameraIDs = (try? c.decodeIfPresent([String].self, forKey: .citedCameraIDs)) ?? []
         confidence = (try? c.decodeIfPresent(Double.self, forKey: .confidence)) ?? 0.75
         followUpSuggestions = (try? c.decodeIfPresent([String].self, forKey: .followUpSuggestions)) ?? []
-        proposedActions = (try? c.decodeIfPresent([GhostProposedAction].self, forKey: .proposedActions)) ?? []
+        proposedActions = (try? c.decodeIfPresent([ACTAProposedAction].self, forKey: .proposedActions)) ?? []
     }
 }
 
-public typealias GhostChatFinalAnswer = GhostChatPresentAnswer
+public typealias ACTAChatFinalAnswer = ACTAChatPresentAnswer
 
 // MARK: - 5. Multilingual Prompt Library (RU / EN / HE)
 
-public enum GhostPromptLibrary {
-    public static func languageDirective(_ lang: GhostPromptLanguage) -> String {
+public enum ACTAPromptLibrary {
+    public static func languageDirective(_ lang: ACTAPromptLanguage) -> String {
         switch lang {
         case .ru:
             return "ОТВЕЧАЙ СТРОГО НА РУССКОМ ЯЗЫКЕ во всех текстовых полях (summary, headline, detail, reason, tacticalHeadline). Технические перечисления (male/female/unknown, low/medium/high/critical) оставляй в каноническом формате."
@@ -784,14 +784,14 @@ public enum GhostPromptLibrary {
         }
     }
 
-    public static func bulkDescribePrompt(cellCount: Int, language: GhostPromptLanguage) -> String {
+    public static func bulkDescribePrompt(cellCount: Int, language: ACTAPromptLanguage) -> String {
         """
         You are the tactical visual intelligence unit analyzing a numbered DESCRIBE collage containing \(cellCount) subject cutouts (`[#1]` through `[#\(cellCount)]`).
         Each cell shows an isolated person or vehicle with a dark neutral surround outside its alpha mask.
         Ignore the black background; analyze ONLY pixels belonging to the subject inside each numbered cell.
         \(languageDirective(language))
 
-        Return strict JSON matching `GhostCropDescriptionBatch`:
+        Return strict JSON matching `ACTACropDescriptionBatch`:
         {
           "items": [
             {
@@ -834,13 +834,13 @@ public enum GhostPromptLibrary {
         """
     }
 
-    public static func plateCollagePrompt(cellCount: Int, language: GhostPromptLanguage) -> String {
+    public static func plateCollagePrompt(cellCount: Int, language: ACTAPromptLanguage) -> String {
         """
         You are the high-precision License Plate OCR engine inspecting a numbered PLATE collage (`[#1]`..`[#\(cellCount)]`).
         Read the characters on each license plate crop. Prefer Israeli 7-8 digit plates or standard alphanumeric plates. Strip punctuation and spaces in `plateText`.
         \(languageDirective(language))
 
-        Return strict JSON matching `GhostPlateCollageResult`:
+        Return strict JSON matching `ACTAPlateCollageResult`:
         {
           "plates": [
             {
@@ -856,7 +856,7 @@ public enum GhostPromptLibrary {
         """
     }
 
-    public static func textDedupPrompt(pairsDescription: String, language: GhostPromptLanguage) -> String {
+    public static func textDedupPrompt(pairsDescription: String, language: ACTAPromptLanguage) -> String {
         """
         You are the Continuity Identity Deduplication judge (Layer C).
         Compare the following candidate identity pairs based on structured appearance facets, camera transitions, and timing.
@@ -866,7 +866,7 @@ public enum GhostPromptLibrary {
         Candidate Pairs:
         \(pairsDescription)
 
-        Return strict JSON matching `GhostTextDedupResult`:
+        Return strict JSON matching `ACTATextDedupResult`:
         {
           "pairs": [
             {
@@ -881,7 +881,7 @@ public enum GhostPromptLibrary {
         """
     }
 
-    public static func collageDedupPrompt(cellMappingDescription: String, language: GhostPromptLanguage) -> String {
+    public static func collageDedupPrompt(cellMappingDescription: String, language: ACTAPromptLanguage) -> String {
         """
         You are the Visual Continuity Deduplication judge (Layer D).
         Inspect the numbered PORTRAIT collage and determine which cells depict the exact same physical person or vehicle across cameras/time, and which pairs are definitely distinct individuals (`distinctPairs` -> permanent `cannot_link`).
@@ -890,7 +890,7 @@ public enum GhostPromptLibrary {
         Cell Mapping:
         \(cellMappingDescription)
 
-        Return strict JSON matching `GhostCollageDedupResult`:
+        Return strict JSON matching `ACTACollageDedupResult`:
         {
           "mergeGroups": [
             {
@@ -909,16 +909,16 @@ public enum GhostPromptLibrary {
         cameraName: String,
         frameCount: Int,
         previousChapterSummary: String?,
-        language: GhostPromptLanguage
+        language: ACTAPromptLanguage
     ) -> String {
         let prevContext = previousChapterSummary.map { "Previous Chapter Summary (report ONLY new developments / delta): \($0)" } ?? "No previous chapter."
         return """
-        You are the Ghost Memory Temporal Narrative chronicler for camera "\(cameraName)".
+        You are the ACTA Memory Temporal Narrative chronicler for camera "\(cameraName)".
         You are viewing a numbered NARRATIVE collage of \(frameCount) sequential frames (`[#1]`..`[#\(frameCount)]`).
         \(prevContext)
         \(languageDirective(language))
 
-        Return strict JSON matching `GhostTemporalNarrativeResult`:
+        Return strict JSON matching `ACTATemporalNarrativeResult`:
         {
           "chapterTitle": "...",
           "summary": "...",
@@ -941,7 +941,7 @@ public enum GhostPromptLibrary {
     public static func criticalAlertRingPrompt(
         cameraName: String,
         activeRulesDescription: String,
-        language: GhostPromptLanguage
+        language: ACTAPromptLanguage
     ) -> String {
         """
         You are the Real-Time Critical Alert Sentinel monitoring a 4-frame temporal sequence (`[#1]`..`[#4]`, 1.2s apart) from camera "\(cameraName)".
@@ -950,7 +950,7 @@ public enum GhostPromptLibrary {
         \(activeRulesDescription)
         \(languageDirective(language))
 
-        Return strict JSON matching `GhostCriticalAlertBatch`:
+        Return strict JSON matching `ACTACriticalAlertBatch`:
         {
           "sceneStatus": "clear" | "elevated" | "critical",
           "alerts": [
@@ -973,14 +973,14 @@ public enum GhostPromptLibrary {
         alertID: String,
         cameraName: String,
         initialAlertTitle: String,
-        language: GhostPromptLanguage
+        language: ACTAPromptLanguage
     ) -> String {
         """
         You are the Alert Mentor conducting a 16-frame lookback investigation (`[#1]`..`[#16]`) on camera "\(cameraName)" for alert "\(initialAlertTitle)" (ID: \(alertID)).
         Analyze the precursors leading up to the trigger, verify whether the alert is a true threat or a false positive, and formulate an actionable operator brief.
         \(languageDirective(language))
 
-        Return strict JSON matching `GhostAlertMentorBrief`:
+        Return strict JSON matching `ACTAAlertMentorBrief`:
         {
           "alertID": "\(alertID)",
           "confirmedThreat": true | false,
@@ -998,7 +998,7 @@ public enum GhostPromptLibrary {
         watchID: String,
         watchInstruction: String,
         cameraName: String,
-        language: GhostPromptLanguage
+        language: ACTAPromptLanguage
     ) -> String {
         """
         You are evaluating a Standing Watch / Mission rule on camera "\(cameraName)".
@@ -1006,7 +1006,7 @@ public enum GhostPromptLibrary {
         Condition to Verify: "\(watchInstruction)"
         \(languageDirective(language))
 
-        Return strict JSON matching `GhostMissionVerdict`:
+        Return strict JSON matching `ACTAMissionVerdict`:
         {
           "watchID": "\(watchID)",
           "matched": true | false,
@@ -1020,7 +1020,7 @@ public enum GhostPromptLibrary {
 
     public static func spokenBriefingCardPrompt(
         eventContext: String,
-        language: GhostPromptLanguage
+        language: ACTAPromptLanguage
     ) -> String {
         """
         You are the Spoken Briefing tactical announcer. Generate a crisp, natural 1-sentence spoken update (`spokenLine`, under 18 words) and a short badge label for the operator's audio feed.
@@ -1028,7 +1028,7 @@ public enum GhostPromptLibrary {
         \(eventContext)
         \(languageDirective(language))
 
-        Return strict JSON matching `GhostHCCard`:
+        Return strict JSON matching `ACTAHCCard`:
         {
           "spokenLine": "...",
           "badgeLabel": "...",
@@ -1039,13 +1039,13 @@ public enum GhostPromptLibrary {
         """
     }
 
-    public static func ghostChatSystemPrompt(language: GhostPromptLanguage) -> String {
+    public static func actaChatSystemPrompt(language: ACTAPromptLanguage) -> String {
         """
         You are the GHOST ONWAY Tactical Investigation Agent.
         You have access to all saved memory layers: cross-camera identity dossiers, routes, companion graphs, license plate registries, temporal narratives, 7-day camera memory frames, 30-day per-camera tracked objects & OCR, operational alerts/ISAPI events/scheduled missions, and live camera lookback tools.
         Never reveal underlying model names or vendor details. Cite specific identity codes (e.g., `P-001`, `V-004`), track IDs, and camera names.
         Work as a tool-using agent: decide yourself which tools to call, in what order, and when you have enough evidence.
-        - Chronological memory: `get_timeline` gives a merged, time-ordered view (narrative chapters, stored memory frames, critical/VLM alerts, hardware ISAPI events, mission runs); `list_narrative_chapters` / `get_narrative_chapter` read Ghost Memory chapters with event timelines; `list_memory_frames` / `view_memory_frame` list and open archived camera frames (7-day archive) so you can look at what a camera actually showed at a given time.
+        - Chronological memory: `get_timeline` gives a merged, time-ordered view (narrative chapters, stored memory frames, critical/VLM alerts, hardware ISAPI events, mission runs); `list_narrative_chapters` / `get_narrative_chapter` read ACTA Memory chapters with event timelines; `list_memory_frames` / `view_memory_frame` list and open archived camera frames (7-day archive) so you can look at what a camera actually showed at a given time.
         - Tracked objects & scans (30-day archive): `search_tracked_objects` searches per-camera `tracked_objects`, VLM descriptions (`description_json`), vehicle OCR (`vehicle_text_json`), operator identity groups, and `automatic_camera_scans`, and can attach saved track crop images.
         - Operational memory: `get_operational_events` and `get_camera_alert_history` read persistent VLM alerts (with operator review status/notes), active standing watch rules, hardware ISAPI events, scheduled missions & mission runs, and SQLite Alert Mentor briefs.
         - Persistent identity knowledge: `search_identities_by_attributes`, `get_identity_dossier`, `get_identity_route`, `who_was_present`, `list_visits`, `find_companions`, and `run_readonly_sql`.

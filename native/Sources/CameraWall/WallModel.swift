@@ -398,19 +398,19 @@ final class WallModel: ObservableObject {
     private var vehicleTextPersistenceGeneration = UUID()
     @Published var localShowcaseURL: URL?
     @Published var localShowcaseStatus = "Stopped"
-    @Published var ghostSpokenCards: [GhostHCCard] = []
-    @Published var ghostHealthStatus = GhostHealthStatus()
-    @Published var ghostBudgetSnapshot = GhostBudgetSnapshot()
-    @Published var ghostNarrativeChapters: [GhostNarrativeChapterRecord] = []
-    @Published var ghostChatThreads: [GhostChatThreadRecord] = []
-    @Published var activeGhostThreadID: String = "default"
-    @Published var ghostChatMessages: [GhostChatMessageRecord] = []
-    @Published var ghostThreadFocusEntries: [GhostThreadFocusEntry] = []
-    @Published var ghostChatActions: [GhostChatActionRecord] = []
-    @Published private(set) var ghostAgentBusy = false
-    @Published private(set) var ghostAgentStatus = "Unified Ghost Agent ready"
-    private(set) var ghostAnalytics: GhostAnalyticsCoordinator!
-    private var lastGhostMaintenanceCheck: TimeInterval = -.infinity
+    @Published var actaSpokenCards: [ACTAHCCard] = []
+    @Published var actaHealthStatus = ACTAHealthStatus()
+    @Published var actaBudgetSnapshot = ACTABudgetSnapshot()
+    @Published var actaNarrativeChapters: [ACTANarrativeChapterRecord] = []
+    @Published var actaChatThreads: [ACTAChatThreadRecord] = []
+    @Published var activeACTAThreadID: String = "default"
+    @Published var actaChatMessages: [ACTAChatMessageRecord] = []
+    @Published var actaThreadFocusEntries: [ACTAThreadFocusEntry] = []
+    @Published var actaChatActions: [ACTAChatActionRecord] = []
+    @Published private(set) var actaAgentBusy = false
+    @Published private(set) var actaAgentStatus = "Unified ACTA Agent ready"
+    private(set) var actaAnalytics: ACTAAnalyticsCoordinator!
+    private var lastACTAMaintenanceCheck: TimeInterval = -.infinity
     @Published var vlmStatus = "Local VLM not connected"
     /// Background VLM work (scheduled scans, missions, memory samples, queued descriptions).
     /// Operator requests use their own state below and run concurrently on a separate model instance.
@@ -595,25 +595,25 @@ final class WallModel: ObservableObject {
         } catch {
             notice = "VLM settings could not be loaded; defaults are active"
         }
-        let ghostConfig = Self.makeGhostAIConfiguration(
+        let actaConfig = Self.makeACTAAIConfiguration(
             from: vlmPreferences,
             featurePreferences: featurePreferences
         )
-        let ghostClient = GhostAIClient(
-            config: ghostConfig,
+        let actaClient = ACTAAIClient(
+            config: actaConfig,
             localVLM: LocalVLMClient(model: vlmPreferences.model)
         )
-        self.ghostAnalytics = GhostAnalyticsCoordinator(
-            aiClient: ghostClient,
+        self.actaAnalytics = ACTAAnalyticsCoordinator(
+            aiClient: actaClient,
             trackingStore: trackingStore,
             memoryFrameStore: cameraMemoryStore
         )
-        self.ghostNarrativeChapters = (try? trackingStore?.loadGhostNarrativeChapterRecords(limit: 50)) ?? []
-        self.ghostChatThreads = (try? trackingStore?.listGhostChatThreads(limit: 50)) ?? []
-        self.ghostChatMessages = (try? trackingStore?.loadGhostChatMessages(threadID: activeGhostThreadID)) ?? []
-        self.ghostThreadFocusEntries = (try? trackingStore?.loadGhostThreadFocusEntries(threadID: activeGhostThreadID, limit: 6)) ?? []
-        self.ghostChatActions = (try? trackingStore?.listGhostChatActions(threadID: activeGhostThreadID, status: "proposed")) ?? []
-        syncGhostOperationalMemory()
+        self.actaNarrativeChapters = (try? trackingStore?.loadACTANarrativeChapterRecords(limit: 50)) ?? []
+        self.actaChatThreads = (try? trackingStore?.listACTAChatThreads(limit: 50)) ?? []
+        self.actaChatMessages = (try? trackingStore?.loadACTAChatMessages(threadID: activeACTAThreadID)) ?? []
+        self.actaThreadFocusEntries = (try? trackingStore?.loadACTAThreadFocusEntries(threadID: activeACTAThreadID, limit: 6)) ?? []
+        self.actaChatActions = (try? trackingStore?.listACTAChatActions(threadID: activeACTAThreadID, status: "proposed")) ?? []
+        syncACTAOperationalMemory()
         if workerMode {
             workerProvisionedCameras = config.cameras.filter {
                 $0.enabled && $0.localDeviceID == nil && $0.screenDisplayID == nil && $0.fileURL == nil
@@ -1234,18 +1234,18 @@ final class WallModel: ObservableObject {
         catch { notice = "ISAPI events could not be cleared" }
     }
 
-    private static func makeGhostAIConfiguration(
+    private static func makeACTAAIConfiguration(
         from preferences: VLMPreferences,
         featurePreferences: CameraFeaturePreferences
-    ) -> GhostAIConfiguration {
-        GhostAIConfiguration(
-            mode: preferences.ghostBackendMode,
-            vllmBaseURL: preferences.ghostVLLMBaseURL,
-            vllmModelName: preferences.ghostVLLMModelName,
-            openAIBaseURL: preferences.ghostOpenAIBaseURL,
+    ) -> ACTAAIConfiguration {
+        ACTAAIConfiguration(
+            mode: preferences.actaBackendMode,
+            vllmBaseURL: preferences.actaVLLMBaseURL,
+            vllmModelName: preferences.actaVLLMModelName,
+            openAIBaseURL: preferences.actaOpenAIBaseURL,
             allowExternalAI: featurePreferences.allowExternalAI,
             allowPlateRegistryLookup: featurePreferences.allowPlateRegistryLookup,
-            preferredLanguage: preferences.ghostPreferredLanguage
+            preferredLanguage: preferences.actaPreferredLanguage
         )
     }
 
@@ -1254,8 +1254,8 @@ final class WallModel: ObservableObject {
         preferences.alertRules.removeAll { $0.condition.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         try VLMStore.save(preferences, to: vlmPreferencesURL)
         vlmPreferences = preferences
-        ghostAnalytics?.aiClient.updateConfiguration(
-            Self.makeGhostAIConfiguration(from: preferences, featurePreferences: featurePreferences)
+        actaAnalytics?.aiClient.updateConfiguration(
+            Self.makeACTAAIConfiguration(from: preferences, featurePreferences: featurePreferences)
         )
         if applicationServicesStarted { prepareModels() }
         vlmSchedule.reset()
@@ -1289,8 +1289,8 @@ final class WallModel: ObservableObject {
         else { preferences.enabledFeatures.remove(featureID) }
         try featureCoordinator.savePreferences(preferences)
         featurePreferences = preferences
-        ghostAnalytics?.aiClient.updateConfiguration(
-            Self.makeGhostAIConfiguration(from: vlmPreferences, featurePreferences: preferences)
+        actaAnalytics?.aiClient.updateConfiguration(
+            Self.makeACTAAIConfiguration(from: vlmPreferences, featurePreferences: preferences)
         )
         if enabled, featureID == .independentWatcher {
             do {
@@ -1372,8 +1372,8 @@ final class WallModel: ObservableObject {
         preferences.retainFullFrames = enabled
         try featureCoordinator.savePreferences(preferences)
         featurePreferences = preferences
-        ghostAnalytics?.aiClient.updateConfiguration(
-            Self.makeGhostAIConfiguration(from: vlmPreferences, featurePreferences: preferences)
+        actaAnalytics?.aiClient.updateConfiguration(
+            Self.makeACTAAIConfiguration(from: vlmPreferences, featurePreferences: preferences)
         )
         if enabled {
             reloadCameraMemoryFrames()
@@ -3138,7 +3138,7 @@ final class WallModel: ObservableObject {
         evaluateCrowdAlerts(now: now)
         evaluateOperationsWatches(now: now)
         scheduleChronologicalMemory(now: now)
-        scheduleGhostAnalyticsTick(now: now)
+        scheduleACTAAnalyticsTick(now: now)
         if now - lastDiagnosticsWrite >= 1 {
             lastDiagnosticsWrite = now
             do { try writeDiagnostics(to: diagnosticsURL) }
@@ -3174,17 +3174,17 @@ final class WallModel: ObservableObject {
         }
     }
 
-    private func scheduleGhostAnalyticsTick(now: TimeInterval) {
-        guard now - lastGhostMaintenanceCheck >= 4.0, let ghost = ghostAnalytics else { return }
-        lastGhostMaintenanceCheck = now
-        syncGhostOperationalMemory()
+    private func scheduleACTAAnalyticsTick(now: TimeInterval) {
+        guard now - lastACTAMaintenanceCheck >= 4.0, let ghost = actaAnalytics else { return }
+        lastACTAMaintenanceCheck = now
+        syncACTAOperationalMemory()
         let alertsEnabled = featurePreferences.enabledFeatures.contains(.operationalAlerts)
         let memoryEnabled = featurePreferences.enabledFeatures.contains(.chronologicalMemory)
         let retainFullFrames = featurePreferences.retainFullFrames
         let descriptionsEnabled = featurePreferences.enabledFeatures.contains(.visionDescriptions)
         let platesEnabled = featurePreferences.enabledFeatures.contains(.plateRecognition)
         let identityEnabled = featurePreferences.enabledFeatures.contains(.crossCameraIdentity)
-        let spokenEnabled = vlmPreferences.ghostSpokenBriefingEnabled && (alertsEnabled || identityEnabled)
+        let spokenEnabled = vlmPreferences.actaSpokenBriefingEnabled && (alertsEnabled || identityEnabled)
         let memEval = ghost.memoryGuard.evaluate()
 
         // Capture fresh CGImages for active cameras only when opt-in features (alerts or memory) are enabled
@@ -3204,7 +3204,7 @@ final class WallModel: ObservableObject {
             }
         }
 
-        let currentThreadID = activeGhostThreadID
+        let currentThreadID = activeACTAThreadID
         Task { @MainActor [weak self] in
             for item in cameraFramePayloads {
                 await ghost.offerCameraFrame(
@@ -3234,32 +3234,32 @@ final class WallModel: ObservableObject {
                 _ = await ghost.generateSpokenBriefingIfDue()
             }
             guard let self else { return }
-            self.ghostSpokenCards = ghost.recentSpokenCards
-            self.ghostHealthStatus = ghost.aiClient.circuitBreaker.status()
-            self.ghostBudgetSnapshot = ghost.aiClient.budgetTracker.snapshot()
+            self.actaSpokenCards = ghost.recentSpokenCards
+            self.actaHealthStatus = ghost.aiClient.circuitBreaker.status()
+            self.actaBudgetSnapshot = ghost.aiClient.budgetTracker.snapshot()
             if let store = self.trackingStore {
-                self.ghostNarrativeChapters = (try? store.loadGhostNarrativeChapterRecords(limit: 50)) ?? self.ghostNarrativeChapters
-                self.ghostChatThreads = (try? store.listGhostChatThreads(limit: 50)) ?? self.ghostChatThreads
-                self.ghostThreadFocusEntries = (try? store.loadGhostThreadFocusEntries(threadID: currentThreadID, limit: 6)) ?? self.ghostThreadFocusEntries
-                self.ghostChatActions = (try? store.listGhostChatActions(threadID: currentThreadID, status: "proposed")) ?? self.ghostChatActions
+                self.actaNarrativeChapters = (try? store.loadACTANarrativeChapterRecords(limit: 50)) ?? self.actaNarrativeChapters
+                self.actaChatThreads = (try? store.listACTAChatThreads(limit: 50)) ?? self.actaChatThreads
+                self.actaThreadFocusEntries = (try? store.loadACTAThreadFocusEntries(threadID: currentThreadID, limit: 6)) ?? self.actaThreadFocusEntries
+                self.actaChatActions = (try? store.listACTAChatActions(threadID: currentThreadID, status: "proposed")) ?? self.actaChatActions
             }
         }
     }
 
-    func toggleGhostNarrativePin(_ chapter: GhostNarrativeChapterRecord) {
+    func toggleACTANarrativePin(_ chapter: ACTANarrativeChapterRecord) {
         guard let store = trackingStore else { return }
-        try? store.setGhostNarrativePinned(chapterID: chapter.chapterID, pinned: !chapter.pinned)
-        ghostNarrativeChapters = (try? store.loadGhostNarrativeChapterRecords(limit: 50)) ?? ghostNarrativeChapters
+        try? store.setACTANarrativePinned(chapterID: chapter.chapterID, pinned: !chapter.pinned)
+        actaNarrativeChapters = (try? store.loadACTANarrativeChapterRecords(limit: 50)) ?? actaNarrativeChapters
     }
 
-    func saveGhostNarrativeOperatorText(_ chapter: GhostNarrativeChapterRecord, text: String?) {
+    func saveACTANarrativeOperatorText(_ chapter: ACTANarrativeChapterRecord, text: String?) {
         guard let store = trackingStore else { return }
-        try? store.setGhostNarrativeOperatorText(chapterID: chapter.chapterID, operatorText: text)
-        ghostNarrativeChapters = (try? store.loadGhostNarrativeChapterRecords(limit: 50)) ?? ghostNarrativeChapters
+        try? store.setACTANarrativeOperatorText(chapterID: chapter.chapterID, operatorText: text)
+        actaNarrativeChapters = (try? store.loadACTANarrativeChapterRecords(limit: 50)) ?? actaNarrativeChapters
     }
 
-    func forceCloseGhostNarrativeChapter(cameraID: UUID) {
-        guard let ghost = ghostAnalytics else { return }
+    func forceCloseACTANarrativeChapter(cameraID: UUID) {
+        guard let ghost = actaAnalytics else { return }
         let camName = config.cameras.first(where: { $0.id == cameraID })?.name ?? cameraID.uuidString
         let retainCollageJPEG = featurePreferences.retainFullFrames
         Task { @MainActor [weak self] in
@@ -3269,55 +3269,55 @@ final class WallModel: ObservableObject {
                 retainCollageJPEG: retainCollageJPEG
             )
             guard let self, let store = self.trackingStore else { return }
-            self.ghostNarrativeChapters = (try? store.loadGhostNarrativeChapterRecords(limit: 50)) ?? self.ghostNarrativeChapters
+            self.actaNarrativeChapters = (try? store.loadACTANarrativeChapterRecords(limit: 50)) ?? self.actaNarrativeChapters
         }
     }
 
-    func rebuildGhostKnowledgeLayer() {
+    func rebuildACTAKnowledgeLayer() {
         guard let store = trackingStore else { return }
         trackingQueue.async { [weak self] in
-            try? store.rebuildAllGhostKnowledge()
+            try? store.rebuildAllACTAKnowledge()
             Task { @MainActor [weak self] in
                 self?.notice = "Семантическая база знаний (Knowledge Layer + FTS5) успешно перестроена"
             }
         }
     }
 
-    func selectGhostChatThread(_ threadID: String) {
-        activeGhostThreadID = threadID
+    func selectACTAChatThread(_ threadID: String) {
+        activeACTAThreadID = threadID
         guard let store = trackingStore else { return }
-        ghostChatMessages = (try? store.loadGhostChatMessages(threadID: threadID)) ?? []
-        ghostThreadFocusEntries = (try? store.loadGhostThreadFocusEntries(threadID: threadID, limit: 6)) ?? []
-        ghostChatActions = (try? store.listGhostChatActions(threadID: threadID, status: "proposed")) ?? []
+        actaChatMessages = (try? store.loadACTAChatMessages(threadID: threadID)) ?? []
+        actaThreadFocusEntries = (try? store.loadACTAThreadFocusEntries(threadID: threadID, limit: 6)) ?? []
+        actaChatActions = (try? store.listACTAChatActions(threadID: threadID, status: "proposed")) ?? []
     }
 
-    func mergeGhostChatThread(sourceID: String, intoTargetID targetID: String) {
+    func mergeACTAChatThread(sourceID: String, intoTargetID targetID: String) {
         guard let store = trackingStore, sourceID != targetID else { return }
-        try? store.mergeGhostThreads(sourceThreadID: sourceID, intoTargetThreadID: targetID)
-        activeGhostThreadID = targetID
-        ghostChatThreads = (try? store.listGhostChatThreads(limit: 50)) ?? []
-        ghostChatMessages = (try? store.loadGhostChatMessages(threadID: targetID)) ?? []
-        ghostThreadFocusEntries = (try? store.loadGhostThreadFocusEntries(threadID: targetID, limit: 6)) ?? []
-        ghostChatActions = (try? store.listGhostChatActions(threadID: targetID, status: "proposed")) ?? []
+        try? store.mergeACTAThreads(sourceThreadID: sourceID, intoTargetThreadID: targetID)
+        activeACTAThreadID = targetID
+        actaChatThreads = (try? store.listACTAChatThreads(limit: 50)) ?? []
+        actaChatMessages = (try? store.loadACTAChatMessages(threadID: targetID)) ?? []
+        actaThreadFocusEntries = (try? store.loadACTAThreadFocusEntries(threadID: targetID, limit: 6)) ?? []
+        actaChatActions = (try? store.listACTAChatActions(threadID: targetID, status: "proposed")) ?? []
     }
 
-    func reviewGhostChatAction(_ actionID: String, confirmed: Bool) {
-        guard let ghost = ghostAnalytics else { return }
+    func reviewACTAChatAction(_ actionID: String, confirmed: Bool) {
+        guard let ghost = actaAnalytics else { return }
         _ = ghost.reviewAndExecuteChatAction(actionID: actionID, confirmed: confirmed)
         if let store = trackingStore {
-            ghostChatActions = (try? store.listGhostChatActions(threadID: activeGhostThreadID, status: "proposed")) ?? []
+            actaChatActions = (try? store.listACTAChatActions(threadID: activeACTAThreadID, status: "proposed")) ?? []
         }
     }
 
-    func pushGhostFocus(identityID: String, label: String? = nil) {
+    func pushACTAFocus(identityID: String, label: String? = nil) {
         guard let store = trackingStore else { return }
-        try? store.pushGhostThreadFocus(threadID: activeGhostThreadID, kind: "identity", refID: identityID, label: label, pinned: true)
-        ghostThreadFocusEntries = (try? store.loadGhostThreadFocusEntries(threadID: activeGhostThreadID, limit: 6)) ?? []
+        try? store.pushACTAThreadFocus(threadID: activeACTAThreadID, kind: "identity", refID: identityID, label: label, pinned: true)
+        actaThreadFocusEntries = (try? store.loadACTAThreadFocusEntries(threadID: activeACTAThreadID, limit: 6)) ?? []
     }
 
-    func syncGhostOperationalMemory() {
-        ghostAnalytics?.updateOperationalMemorySnapshot(
-            GhostOperationalMemorySnapshot(
+    func syncACTAOperationalMemory() {
+        actaAnalytics?.updateOperationalMemorySnapshot(
+            ACTAOperationalMemorySnapshot(
                 vlmAlerts: vlmAlerts,
                 alertReviews: operationsAlertReviews,
                 alertAcknowledgements: operationsAlertAcknowledgements,
@@ -3330,16 +3330,16 @@ final class WallModel: ObservableObject {
     }
 
     @discardableResult
-    func askGhostAgent(question: String, focusedIdentityID: String? = nil) -> Bool {
+    func askACTAAgent(question: String, focusedIdentityID: String? = nil) -> Bool {
         let text = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return false }
         guard text.count <= 2000 else {
-            ghostAgentStatus = "Agent questions are limited to 2000 characters"
+            actaAgentStatus = "Agent questions are limited to 2000 characters"
             return false
         }
-        guard !ghostAgentBusy, let ghost = ghostAnalytics else { return false }
-        syncGhostOperationalMemory()
-        let threadID = activeGhostThreadID
+        guard !actaAgentBusy, let ghost = actaAnalytics else { return false }
+        syncACTAOperationalMemory()
+        let threadID = activeACTAThreadID
         let cameraNames = Dictionary(uniqueKeysWithValues: config.cameras.map { ($0.id, $0.name) })
         let uptimeNow = ProcessInfo.processInfo.systemUptime
         var livePixelSnapshots: [(cameraID: UUID, cameraName: String, pixel: IdentityPixelBuffer)] = []
@@ -3352,18 +3352,18 @@ final class WallModel: ObservableObject {
                 livePixelSnapshots.append((camera.id, camera.name, IdentityPixelBuffer(value: pixel)))
             }
         }
-        ghostAgentBusy = true
-        ghostAgentStatus = "Ghost Agent analyzing multi-memory sources…"
+        actaAgentBusy = true
+        actaAgentStatus = "ACTA Agent analyzing multi-memory sources…"
         Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.ghostAgentBusy = false }
-            var liveFrames: [GhostLiveCameraFrame] = []
+            defer { self.actaAgentBusy = false }
+            var liveFrames: [ACTALiveCameraFrame] = []
             for snap in livePixelSnapshots.prefix(4) {
                 if let jpeg = try? await VLMFrameEncoder.jpegData(from: snap.pixel.value, maxDimension: 640, quality: 0.45) {
-                    liveFrames.append(GhostLiveCameraFrame(cameraID: snap.cameraID, cameraName: snap.cameraName, jpegData: jpeg))
+                    liveFrames.append(ACTALiveCameraFrame(cameraID: snap.cameraID, cameraName: snap.cameraName, jpegData: jpeg))
                 }
             }
-            let answer = await ghost.askGhostChatAgent(
+            let answer = await ghost.askACTAChatAgent(
                 question: text,
                 threadID: threadID,
                 focusedIdentityID: focusedIdentityID,
@@ -3371,19 +3371,19 @@ final class WallModel: ObservableObject {
                 cameraNames: cameraNames,
                 onProgress: { [weak self] progress in
                     Task { @MainActor [weak self] in
-                        self?.ghostAgentStatus = progress
+                        self?.actaAgentStatus = progress
                     }
                 }
             )
             if let store = self.trackingStore {
-                self.ghostChatThreads = (try? store.listGhostChatThreads(limit: 50)) ?? self.ghostChatThreads
-                self.ghostChatMessages = (try? store.loadGhostChatMessages(threadID: threadID)) ?? self.ghostChatMessages
-                self.ghostThreadFocusEntries = (try? store.loadGhostThreadFocusEntries(threadID: threadID, limit: 6)) ?? self.ghostThreadFocusEntries
-                self.ghostChatActions = (try? store.listGhostChatActions(threadID: threadID, status: "proposed")) ?? self.ghostChatActions
+                self.actaChatThreads = (try? store.listACTAChatThreads(limit: 50)) ?? self.actaChatThreads
+                self.actaChatMessages = (try? store.loadACTAChatMessages(threadID: threadID)) ?? self.actaChatMessages
+                self.actaThreadFocusEntries = (try? store.loadACTAThreadFocusEntries(threadID: threadID, limit: 6)) ?? self.actaThreadFocusEntries
+                self.actaChatActions = (try? store.listACTAChatActions(threadID: threadID, status: "proposed")) ?? self.actaChatActions
             }
-            self.ghostAgentStatus = answer.confidence >= 0.4
-                ? "Ghost Agent answer received (\(Int((answer.confidence * 100).rounded()))% confidence)"
-                : "Ghost Agent answer received"
+            self.actaAgentStatus = answer.confidence >= 0.4
+                ? "ACTA Agent answer received (\(Int((answer.confidence * 100).rounded()))% confidence)"
+                : "ACTA Agent answer received"
         }
         return true
     }
@@ -3633,10 +3633,10 @@ final class WallModel: ObservableObject {
                             let observedAt = Date()
                             let historyQueue = self.trackingQueue
                             let featureCoordinator = self.featureCoordinator
-                            let ghost = self.ghostAnalytics
+                            let ghost = self.actaAnalytics
                             let shouldQueueDescriptions = self.featurePreferences.enabledFeatures.contains(.visionDescriptions)
                             let shouldQueuePlates = self.featurePreferences.enabledFeatures.contains(.plateRecognition)
-                            let shouldRunGhostObservation = shouldQueueDescriptions
+                            let shouldRunACTAObservation = shouldQueueDescriptions
                                 || shouldQueuePlates
                                 || self.featurePreferences.enabledFeatures.contains(.crossCameraIdentity)
                                 || self.featurePreferences.enabledFeatures.contains(.knowledgeSearch)
@@ -3665,7 +3665,7 @@ final class WallModel: ObservableObject {
                                         let isNewTrack = try store.record(object, cameraID: cameraID, cameraName: cameraName,
                                                                           cropJPEG: crop, cutoutPNG: cutout,
                                                                           reidEmbedding: reidEmbedding, at: observedAt)
-                                        if let ghost, shouldRunGhostObservation {
+                                        if let ghost, shouldRunACTAObservation {
                                             let cgCrop: CGImage?
                                             if let crop, let src = CGImageSourceCreateWithData(crop as CFData, nil) {
                                                 cgCrop = CGImageSourceCreateImageAtIndex(src, 0, nil)

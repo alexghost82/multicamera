@@ -127,9 +127,9 @@
     { "id": "yolo", "file": "native/Sources/CameraWall/YOLO26Detector.swift", "line": 1 },
     { "id": "tracks", "file": "native/Sources/CameraCore/FallDetector.swift", "line": 1 },
     { "id": "reid", "file": "native/Sources/CameraWall/ONNXReIDEncoder.swift", "line": 1 },
-    { "id": "ghost_id", "file": "native/Sources/CameraCore/GhostIdentityEngine.swift", "line": 1 },
-    { "id": "coord", "file": "native/Sources/CameraWall/GhostAnalyticsCoordinator.swift", "line": 1 },
-    { "id": "vlm", "file": "native/Sources/CameraWall/GhostAIClient.swift", "line": 1 },
+    { "id": "ghost_id", "file": "native/Sources/CameraCore/ACTAIdentityEngine.swift", "line": 1 },
+    { "id": "coord", "file": "native/Sources/CameraWall/ACTAAnalyticsCoordinator.swift", "line": 1 },
+    { "id": "vlm", "file": "native/Sources/CameraWall/ACTAAIClient.swift", "line": 1 },
     { "id": "ui", "file": "native/Sources/CameraWall/WallModel.swift", "line": 1 },
     { "id": "store", "file": "native/Sources/CameraCore/CameraFeatureStore.swift", "line": 1 }
   ]

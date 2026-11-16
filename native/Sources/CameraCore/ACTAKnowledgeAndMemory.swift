@@ -5,7 +5,7 @@ import Foundation
 
 // MARK: - 1. Content-Hash AI Request Deduplication
 
-public enum GhostAIRequestHasher {
+public enum ACTAAIRequestHasher {
     /// Computes a deterministic SHA-256 hex digest over taskType, promptVersion, promptText, and attached image bytes.
     public static func computeHash(
         taskType: String,
@@ -28,27 +28,27 @@ public enum GhostAIRequestHasher {
     }
 }
 
-// MARK: - 2. Smart Narrative Sampler ("Ghost Memory")
+// MARK: - 2. Smart Narrative Sampler ("ACTA Memory")
 
-public enum GhostNarrativeTriggerMode: String, Codable, Sendable, CaseIterable {
+public enum ACTANarrativeTriggerMode: String, Codable, Sendable, CaseIterable {
     case interval
     case object
 }
 
-public enum GhostNarrativeSampleReason: String, Codable, Sendable, Equatable {
+public enum ACTANarrativeSampleReason: String, Codable, Sendable, Equatable {
     case firstFrame = "first_frame"
     case sceneChanged = "scene_changed"
     case newObject = "new_object"
     case objectHeartbeat = "object_heartbeat"
 }
 
-public struct GhostNarrativeSampledFrame: Sendable {
+public struct ACTANarrativeSampledFrame: Sendable {
     public var cgImage: CGImage
     public var capturedAt: Date
     public var activeLabels: [String]
     public var activeTrackIDs: [String]
     public var activeIdentityIDs: [String]
-    public var reason: GhostNarrativeSampleReason
+    public var reason: ACTANarrativeSampleReason
 
     public init(
         cgImage: CGImage,
@@ -56,7 +56,7 @@ public struct GhostNarrativeSampledFrame: Sendable {
         activeLabels: [String],
         activeTrackIDs: [String] = [],
         activeIdentityIDs: [String] = [],
-        reason: GhostNarrativeSampleReason = .sceneChanged
+        reason: ACTANarrativeSampleReason = .sceneChanged
     ) {
         self.cgImage = cgImage
         self.capturedAt = capturedAt
@@ -67,7 +67,7 @@ public struct GhostNarrativeSampledFrame: Sendable {
     }
 }
 
-public enum GhostNarrativeSamplerRules {
+public enum ACTANarrativeSamplerRules {
     public static let storyLabels: Set<String> = [
         "person", "car", "truck", "bus", "motorcycle", "bicycle",
         "dog", "cat", "horse", "bird", "boat", "train", "airplane",
@@ -119,7 +119,7 @@ public enum GhostNarrativeSamplerRules {
             luma[i] = UInt8(min(255, (77 * r + 150 * g + 29 * b) >> 8))
         }
 
-        let hist = GhostChromaPrint.computeHSVHistogram(from: cgImage)
+        let hist = ACTAChromaPrint.computeHSVHistogram(from: cgImage)
         guard let prevLuma = previousLuma, prevLuma.count == luma.count else {
             return (true, luma, hist)
         }
@@ -132,7 +132,7 @@ public enum GhostNarrativeSamplerRules {
 
         var corr = 1.0
         if let prevHist = previousHistogram, !prevHist.isEmpty, prevHist.count == hist.count {
-            corr = GhostChromaPrint.hsvCosineSimilarity(prevHist, hist)
+            corr = ACTAChromaPrint.hsvCosineSimilarity(prevHist, hist)
         }
 
         let changed = (meanDiff > 0.045) || (corr < 0.96)
@@ -140,11 +140,11 @@ public enum GhostNarrativeSamplerRules {
     }
 
     /// Thins an array of frames to at most `maxFrames`, preserving the first frame, last frame, and evenly spaced intermediate frames.
-    public static func thinFrames(_ frames: [GhostNarrativeSampledFrame], maxFrames: Int = 28) -> [GhostNarrativeSampledFrame] {
+    public static func thinFrames(_ frames: [ACTANarrativeSampledFrame], maxFrames: Int = 28) -> [ACTANarrativeSampledFrame] {
         guard maxFrames >= 2, frames.count > maxFrames else {
             return frames
         }
-        var result: [GhostNarrativeSampledFrame] = []
+        var result: [ACTANarrativeSampledFrame] = []
         result.reserveCapacity(maxFrames)
         let lastIndex = frames.count - 1
         for i in 0..<maxFrames {
@@ -162,14 +162,14 @@ public enum GhostNarrativeSamplerRules {
     }
 }
 
-public struct GhostNarrativeChapterRecord: Codable, Sendable, Equatable, Identifiable {
+public struct ACTANarrativeChapterRecord: Codable, Sendable, Equatable, Identifiable {
     public var id: String { chapterID }
     public var chapterID: String
     public var cameraID: UUID
     public var cameraName: String
     public var startedAt: Date
     public var endedAt: Date
-    public var narrative: GhostTemporalNarrativeResult
+    public var narrative: ACTATemporalNarrativeResult
     public var aiSummary: String
     public var operatorText: String?
     public var operatorMarked: Bool
@@ -192,7 +192,7 @@ public struct GhostNarrativeChapterRecord: Codable, Sendable, Equatable, Identif
         cameraName: String,
         startedAt: Date,
         endedAt: Date,
-        narrative: GhostTemporalNarrativeResult,
+        narrative: ACTATemporalNarrativeResult,
         aiSummary: String? = nil,
         operatorText: String? = nil,
         operatorMarked: Bool = false,
@@ -221,7 +221,7 @@ public struct GhostNarrativeChapterRecord: Codable, Sendable, Equatable, Identif
 
 // MARK: - 3. Semantic Knowledge Layer (Attribute Index, Dossiers, Visits, Routes)
 
-public enum GhostColorNormalizer {
+public enum ACTAColorNormalizer {
     private static let palette: [(name: String, r: Double, g: Double, b: Double)] = [
         ("black", 20, 20, 22),
         ("white", 235, 235, 240),
@@ -297,7 +297,7 @@ public enum GhostColorNormalizer {
     }
 }
 
-public struct GhostAttributeIndexEntry: Codable, Sendable, Equatable {
+public struct ACTAAttributeIndexEntry: Codable, Sendable, Equatable {
     public var trackID: String
     public var identityID: String
     public var cameraID: String
@@ -330,17 +330,17 @@ public struct GhostAttributeIndexEntry: Codable, Sendable, Equatable {
         self.source = source
     }
 
-    /// Extracts garment-bound facets from a VLM `GhostCropDescription` and/or local `GhostChromaSignature`.
+    /// Extracts garment-bound facets from a VLM `ACTACropDescription` and/or local `ACTAChromaSignature`.
     public static func extractEntries(
         trackID: String,
         identityID: String,
         cameraID: String,
         capturedAt: Date,
         cropQuality: Double,
-        description: GhostCropDescription?,
-        chromaSignature: GhostChromaSignature?
-    ) -> [GhostAttributeIndexEntry] {
-        var entries: [GhostAttributeIndexEntry] = []
+        description: ACTACropDescription?,
+        chromaSignature: ACTAChromaSignature?
+    ) -> [ACTAAttributeIndexEntry] {
+        var entries: [ACTAAttributeIndexEntry] = []
 
         func add(_ facet: String, _ rawValue: String?, conf: Double, source: String) {
             guard let cleaned = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
@@ -349,7 +349,7 @@ public struct GhostAttributeIndexEntry: Codable, Sendable, Equatable {
                   cleaned != "null",
                   cleaned != "unknown" else { return }
             entries.append(
-                GhostAttributeIndexEntry(
+                ACTAAttributeIndexEntry(
                     trackID: trackID,
                     identityID: identityID,
                     cameraID: cameraID,
@@ -370,17 +370,17 @@ public struct GhostAttributeIndexEntry: Codable, Sendable, Equatable {
                 add("sex", p.apparentSex, conf: conf, source: "describe")
                 add("age_group", p.ageGroup, conf: conf, source: "describe")
                 add("build", p.build, conf: conf, source: "describe")
-                add("hair_color", GhostColorNormalizer.normalizeColorToken(p.hairStyleOrColor) ?? p.hairStyleOrColor, conf: conf, source: "describe")
+                add("hair_color", ACTAColorNormalizer.normalizeColorToken(p.hairStyleOrColor) ?? p.hairStyleOrColor, conf: conf, source: "describe")
                 add("hair_style", p.hairStyleOrColor, conf: conf, source: "describe")
                 add("facial_hair", p.facialHair, conf: conf, source: "describe")
                 add("headwear", p.headwear, conf: conf, source: "describe")
                 add("upper_wear", p.upperClothingType, conf: conf, source: "describe")
-                if let uc = GhostColorNormalizer.normalizeColorToken(p.upperColor) {
+                if let uc = ACTAColorNormalizer.normalizeColorToken(p.upperColor) {
                     add("upper_color", uc, conf: conf, source: "describe")
                     add("color", uc, conf: conf * 0.9, source: "describe")
                 }
                 add("lower_wear", p.lowerClothingType, conf: conf, source: "describe")
-                if let lc = GhostColorNormalizer.normalizeColorToken(p.lowerColor) {
+                if let lc = ACTAColorNormalizer.normalizeColorToken(p.lowerColor) {
                     add("lower_color", lc, conf: conf, source: "describe")
                     add("color", lc, conf: conf * 0.85, source: "describe")
                 }
@@ -393,30 +393,30 @@ public struct GhostAttributeIndexEntry: Codable, Sendable, Equatable {
                 add("vehicle_category", v.vehicleType, conf: conf, source: "describe")
                 add("make", v.make, conf: conf, source: "describe")
                 add("model", v.model, conf: conf, source: "describe")
-                if let vc = GhostColorNormalizer.normalizeColorToken(v.primaryColor) {
+                if let vc = ACTAColorNormalizer.normalizeColorToken(v.primaryColor) {
                     add("vehicle_color", vc, conf: conf, source: "describe")
                     add("color", vc, conf: conf, source: "describe")
                 }
                 if let plate = v.plateText {
-                    add("plate_number", GhostVehicleRegistryRecord.normalizeIsraeliPlate(plate) ?? plate, conf: conf, source: "describe")
+                    add("plate_number", ACTAVehicleRegistryRecord.normalizeIsraeliPlate(plate) ?? plate, conf: conf, source: "describe")
                 }
             }
         }
 
-        // Local fallback from GhostChromaSignature at confidence = 0.40
+        // Local fallback from ACTAChromaSignature at confidence = 0.40
         if let sig = chromaSignature {
             let isVeh = (description?.kind.lowercased() == "vehicle") || (sig.vehicleColorHex != nil)
             if isVeh {
-                if let vc = GhostColorNormalizer.colorNameFromHex(sig.vehicleColorHex ?? sig.upperColorHex) {
+                if let vc = ACTAColorNormalizer.colorNameFromHex(sig.vehicleColorHex ?? sig.upperColorHex) {
                     add("vehicle_color", vc, conf: 0.40, source: "local")
                     add("color", vc, conf: 0.40, source: "local")
                 }
             } else {
-                if let uc = GhostColorNormalizer.colorNameFromHex(sig.upperColorHex) {
+                if let uc = ACTAColorNormalizer.colorNameFromHex(sig.upperColorHex) {
                     add("upper_color", uc, conf: 0.40, source: "local")
                     add("color", uc, conf: 0.35, source: "local")
                 }
-                if let lc = GhostColorNormalizer.colorNameFromHex(sig.lowerColorHex) {
+                if let lc = ACTAColorNormalizer.colorNameFromHex(sig.lowerColorHex) {
                     add("lower_color", lc, conf: 0.40, source: "local")
                     add("color", lc, conf: 0.35, source: "local")
                 }
@@ -427,7 +427,7 @@ public struct GhostAttributeIndexEntry: Codable, Sendable, Equatable {
     }
 }
 
-public struct GhostIdentityDossier: Codable, Sendable, Equatable {
+public struct ACTAIdentityDossier: Codable, Sendable, Equatable {
     public var identityID: String
     public var displayName: String?
     public var kind: String
@@ -457,9 +457,9 @@ public struct GhostIdentityDossier: Codable, Sendable, Equatable {
         self.updatedAt = updatedAt
     }
 
-    public var facetSummary: GhostFacetSummary {
+    public var facetSummary: ACTAFacetSummary {
         let sexRaw = facets["sex"]?.lowercased()
-        let resolvedSex: GhostResolvedSex
+        let resolvedSex: ACTAResolvedSex
         if sexRaw == "male" || sexRaw == "m" {
             resolvedSex = .male
         } else if sexRaw == "female" || sexRaw == "f" {
@@ -468,7 +468,7 @@ public struct GhostIdentityDossier: Codable, Sendable, Equatable {
             resolvedSex = .unknown
         }
         let makeModelStr = [facets["make"], facets["model"]].compactMap { $0 }.joined(separator: " ").trimmingCharacters(in: .whitespaces)
-        return GhostFacetSummary(
+        return ACTAFacetSummary(
             identityID: identityID,
             kind: facets["kind"] ?? kind,
             resolvedSex: resolvedSex,
@@ -489,17 +489,17 @@ public struct GhostIdentityDossier: Codable, Sendable, Equatable {
     }
 }
 
-public enum GhostIdentityDossierBuilder {
+public enum ACTAIdentityDossierBuilder {
     /// Aggregates all attribute index entries and free-text descriptions for an identity via weighted voting:
     /// `voteWeight = confidence * max(cropQuality, 0.25)`.
     public static func build(
         identityID: String,
         displayName: String?,
         kind: String,
-        entries: [GhostAttributeIndexEntry],
+        entries: [ACTAAttributeIndexEntry],
         descriptions: [String] = [],
         now: Date = Date()
-    ) -> GhostIdentityDossier {
+    ) -> ACTAIdentityDossier {
         var bucketWeights: [String: [String: Double]] = [:]
         for entry in entries where entry.identityID == identityID {
             let weight = entry.confidence * max(entry.cropQuality, 0.25)
@@ -565,7 +565,7 @@ public enum GhostIdentityDossierBuilder {
         blobTokens.append(contentsOf: descriptions)
         let textBlob = blobTokens.joined(separator: " ")
 
-        return GhostIdentityDossier(
+        return ACTAIdentityDossier(
             identityID: identityID,
             displayName: displayName,
             kind: canonicalFacets["kind"] ?? kind,
@@ -578,7 +578,7 @@ public enum GhostIdentityDossierBuilder {
     }
 }
 
-public struct GhostVisitSession: Codable, Sendable, Equatable, Identifiable {
+public struct ACTAVisitSession: Codable, Sendable, Equatable, Identifiable {
     public var id: String { visitID }
     public var visitID: String
     public var identityID: String
@@ -610,7 +610,7 @@ public struct GhostVisitSession: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
-public struct GhostSightingForVisit: Sendable {
+public struct ACTASightingForVisit: Sendable {
     public var trackID: String
     public var identityID: String
     public var cameraID: String
@@ -638,14 +638,14 @@ public struct GhostSightingForVisit: Sendable {
     }
 }
 
-public enum GhostVisitBuilder {
+public enum ACTAVisitBuilder {
     /// Collapses consecutive sightings of the same identity separated by at most `visitGapSeconds` into discrete visit sessions.
     public static func buildVisits(
-        sightings: [GhostSightingForVisit],
+        sightings: [ACTASightingForVisit],
         visitGapSeconds: TimeInterval = 120.0
-    ) -> [GhostVisitSession] {
+    ) -> [ACTAVisitSession] {
         let grouped = Dictionary(grouping: sightings, by: \.identityID)
-        var allVisits: [GhostVisitSession] = []
+        var allVisits: [ACTAVisitSession] = []
 
         for (identityID, items) in grouped {
             let sorted = items.sorted { $0.firstSeenAt < $1.firstSeenAt }
@@ -663,7 +663,7 @@ public enum GhostVisitBuilder {
                 let visitID = "\(identityID)-V\(String(format: "%03d", visitIndex))"
                 visitIndex += 1
                 allVisits.append(
-                    GhostVisitSession(
+                    ACTAVisitSession(
                         visitID: visitID,
                         identityID: identityID,
                         startedAt: curStart,
@@ -707,7 +707,7 @@ public enum GhostVisitBuilder {
     }
 }
 
-public enum GhostRouteTransitionPlausibility: String, Codable, Sendable, Equatable {
+public enum ACTARouteTransitionPlausibility: String, Codable, Sendable, Equatable {
     case sameCamera = "same_camera"
     case plausible = "plausible"
     case tooFastVsLearned = "too_fast_vs_learned"
@@ -715,13 +715,13 @@ public enum GhostRouteTransitionPlausibility: String, Codable, Sendable, Equatab
     case unlearnedTransition = "unlearned_transition"
 }
 
-public struct GhostRouteLeg: Codable, Sendable, Equatable {
+public struct ACTARouteLeg: Codable, Sendable, Equatable {
     public var fromCameraID: String
     public var toCameraID: String
     public var departedAt: Date
     public var arrivedAt: Date
     public var transitSeconds: Double
-    public var plausibility: GhostRouteTransitionPlausibility
+    public var plausibility: ACTARouteTransitionPlausibility
     public var topologyBonus: Double
 
     public init(
@@ -730,7 +730,7 @@ public struct GhostRouteLeg: Codable, Sendable, Equatable {
         departedAt: Date,
         arrivedAt: Date,
         transitSeconds: Double,
-        plausibility: GhostRouteTransitionPlausibility,
+        plausibility: ACTARouteTransitionPlausibility,
         topologyBonus: Double
     ) {
         self.fromCameraID = fromCameraID
@@ -743,13 +743,13 @@ public struct GhostRouteLeg: Codable, Sendable, Equatable {
     }
 }
 
-public struct GhostIdentityRoute: Codable, Sendable, Equatable {
+public struct ACTAIdentityRoute: Codable, Sendable, Equatable {
     public var identityID: String
     public var sightingsCount: Int
     public var orderedCameras: [String]
-    public var legs: [GhostRouteLeg]
+    public var legs: [ACTARouteLeg]
 
-    public init(identityID: String, sightingsCount: Int, orderedCameras: [String], legs: [GhostRouteLeg]) {
+    public init(identityID: String, sightingsCount: Int, orderedCameras: [String], legs: [ACTARouteLeg]) {
         self.identityID = identityID
         self.sightingsCount = sightingsCount
         self.orderedCameras = orderedCameras
@@ -757,18 +757,18 @@ public struct GhostIdentityRoute: Codable, Sendable, Equatable {
     }
 }
 
-public enum GhostRouteBuilder {
+public enum ACTARouteBuilder {
     public static func buildRoute(
         identityID: String,
-        sightings: [GhostSightingForVisit],
-        topology: GhostCameraTopology
-    ) -> GhostIdentityRoute {
+        sightings: [ACTASightingForVisit],
+        topology: ACTACameraTopology
+    ) -> ACTAIdentityRoute {
         let sorted = sightings.filter { $0.identityID == identityID }.sorted { $0.firstSeenAt < $1.firstSeenAt }
         guard !sorted.isEmpty else {
-            return GhostIdentityRoute(identityID: identityID, sightingsCount: 0, orderedCameras: [], legs: [])
+            return ACTAIdentityRoute(identityID: identityID, sightingsCount: 0, orderedCameras: [], legs: [])
         }
         var orderedCameras: [String] = [sorted[0].cameraID]
-        var legs: [GhostRouteLeg] = []
+        var legs: [ACTARouteLeg] = []
 
         for idx in 1..<sorted.count {
             let prev = sorted[idx - 1]
@@ -779,7 +779,7 @@ public enum GhostRouteBuilder {
             let dt = curr.firstSeenAt.timeIntervalSince(prev.lastSeenAt)
             let prior = topology.transitionPrior(from: prev.cameraID, to: curr.cameraID, deltaSec: max(0, dt))
             let bonus = prior - 0.50
-            let plausibility: GhostRouteTransitionPlausibility
+            let plausibility: ACTARouteTransitionPlausibility
             if prev.cameraID == curr.cameraID {
                 plausibility = .sameCamera
             } else if prior > 0.55 {
@@ -792,7 +792,7 @@ public enum GhostRouteBuilder {
                 plausibility = .unlearnedTransition
             }
             legs.append(
-                GhostRouteLeg(
+                ACTARouteLeg(
                     fromCameraID: prev.cameraID,
                     toCameraID: curr.cameraID,
                     departedAt: prev.lastSeenAt,
@@ -803,7 +803,7 @@ public enum GhostRouteBuilder {
                 )
             )
         }
-        return GhostIdentityRoute(
+        return ACTAIdentityRoute(
             identityID: identityID,
             sightingsCount: sorted.count,
             orderedCameras: orderedCameras,
@@ -812,7 +812,7 @@ public enum GhostRouteBuilder {
     }
 }
 
-public struct GhostCompanionRecord: Codable, Sendable, Equatable {
+public struct ACTACompanionRecord: Codable, Sendable, Equatable {
     public var companionIdentityID: String
     public var coSightingCount: Int
     public var sharedCameras: [String]
@@ -834,12 +834,12 @@ public struct GhostCompanionRecord: Codable, Sendable, Equatable {
     }
 }
 
-public enum GhostCompanionFinder {
+public enum ACTACompanionFinder {
     public static func findCompanions(
         for identityID: String,
-        allSightings: [GhostSightingForVisit],
+        allSightings: [ACTASightingForVisit],
         maxGapSeconds: TimeInterval = 15.0
-    ) -> [GhostCompanionRecord] {
+    ) -> [ACTACompanionRecord] {
         let targetSightings = allSightings.filter { $0.identityID == identityID }
         guard !targetSightings.isEmpty else { return [] }
         let otherSightings = allSightings.filter { $0.identityID != identityID }
@@ -874,11 +874,11 @@ public enum GhostCompanionFinder {
             }
         }
 
-        return counts.keys.compactMap { cid -> GhostCompanionRecord? in
+        return counts.keys.compactMap { cid -> ACTACompanionRecord? in
             guard let count = counts[cid],
                   let first = firstSeen[cid],
                   let last = lastSeen[cid] else { return nil }
-            return GhostCompanionRecord(
+            return ACTACompanionRecord(
                 companionIdentityID: cid,
                 coSightingCount: count,
                 sharedCameras: Array(cameras[cid] ?? []).sorted(),
@@ -896,7 +896,7 @@ public enum GhostCompanionFinder {
 
 // MARK: - 4. Agent Conversation History, Focus Memory, Chain Debt & Actions
 
-public struct GhostPendingOutputDebt: Codable, Sendable, Equatable {
+public struct ACTAPendingOutputDebt: Codable, Sendable, Equatable {
     public var callID: String
     public var outputJSON: String
 
@@ -906,7 +906,7 @@ public struct GhostPendingOutputDebt: Codable, Sendable, Equatable {
     }
 }
 
-public struct GhostChatThreadRecord: Codable, Sendable, Equatable, Identifiable {
+public struct ACTAChatThreadRecord: Codable, Sendable, Equatable, Identifiable {
     public var id: String { threadID }
     public var threadID: String
     public var title: String
@@ -915,7 +915,7 @@ public struct GhostChatThreadRecord: Codable, Sendable, Equatable, Identifiable 
     public var severity: String // "normal" | "warning" | "critical"
     public var pinned: Bool
     public var lastResponseID: String?
-    public var pendingOutputs: [GhostPendingOutputDebt]
+    public var pendingOutputs: [ACTAPendingOutputDebt]
     public var boundCameraIDs: [String]
     public var linkedThreadIDs: [String]
     public var createdAt: Date
@@ -929,7 +929,7 @@ public struct GhostChatThreadRecord: Codable, Sendable, Equatable, Identifiable 
         severity: String = "normal",
         pinned: Bool = false,
         lastResponseID: String? = nil,
-        pendingOutputs: [GhostPendingOutputDebt] = [],
+        pendingOutputs: [ACTAPendingOutputDebt] = [],
         boundCameraIDs: [String] = [],
         linkedThreadIDs: [String] = [],
         createdAt: Date = Date(),
@@ -950,13 +950,13 @@ public struct GhostChatThreadRecord: Codable, Sendable, Equatable, Identifiable 
     }
 }
 
-public struct GhostChatMessageRecord: Codable, Sendable, Equatable, Identifiable {
+public struct ACTAChatMessageRecord: Codable, Sendable, Equatable, Identifiable {
     public var id: String { messageID }
     public var messageID: String
     public var threadID: String
     public var role: String // "user" | "assistant" | "tool"
     public var text: String
-    public var structuredAnswer: GhostChatFinalAnswer?
+    public var structuredAnswer: ACTAChatFinalAnswer?
     public var clipID: String?
     public var callID: String?
     public var createdAt: Date
@@ -966,7 +966,7 @@ public struct GhostChatMessageRecord: Codable, Sendable, Equatable, Identifiable
         threadID: String,
         role: String,
         text: String,
-        structuredAnswer: GhostChatFinalAnswer? = nil,
+        structuredAnswer: ACTAChatFinalAnswer? = nil,
         clipID: String? = nil,
         callID: String? = nil,
         createdAt: Date = Date()
@@ -982,7 +982,7 @@ public struct GhostChatMessageRecord: Codable, Sendable, Equatable, Identifiable
     }
 }
 
-public struct GhostThreadFocusEntry: Codable, Sendable, Equatable, Identifiable {
+public struct ACTAThreadFocusEntry: Codable, Sendable, Equatable, Identifiable {
     public var id: String { "\(threadID):\(kind):\(refID)" }
     public var threadID: String
     public var kind: String // "identity" | "camera"
@@ -1008,7 +1008,7 @@ public struct GhostThreadFocusEntry: Codable, Sendable, Equatable, Identifiable 
     }
 }
 
-public struct GhostToolCallAuditRecord: Codable, Sendable, Equatable, Identifiable {
+public struct ACTAToolCallAuditRecord: Codable, Sendable, Equatable, Identifiable {
     public var id: String
     public var threadID: String
     public var toolName: String
@@ -1042,7 +1042,7 @@ public struct GhostToolCallAuditRecord: Codable, Sendable, Equatable, Identifiab
     }
 }
 
-public struct GhostChatActionRecord: Codable, Sendable, Equatable, Identifiable {
+public struct ACTAChatActionRecord: Codable, Sendable, Equatable, Identifiable {
     public var id: String { actionID }
     public var actionID: String
     public var threadID: String
@@ -1074,7 +1074,7 @@ public struct GhostChatActionRecord: Codable, Sendable, Equatable, Identifiable 
     }
 }
 
-public struct GhostChatClipRecord: Codable, Sendable, Equatable, Identifiable {
+public struct ACTAChatClipRecord: Codable, Sendable, Equatable, Identifiable {
     public static let defaultTTLSeconds: TimeInterval = 44.0 * 60.0 // 44 minutes
 
     public var id: String { clipID }
@@ -1104,7 +1104,7 @@ public struct GhostChatClipRecord: Codable, Sendable, Equatable, Identifiable {
 
 // MARK: - 5. Read-Only SQL Validator for `run_readonly_sql`
 
-public enum GhostReadOnlySQLGuard {
+public enum ACTAReadOnlySQLGuard {
     private static let forbiddenKeywords: Set<String> = [
         "insert", "update", "delete", "drop", "alter", "pragma",
         "attach", "detach", "create", "replace", "truncate",
@@ -1145,23 +1145,23 @@ public enum GhostReadOnlySQLGuard {
         let safeMaxLimit = max(1, min(maxLimit, 1000))
         let trimmed = rawSQL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            throw NSError(domain: "GhostReadOnlySQLGuard", code: 1, userInfo: [NSLocalizedDescriptionKey: "Empty SQL query"])
+            throw NSError(domain: "ACTAReadOnlySQLGuard", code: 1, userInfo: [NSLocalizedDescriptionKey: "Empty SQL query"])
         }
         // Disallow SQL comments and multiple statements via semicolon
         let withoutTrailingSemicolon = trimmed.hasSuffix(";") ? String(trimmed.dropLast()).trimmingCharacters(in: .whitespacesAndNewlines) : trimmed
         let structural = stripQuotedLiterals(withoutTrailingSemicolon)
         if structural.contains(";") || structural.contains("--") || structural.contains("/*") {
-            throw NSError(domain: "GhostReadOnlySQLGuard", code: 2, userInfo: [NSLocalizedDescriptionKey: "Multiple SQL statements or comments are forbidden"])
+            throw NSError(domain: "ACTAReadOnlySQLGuard", code: 2, userInfo: [NSLocalizedDescriptionKey: "Multiple SQL statements or comments are forbidden"])
         }
 
         let lowerStructural = structural.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         guard lowerStructural.hasPrefix("select ") || lowerStructural.hasPrefix("with ") else {
-            throw NSError(domain: "GhostReadOnlySQLGuard", code: 3, userInfo: [NSLocalizedDescriptionKey: "Only SELECT or WITH queries are permitted"])
+            throw NSError(domain: "ACTAReadOnlySQLGuard", code: 3, userInfo: [NSLocalizedDescriptionKey: "Only SELECT or WITH queries are permitted"])
         }
 
         let tokens = lowerStructural.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
         for token in tokens where forbiddenKeywords.contains(token) {
-            throw NSError(domain: "GhostReadOnlySQLGuard", code: 4, userInfo: [NSLocalizedDescriptionKey: "Forbidden keyword '\(token)' in read-only SQL"])
+            throw NSError(domain: "ACTAReadOnlySQLGuard", code: 4, userInfo: [NSLocalizedDescriptionKey: "Forbidden keyword '\(token)' in read-only SQL"])
         }
 
         if !tokens.contains("limit") {
@@ -1173,18 +1173,18 @@ public enum GhostReadOnlySQLGuard {
 
 // MARK: - 6. Memory Guard (RAM Watchdog) & Storage Janitor Report
 
-public enum GhostMemoryPressureLevel: String, Codable, Sendable, Equatable {
+public enum ACTAMemoryPressureLevel: String, Codable, Sendable, Equatable {
     case ok
     case soft
     case hard
 }
 
-public final class GhostMemoryGuard: @unchecked Sendable {
+public final class ACTAMemoryGuard: @unchecked Sendable {
     private let lock = NSLock()
     public let softThresholdMB: Double
     public let hardThresholdMB: Double
     public let releaseHysteresis: Double
-    private var currentLevel: GhostMemoryPressureLevel = .ok
+    private var currentLevel: ACTAMemoryPressureLevel = .ok
     private var overriddenRSSMB: Double?
 
     public init(
@@ -1216,7 +1216,7 @@ public final class GhostMemoryGuard: @unchecked Sendable {
     }
 
     @discardableResult
-    public func evaluate() -> (level: GhostMemoryPressureLevel, rssMB: Double, allowContextFrames: Bool, strideMultiplier: Int) {
+    public func evaluate() -> (level: ACTAMemoryPressureLevel, rssMB: Double, allowContextFrames: Bool, strideMultiplier: Int) {
         lock.lock()
         defer { lock.unlock() }
 
@@ -1253,7 +1253,7 @@ public final class GhostMemoryGuard: @unchecked Sendable {
     }
 }
 
-public struct GhostStorageJanitorPolicy: Codable, Sendable, Equatable {
+public struct ACTAStorageJanitorPolicy: Codable, Sendable, Equatable {
     public var maxMediaDiskMB: Double
     public var minFreeDiskGB: Double
     public var maxCropsPerIdentity: Int
@@ -1278,7 +1278,7 @@ public struct GhostStorageJanitorPolicy: Codable, Sendable, Equatable {
     }
 }
 
-public struct GhostStorageJanitorReport: Codable, Sendable, Equatable {
+public struct ACTAStorageJanitorReport: Codable, Sendable, Equatable {
     public var degradedCutoutCount: Int
     public var degradedCropCount: Int
     public var overflowCropsDegradedCount: Int

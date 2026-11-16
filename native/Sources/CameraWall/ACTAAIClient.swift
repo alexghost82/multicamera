@@ -483,6 +483,25 @@ public actor ACTAAsyncLaneLimiter {
 
 // MARK: - 5b. Agent Tool-Calling Types
 
+/// Refuse cross-origin redirects so a loopback service cannot forward images or
+/// credentials to another host behind the caller's external-data consent gate.
+final class ACTAHTTPRedirectPolicy: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    static func allowsRedirect(from source: URL?, to destination: URL?) -> Bool {
+        guard let source, let destination else { return false }
+        func port(_ url: URL) -> Int? { url.port ?? (url.scheme?.lowercased() == "https" ? 443 : 80) }
+        return source.scheme?.lowercased() == destination.scheme?.lowercased()
+            && source.host?.lowercased() == destination.host?.lowercased()
+            && port(source) == port(destination)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(Self.allowsRedirect(from: response.url, to: request.url) ? request : nil)
+    }
+}
+
 public typealias ACTAHTTPTransport = @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse)
 
 public struct ACTAAgentToolSpec: Sendable, Equatable {
@@ -657,13 +676,22 @@ public final class ACTAAIClient: @unchecked Sendable {
             let sessionConfig = URLSessionConfiguration.ephemeral
             sessionConfig.timeoutIntervalForRequest = 180.0
             sessionConfig.timeoutIntervalForResource = 180.0
-            let session = URLSession(configuration: sessionConfig)
+            let session = URLSession(configuration: sessionConfig, delegate: ACTAHTTPRedirectPolicy(), delegateQueue: nil)
             self.transport = { request in
                 let (data, response) = try await session.data(for: request)
                 guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
                 return (data, http)
             }
         }
+    }
+
+    func sendAuthorized(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        try Task.checkCancellation()
+        guard let url = request.url,
+              Self.isLoopbackURL(url) || configuration().allowExternalAI else {
+            throw URLError(.appTransportSecurityRequiresSecureConnection)
+        }
+        return try await transport(request)
     }
 
     public func attachCacheStore(_ store: LocalTrackingStore?) {
@@ -919,7 +947,7 @@ public final class ACTAAIClient: @unchecked Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
-        let (data, http) = try await transport(request)
+        let (data, http) = try await sendAuthorized(request)
         guard (200..<300).contains(http.statusCode) else {
             throw URLError(.badServerResponse)
         }
@@ -1052,7 +1080,7 @@ public final class ACTAAIClient: @unchecked Sendable {
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, http) = try await transport(request)
+        let (data, http) = try await sendAuthorized(request)
         guard (200..<300).contains(http.statusCode) else {
             throw URLError(.badServerResponse)
         }
@@ -1158,7 +1186,7 @@ public final class ACTAAIClient: @unchecked Sendable {
                 http.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 http.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
                 http.httpBody = try JSONSerialization.data(withJSONObject: body)
-                let (data, response) = try await transport(http)
+                let (data, response) = try await sendAuthorized(http)
                 if chained, response.statusCode == 400 || response.statusCode == 404 {
                     // Expired/unknown `previous_response_id` or unsettled call debt: caller retries with full history.
                     throw ACTAAgentError.chainRejected

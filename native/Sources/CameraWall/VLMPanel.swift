@@ -42,6 +42,7 @@ struct VLMPanel: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .font(.system(size: 13))
         .transaction { transaction in
             transaction.animation = nil
             transaction.disablesAnimations = true
@@ -118,18 +119,18 @@ struct VLMPanel: View {
             }
             if model.manualQuestionQueue.pending != nil {
                 Text(languageSettings.localized("Question queued after the current analysis"))
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if voiceInput.isRecording {
                 Label("Listening locally. Review the text before sending.", systemImage: "waveform")
-                    .font(.caption)
+                    .font(.system(size: 12))
                     .accessibilityLabel("Local dictation is recording")
                     .accessibilityValue(voiceInput.transcript)
             }
             if let errorMessage = voiceInput.errorMessage {
                 Text(languageSettings.localizedMessage(errorMessage))
-                    .font(.caption)
+                    .font(.system(size: 12))
                     .foregroundStyle(.red)
                     .accessibilityLabel("Dictation error: \(errorMessage)")
             }
@@ -145,12 +146,12 @@ struct VLMPanel: View {
         VStack(alignment: .leading, spacing: 5) {
             HStack {
                 Text(LocalizedStringKey(message.role == .operatorMessage ? "Operator" : "Qwen"))
-                    .font(.caption.weight(.semibold))
+                    .font(.system(size: 12, weight: .semibold))
                 Text(message.cameraNames.joined(separator: ", "))
-                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
                 Spacer()
                 Text(message.createdAt.formatted(date: .omitted, time: .shortened, locale: languageSettings.locale))
-                    .font(.caption2).foregroundStyle(.tertiary)
+                    .font(.system(size: 11)).foregroundStyle(.tertiary)
             }
             Text(message.text)
                 .textSelection(.enabled)
@@ -163,11 +164,20 @@ struct VLMPanel: View {
 
     private var historyTab: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Picker("Research Mode", selection: $useUnifiedACTAAgent) {
-                Text("Unified Multi-Memory Agent").tag(true)
-                Text("Local Track Research").tag(false)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Research Mode")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Picker("Research Mode", selection: $useUnifiedACTAAgent) {
+                    Text("ACTA Agent").tag(true)
+                    Text("Track history").tag(false)
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .controlSize(.regular)
+                .frame(height: 28)
             }
-            .pickerStyle(.segmented)
+            .fixedSize(horizontal: false, vertical: true)
 
             if useUnifiedACTAAgent {
                 actaAgentHistoryView
@@ -214,31 +224,43 @@ struct VLMPanel: View {
 
     private var actaAgentHistoryView: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
+            HStack(spacing: 8) {
                 Label(languageSettings.localizedMessage(model.actaAgentStatus), systemImage: model.actaAgentBusy ? "hourglass" : "brain.head.profile")
-                    .font(.caption)
-                    .lineLimit(1)
-                Spacer()
+                    .font(.system(size: 12))
+                    .lineLimit(2)
+                    .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                    .help(languageSettings.localizedMessage(model.actaAgentStatus))
                 if !model.actaChatThreads.isEmpty {
                     Menu {
                         ForEach(model.actaChatThreads, id: \.threadID) { thread in
-                            Button(thread.title.isEmpty ? thread.threadID : thread.title) {
+                            Button(thread.title.isEmpty && thread.threadID == "default"
+                                   ? languageSettings.localized("Main conversation")
+                                   : (thread.title.isEmpty ? thread.threadID : thread.title)) {
                                 model.selectACTAChatThread(thread.threadID)
                             }
                         }
                     } label: {
-                        Label(model.activeACTAThreadID, systemImage: "bubble.left.and.bubble.right")
-                            .font(.caption)
+                        Label(model.activeACTAThreadID == "default"
+                              ? languageSettings.localized("Main conversation") : model.activeACTAThreadID,
+                              systemImage: "bubble.left.and.bubble.right")
+                            .font(.system(size: 12))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
+                    .frame(width: 132)
+                    .help("Choose conversation")
+                    .accessibilityLabel("Choose conversation")
                 }
             }
+            .frame(height: 40)
+            .fixedSize(horizontal: false, vertical: true)
 
             if !model.actaThreadFocusEntries.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         ForEach(model.actaThreadFocusEntries, id: \.refID) { focus in
                             Text("\(focus.kind): \(focus.refID)")
-                                .font(.caption2)
+                                .font(.system(size: 11))
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 3)
                                 .background(Color.accentColor.opacity(0.14), in: Capsule())
@@ -261,14 +283,35 @@ struct VLMPanel: View {
                         VStack(alignment: .leading, spacing: 5) {
                             HStack {
                                 Text(msg.role == "user" ? "Operator" : "ACTA Agent")
-                                    .font(.caption.weight(.semibold))
+                                    .font(.system(size: 12, weight: .semibold))
                                 Spacer()
                                 Text(msg.createdAt.formatted(date: .abbreviated, time: .shortened, locale: languageSettings.locale))
-                                    .font(.caption2).foregroundStyle(.tertiary)
+                                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .monospacedDigit()
                             }
                             Text(msg.text)
+                                .font(.system(size: 13))
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
+                            if let references = msg.structuredAnswer?.evidenceReferences, !references.isEmpty {
+                                DisclosureGroup(languageSettings.localized("Sources (%lld)", arguments: [references.count])) {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        ForEach(references) { source in
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(source.cameraName ?? source.cameraID ?? source.kind)
+                                                    .font(.system(size: 12, weight: .medium))
+                                                if let occurredAt = source.occurredAt {
+                                                    Text(occurredAt).font(.system(size: 11)).foregroundStyle(.secondary)
+                                                }
+                                                Text(source.recordID).font(.system(size: 11, design: .monospaced))
+                                                    .textSelection(.enabled)
+                                            }
+                                        }
+                                    }
+                                }
+                                .font(.system(size: 12))
+                            }
                         }
                         .padding(10)
                         .background(msg.role == "user" ? Color.secondary.opacity(0.08) : Color.accentColor.opacity(0.08),
@@ -277,9 +320,9 @@ struct VLMPanel: View {
                     ForEach(model.actaChatActions, id: \.actionID) { action in
                         VStack(alignment: .leading, spacing: 6) {
                             Label(action.title.isEmpty ? "Proposed Action: \(action.actionType)" : action.title, systemImage: "bolt.shield")
-                                .font(.caption.weight(.semibold))
+                                .font(.system(size: 12, weight: .semibold))
                             Text(action.actionType)
-                                .font(.caption2)
+                                .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                                 .textSelection(.enabled)
                             HStack {
@@ -305,19 +348,23 @@ struct VLMPanel: View {
             AnalysisQuestionComposer(
                 question: $historyQuestion,
                 sendDisabled: model.actaAgentBusy || historyQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                promptLabel: "Ask about saved camera history…",
+                inputIdentifier: "acta-question-input", sendIdentifier: "acta-send-question",
                 submit: submitHistoryQuestion
             )
+            .fixedSize(horizontal: false, vertical: true)
+            .layoutPriority(1)
         }
     }
 
     private func operatorActionRow(_ action: CameraOperatorAction) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Label("Describe tracks", systemImage: "text.viewfinder")
-                .font(.caption.weight(.semibold))
+                .font(.system(size: 12, weight: .semibold))
             ForEach(action.trackIDs, id: \.self) { trackID in
-                Text(trackID.uuidString).font(.caption).textSelection(.enabled)
+                Text(trackID.uuidString).font(.system(size: 12)).textSelection(.enabled)
             }
-            Text(action.createdAt.formatted(date: .abbreviated, time: .shortened, locale: languageSettings.locale)).font(.caption).foregroundStyle(.secondary)
+            Text(action.createdAt.formatted(date: .abbreviated, time: .shortened, locale: languageSettings.locale)).font(.system(size: 12)).foregroundStyle(.secondary)
             if action.status == .pending {
                 HStack {
                     Button {
@@ -335,12 +382,12 @@ struct VLMPanel: View {
                 }
             } else {
                 Text(LocalizedStringKey(action.status == .applied ? "Confirmed" : "Rejected"))
-                    .font(.caption.weight(.medium))
+                    .font(.system(size: 12, weight: .medium))
                 if let reviewedAt = action.reviewedAt {
-                    Text(reviewedAt.formatted(date: .abbreviated, time: .shortened, locale: languageSettings.locale)).font(.caption).foregroundStyle(.secondary)
+                    Text(reviewedAt.formatted(date: .abbreviated, time: .shortened, locale: languageSettings.locale)).font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 ForEach(action.jobIDs, id: \.self) { jobID in
-                    Text("Job: \(jobID.uuidString)").font(.caption).textSelection(.enabled)
+                    Text("Job: \(jobID.uuidString)").font(.system(size: 12)).textSelection(.enabled)
                 }
             }
         }
@@ -351,32 +398,32 @@ struct VLMPanel: View {
     private func historyMessageRow(_ message: TrackResearchMessage) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(LocalizedStringKey(message.role == .operatorMessage ? "Operator" : "Local history assistant"))
-                .font(.caption.weight(.semibold))
+                .font(.system(size: 12, weight: .semibold))
             Text(message.text)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
             if message.role == .assistant {
                 if message.citedTrackIDs.isEmpty && message.citedScanIDs.isEmpty {
                     Text("No verified track citations")
-                        .font(.caption2)
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(message.citedTrackIDs, id: \.self) { trackID in
                         if let record = model.recentTracks.first(where: { $0.trackID == trackID }) {
                             Label("\(record.cameraName) · \(record.label) · \(trackID.uuidString.prefix(8))",
                                   systemImage: "quote.opening")
-                                .font(.caption2)
+                                .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                         } else {
                             Label("Saved track: \(trackID.uuidString.prefix(8))", systemImage: "quote.opening")
-                                .font(.caption2)
+                                .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                         }
                     }
                 }
                 ForEach(message.citedScanIDs, id: \.self) { scanID in
                     Label("Saved scan: \(scanID.uuidString.prefix(8))", systemImage: "quote.opening")
-                        .font(.caption2)
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -427,7 +474,7 @@ struct VLMPanel: View {
                         Text(String(format: "Latency: %.0f ms · Spend: $%.2f", model.actaHealthStatus.ewmaLatencyMs, model.actaBudgetSnapshot.dailySpendUSD))
                             .foregroundStyle(.secondary)
                     }
-                    .font(.caption)
+                    .font(.system(size: 12))
                 }
                 .padding(6)
             }
@@ -488,7 +535,7 @@ struct VLMPanel: View {
                 }
                 .frame(maxHeight: 220)
             }
-            .font(.caption)
+            .font(.system(size: 12))
             .padding(.vertical, 8)
         }
         .onAppear(perform: refreshDescriptionQueue)
@@ -517,7 +564,7 @@ struct VLMPanel: View {
                             Text(alert.cameraName).font(.headline)
                             Spacer()
                             Text(alert.createdAt.formatted(date: .abbreviated, time: .shortened, locale: languageSettings.locale))
-                                .font(.caption).foregroundStyle(.secondary)
+                                .font(.system(size: 12)).foregroundStyle(.secondary)
                         }
                         Text(alert.condition).font(.subheadline.weight(.medium))
                         Text(alert.evidence).textSelection(.enabled)

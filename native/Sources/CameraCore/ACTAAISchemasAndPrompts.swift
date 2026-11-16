@@ -733,6 +733,8 @@ public struct ACTAChatPresentAnswer: Codable, Sendable, Equatable {
     public var answerMarkdown: String
     public var citedIdentityIDs: [String]
     public var citedCameraIDs: [String]
+    public var citedRecordIDs: [String]
+    public var evidenceReferences: [ACTAEvidenceReference]
     public var confidence: Double
     public var followUpSuggestions: [String]
     public var proposedActions: [ACTAProposedAction]
@@ -741,6 +743,8 @@ public struct ACTAChatPresentAnswer: Codable, Sendable, Equatable {
         answerMarkdown: String,
         citedIdentityIDs: [String] = [],
         citedCameraIDs: [String] = [],
+        citedRecordIDs: [String] = [],
+        evidenceReferences: [ACTAEvidenceReference] = [],
         confidence: Double = 0.90,
         followUpSuggestions: [String] = [],
         proposedActions: [ACTAProposedAction] = []
@@ -748,13 +752,15 @@ public struct ACTAChatPresentAnswer: Codable, Sendable, Equatable {
         self.answerMarkdown = answerMarkdown
         self.citedIdentityIDs = citedIdentityIDs
         self.citedCameraIDs = citedCameraIDs
+        self.citedRecordIDs = citedRecordIDs
+        self.evidenceReferences = evidenceReferences
         self.confidence = confidence
         self.followUpSuggestions = followUpSuggestions
         self.proposedActions = proposedActions
     }
 
     private enum CodingKeys: String, CodingKey {
-        case answerMarkdown, citedIdentityIDs, citedCameraIDs, confidence, followUpSuggestions, proposedActions
+        case answerMarkdown, citedIdentityIDs, citedCameraIDs, citedRecordIDs, evidenceReferences, confidence, followUpSuggestions, proposedActions
     }
 
     public init(from decoder: Decoder) throws {
@@ -762,6 +768,8 @@ public struct ACTAChatPresentAnswer: Codable, Sendable, Equatable {
         answerMarkdown = try c.decode(String.self, forKey: .answerMarkdown)
         citedIdentityIDs = (try? c.decodeIfPresent([String].self, forKey: .citedIdentityIDs)) ?? []
         citedCameraIDs = (try? c.decodeIfPresent([String].self, forKey: .citedCameraIDs)) ?? []
+        citedRecordIDs = try c.decodeIfPresent([String].self, forKey: .citedRecordIDs) ?? []
+        evidenceReferences = try c.decodeIfPresent([ACTAEvidenceReference].self, forKey: .evidenceReferences) ?? []
         confidence = (try? c.decodeIfPresent(Double.self, forKey: .confidence)) ?? 0.75
         followUpSuggestions = (try? c.decodeIfPresent([String].self, forKey: .followUpSuggestions)) ?? []
         proposedActions = (try? c.decodeIfPresent([ACTAProposedAction].self, forKey: .proposedActions)) ?? []

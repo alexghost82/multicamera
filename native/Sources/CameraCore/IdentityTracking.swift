@@ -277,9 +277,13 @@ public final class LocalTrackingStore: @unchecked Sendable {
     public static let retentionDays = 30
 
     private let databaseURL: URL
+    private let failureLock = NSLock()
+    private var persistenceFailure: String?
+    /// Sticky diagnostic, including errors from background writers whose callers cannot throw.
+    public var lastPersistenceError: String? { failureLock.withLock { persistenceFailure } }
     private let database: OpaquePointer
     private let cropDirectory: URL
-    private let lock = NSLock()
+    private let lock = NSRecursiveLock()
 
     public static var defaultURL: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -1284,7 +1288,9 @@ public final class LocalTrackingStore: @unchecked Sendable {
     }
 
     private func databaseError(_ handle: OpaquePointer? = nil) -> LocalTrackingStoreError {
-        LocalTrackingStoreError.query(String(cString: sqlite3_errmsg(handle ?? database)))
+        let error = LocalTrackingStoreError.query(String(cString: sqlite3_errmsg(handle ?? database)))
+        failureLock.withLock { persistenceFailure = error.localizedDescription }
+        return error
     }
 
     // MARK: - Ghost Analytics SQLite Persistence
@@ -2788,7 +2794,11 @@ public final class LocalTrackingStore: @unchecked Sendable {
 
     /// Appends a message to `ghost_chat_messages`. Automatically applies `ACTAOpSec.stripPersona` to user prompts and `ACTAOpSec.sanitizeText` to assistant outputs.
     @discardableResult
-    public func appendACTAChatMessage(_ message: ACTAChatMessageRecord) throws -> ACTAChatMessageRecord {
+    public func appendACTAChatMessage(
+        _ message: ACTAChatMessageRecord,
+        terminalResponseID: String? = nil,
+        pendingOutputs: [ACTAPendingOutputDebt]? = nil
+    ) throws -> ACTAChatMessageRecord {
         _ = try ensureACTAChatThread(threadID: message.threadID, now: message.createdAt)
         var sanitized = message
         if sanitized.role == "user" {
@@ -2799,10 +2809,13 @@ public final class LocalTrackingStore: @unchecked Sendable {
                 sanitized.structuredAnswer = ACTAOpSec.sanitizeAnswer(ans)
             }
         }
-        let structuredJSON = sanitized.structuredAnswer.flatMap { try? String(data: JSONEncoder().encode($0), encoding: .utf8) }
+        let structuredJSON = try sanitized.structuredAnswer.map { String(decoding: try JSONEncoder().encode($0), as: UTF8.self) }
+        let pendingJSON = try pendingOutputs.map { String(decoding: try JSONEncoder().encode($0), as: UTF8.self) }
 
         lock.lock()
         defer { lock.unlock() }
+        try execute("BEGIN IMMEDIATE TRANSACTION")
+        do {
         let stmt = try prepare("""
             INSERT OR REPLACE INTO ghost_chat_messages(
                 message_id, thread_id, role, content, structured_json, created_at, clip_id, call_id
@@ -2823,8 +2836,21 @@ public final class LocalTrackingStore: @unchecked Sendable {
         defer { sqlite3_finalize(upd) }
         sqlite3_bind_double(upd, 1, sanitized.createdAt.timeIntervalSince1970)
         bind(sanitized.threadID, at: 2, to: upd)
-        _ = sqlite3_step(upd)
+        guard sqlite3_step(upd) == SQLITE_DONE else { throw databaseError() }
+        if let pendingJSON {
+            let chain = try prepare("UPDATE ghost_chat_threads SET last_response_id = ?, pending_outputs_json = ? WHERE thread_id = ?")
+            defer { sqlite3_finalize(chain) }
+            if let terminalResponseID { bind(terminalResponseID, at: 1, to: chain) } else { sqlite3_bind_null(chain, 1) }
+            bind(pendingJSON, at: 2, to: chain)
+            bind(sanitized.threadID, at: 3, to: chain)
+            guard sqlite3_step(chain) == SQLITE_DONE else { throw databaseError() }
+        }
+        try execute("COMMIT")
         return sanitized
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
     }
 
     public func loadACTAChatMessages(threadID: String, limit: Int = 200) throws -> [ACTAChatMessageRecord] {
@@ -3211,22 +3237,68 @@ public final class LocalTrackingStore: @unchecked Sendable {
         return list
     }
 
-    public func resolveACTAChatAction(actionID: String, confirmed: Bool, now: Date = Date()) throws -> ACTAChatActionRecord? {
+    /// The reviewed decision and its database effects form one durable unit.
+    /// Nested store methods use the recursive lock on this same connection.
+    public func applyACTAChatAction(
+        _ proposal: ACTAChatActionRecord, confirmed: Bool, now: Date = Date(),
+        changes: (LocalTrackingStore) throws -> Void
+    ) throws -> ACTAChatActionRecord? {
         lock.lock()
-        let status = confirmed ? "confirmed" : "rejected"
+        defer { lock.unlock() }
+        try execute("BEGIN IMMEDIATE TRANSACTION")
         do {
-            let upd = try prepare("UPDATE ghost_chat_actions SET status = ?, reviewed_at = ? WHERE action_id = ?")
-            defer { sqlite3_finalize(upd) }
-            bind(status, at: 1, to: upd)
-            sqlite3_bind_double(upd, 2, now.timeIntervalSince1970)
-            bind(actionID, at: 3, to: upd)
-            guard sqlite3_step(upd) == SQLITE_DONE else { throw databaseError() }
+            guard let updated = try resolveACTAChatAction(actionID: proposal.actionID, confirmed: confirmed,
+                expectedAction: proposal, now: now) else {
+                try execute("ROLLBACK")
+                return nil
+            }
+            if confirmed { try changes(self) }
+            try execute("COMMIT")
+            return updated
         } catch {
-            lock.unlock()
+            try? execute("ROLLBACK")
             throw error
         }
-        lock.unlock()
-        return try listACTAChatActions().first(where: { $0.actionID == actionID })
+    }
+
+    private func loadACTAChatActionUnlocked(actionID: String) throws -> ACTAChatActionRecord? {
+        let stmt = try prepare("SELECT action_id, thread_id, action_type, title, params_json, status, created_at, reviewed_at FROM ghost_chat_actions WHERE action_id = ?")
+        defer { sqlite3_finalize(stmt) }
+        bind(actionID, at: 1, to: stmt)
+        let step = sqlite3_step(stmt)
+        if step == SQLITE_DONE { return nil }
+        guard step == SQLITE_ROW else { throw databaseError() }
+        return ACTAChatActionRecord(actionID: text(stmt, 0), threadID: text(stmt, 1), actionType: text(stmt, 2),
+            title: text(stmt, 3), parameters: try JSONDecoder().decode([String: String].self, from: Data(text(stmt, 4).utf8)),
+            status: text(stmt, 5), createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 6)),
+            reviewedAt: sqlite3_column_type(stmt, 7) == SQLITE_NULL ? nil : Date(timeIntervalSince1970: sqlite3_column_double(stmt, 7)))
+    }
+
+    public func loadACTAChatAction(actionID: String) throws -> ACTAChatActionRecord? {
+        lock.lock()
+        defer { lock.unlock() }
+        return try loadACTAChatActionUnlocked(actionID: actionID)
+    }
+
+    /// Compare the reviewed proposal under the same lock as the one-shot state transition.
+    public func resolveACTAChatAction(actionID: String, confirmed: Bool,
+                                     expectedAction: ACTAChatActionRecord? = nil,
+                                     now: Date = Date()) throws -> ACTAChatActionRecord? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard var action = try loadACTAChatActionUnlocked(actionID: actionID), action.status == "proposed",
+              expectedAction == nil || expectedAction == action else { return nil }
+        let status = confirmed ? "confirmed" : "rejected"
+        let upd = try prepare("UPDATE ghost_chat_actions SET status = ?, reviewed_at = ? WHERE action_id = ? AND status = 'proposed'")
+        defer { sqlite3_finalize(upd) }
+        bind(status, at: 1, to: upd)
+        sqlite3_bind_double(upd, 2, now.timeIntervalSince1970)
+        bind(actionID, at: 3, to: upd)
+        guard sqlite3_step(upd) == SQLITE_DONE else { throw databaseError() }
+        guard sqlite3_changes(database) == 1 else { return nil }
+        action.status = status
+        action.reviewedAt = now
+        return action
     }
 
     @discardableResult

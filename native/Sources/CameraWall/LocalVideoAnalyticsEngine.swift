@@ -14,7 +14,7 @@ import CameraCore
 final class LocalVideoAnalyticsEngine: ObservableObject {
     @Published private(set) var engineState: AnalyticsEngineState = .disabled
     @Published private(set) var stateReason: String = "Analytics engine is not started"
-    @Published var settings: VideoAnalyticsSettings
+    @Published private(set) var settings: VideoAnalyticsSettings
     @Published private(set) var incidents: [SafetyIncident] = []
     @Published private(set) var trackedPosesByCamera: [UUID: [TrackedPersonPose]] = [:]
     @Published private(set) var telemetryByCamera: [UUID: CameraAnalyticsTelemetry] = [:]
@@ -32,10 +32,15 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
     private let stateLock = NSLock()
     private nonisolated(unsafe) var fallDetectorsByCamera: [UUID: FallDetector] = [:]
     private nonisolated(unsafe) var behaviorEnginesByCamera: [UUID: BehaviorAnalysisEngine] = [:]
+    private nonisolated(unsafe) var sessionGeneration = UUID()
+    private nonisolated(unsafe) var cameraGenerations: [UUID: UUID] = [:]
+    private var modelLoadTask: Task<Void, Never>?
+    private var verificationTasks: [UUID: Task<Void, Never>] = [:]
+    @Published private(set) var persistenceError: String?
     private var poseDetector: YOLO26PoseDetector?
     private var customPoseModelURL: URL?
     private var isLoopRunning = false
-    private var secondaryVLMVerifier: ((SafetyIncident, Data?) async -> (confirmed: Bool, summary: String)?)?
+    private var secondaryVLMVerifier: ((SafetyIncident, Data?) async -> IncidentVerification?)?
 
     init(
         settingsURL: URL = VideoAnalyticsSettingsStore.defaultURL,
@@ -53,13 +58,19 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         self.settings = (try? VideoAnalyticsSettingsStore.load(from: settingsURL)) ?? .safeDefaults
         self.incidents = incidentManager.allIncidents()
         self.auditEntries = audit.recentEntries(limit: 200)
+        self.persistenceError = incidentManager.lastPersistenceError ?? audit.lastPersistenceError
         refreshModelDescriptors()
     }
 
     func configureSecondaryVLMVerifier(
-        _ verifier: @escaping (SafetyIncident, Data?) async -> (confirmed: Bool, summary: String)?
+        _ verifier: @escaping (SafetyIncident, Data?) async -> IncidentVerification?
     ) {
         self.secondaryVLMVerifier = verifier
+    }
+
+    func recoverInterruptedVerifications() {
+        incidentManager.recoverInterruptedVerifications()
+        refreshIncidentsAndAudit()
     }
 
     // MARK: - Lifecycle Management
@@ -74,6 +85,8 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
             return
         }
 
+        if engineState != .disabled { stopEngine() }
+        let generation = sessionGeneration
         transitionState(to: .initializing, reason: "Initializing local Core ML analytics models…")
         let resolvedURL = customPoseModelURL ?? YOLO26PoseDetector.defaultModelURL
         guard let resolvedURL else {
@@ -82,7 +95,7 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
                 status: .missing,
                 reason: "yolo26s-pose model package not found in app bundle or .build/models"
             )
-            transitionState(to: .degraded, reason: "Pose model missing; running object-level analytics only")
+            transitionState(to: .degraded, reason: "Pose model missing; local pose and behavior analytics unavailable")
             return
         }
 
@@ -91,14 +104,14 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         self.poseDetector = detector
         updateModelDescriptor(.yoloPose, status: .loading, filePath: resolvedURL.path, reason: "Loading Core ML Pose model…")
 
-        Task.detached(priority: .userInitiated) { [weak self] in
+        modelLoadTask = Task.detached(priority: .userInitiated) { [weak self] in
             let loadStarted = ProcessInfo.processInfo.systemUptime
             let integrity = try? ModelIntegrityVerifier.computeSHA256(at: resolvedURL)
             do {
                 try await detector.prepare()
                 let loadMs = (ProcessInfo.processInfo.systemUptime - loadStarted) * 1000.0
                 await MainActor.run { [weak self] in
-                    guard let self else { return }
+                    guard let self, self.sessionGeneration == generation, !Task.isCancelled else { return }
                     self.updateModelDescriptor(
                         .yoloPose,
                         status: .ready,
@@ -119,7 +132,7 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
                 }
             } catch {
                 await MainActor.run { [weak self] in
-                    guard let self else { return }
+                    guard let self, self.sessionGeneration == generation, !Task.isCancelled else { return }
                     self.updateModelDescriptor(
                         .yoloPose,
                         status: .error,
@@ -168,25 +181,58 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
     }
 
     func stopEngine() {
+        modelLoadTask?.cancel()
+        modelLoadTask = nil
+        for task in verificationTasks.values { task.cancel() }
+        verificationTasks.removeAll()
         transitionState(to: .stopping, reason: "Stopping local analytics engine…")
-        scheduler.reset()
         stateLock.lock()
+        sessionGeneration = UUID()
+        cameraGenerations.removeAll()
+        scheduler.reset()
         fallDetectorsByCamera.removeAll()
         behaviorEnginesByCamera.removeAll()
         stateLock.unlock()
+        poseDetector = nil
+        if modelDescriptors[.yoloPose]?.status == .ready || modelDescriptors[.yoloPose]?.status == .loading {
+            updateModelDescriptor(.yoloPose, status: .disabled, reason: "Local Pose session is stopped")
+        }
+        activeBannerIncident = nil
         trackedPosesByCamera.removeAll()
         telemetryByCamera.removeAll()
         transitionState(to: .disabled, reason: "Analytics engine disabled")
     }
 
     func removeCamera(_ cameraID: UUID) {
-        scheduler.removeCamera(cameraID)
         stateLock.lock()
+        cameraGenerations[cameraID] = UUID()
+        scheduler.removeCamera(cameraID)
         fallDetectorsByCamera.removeValue(forKey: cameraID)
         behaviorEnginesByCamera.removeValue(forKey: cameraID)
         stateLock.unlock()
         trackedPosesByCamera.removeValue(forKey: cameraID)
         telemetryByCamera.removeValue(forKey: cameraID)
+    }
+
+    struct WorkGeneration: Equatable, Sendable {
+        let session: UUID
+        let camera: UUID?
+    }
+
+    nonisolated func workGeneration(for cameraID: UUID) -> WorkGeneration {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return WorkGeneration(session: sessionGeneration, camera: cameraGenerations[cameraID])
+    }
+
+    nonisolated func isCurrent(_ generation: WorkGeneration, cameraID: UUID) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return matchesLocked(generation, cameraID: cameraID)
+    }
+
+    private nonisolated func matchesLocked(_ generation: WorkGeneration, cameraID: UUID) -> Bool {
+        generation.session == sessionGeneration && generation.camera == cameraGenerations[cameraID]
     }
 
     // MARK: - Settings Persistence
@@ -195,7 +241,8 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         let validated = newSettings.clamped()
         try validated.validate()
         try VideoAnalyticsSettingsStore.save(validated, to: settingsURL)
-        let wasEnabled = settings.globalEnabled
+        let activeCameraCount = trackedPosesByCamera.count
+        stopEngine()
         settings = validated
         auditLog.record(
             action: .settingsUpdated,
@@ -204,20 +251,15 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         auditEntries = auditLog.recentEntries(limit: 200)
         if !validated.globalEnabled {
             stopEngine()
-        } else if !wasEnabled || engineState == .disabled {
-            startIfEnabled(activeCameraCount: trackedPosesByCamera.count)
+        } else {
+            startIfEnabled(activeCameraCount: activeCameraCount)
         }
     }
 
-    func resetSettingsToSafeDefaults() {
-        let defaults = VideoAnalyticsSettings.safeDefaults
-        try? VideoAnalyticsSettingsStore.save(defaults, to: settingsURL)
-        settings = defaults
-        auditLog.record(
-            action: .settingsResetToDefaults,
-            summary: "Reset video analytics settings to safe defaults"
-        )
-        auditEntries = auditLog.recentEntries(limit: 200)
+    func resetSettingsToSafeDefaults() throws {
+        try updateSettings(.safeDefaults)
+        auditLog.record(action: .settingsResetToDefaults, summary: "Reset video analytics settings to safe defaults")
+        refreshIncidentsAndAudit()
     }
 
     // MARK: - Frame Ingestion & Scheduling
@@ -243,9 +285,14 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
 
         // Sample pre-event ring buffer at 2 FPS when evidence recording is enabled
         if settings.enableEvidenceRecording && evidenceStore.shouldSampleFrame(cameraID: camera.id, monotonicNow: monotonicTimestamp) {
-            Task.detached(priority: .utility) { [evidenceStore] in
+            let generation = workGeneration(for: camera.id)
+            let capturedAt = Date()
+            Task.detached(priority: .utility) { [weak self] in
                 if let jpeg = try? await VLMFrameEncoder.jpegData(from: wrapped.value, maxDimension: 640, quality: 0.45) {
-                    evidenceStore.recordSampledFrame(cameraID: camera.id, jpegData: jpeg, capturedAt: Date())
+                    await MainActor.run { [weak self] in
+                        guard let self, self.isCurrent(generation, cameraID: camera.id), self.settings.globalEnabled else { return }
+                        self.evidenceStore.recordSampledFrame(cameraID: camera.id, jpegData: jpeg, capturedAt: capturedAt)
+                    }
                 }
             }
         }
@@ -264,7 +311,8 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
     }
 
     func drainSchedulerIfNeeded(camerasByID: [UUID: Camera]) {
-        guard settings.globalEnabled, let poseDetector else { return }
+        guard settings.globalEnabled, modelDescriptors[.yoloPose]?.status == .ready,
+              let poseDetector else { return }
         let now = ProcessInfo.processInfo.systemUptime
         let currentSettings = settings
         let yoloMap = camerasByID.mapValues(\.yoloEnabled)
@@ -273,6 +321,7 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
             if engineState == .ready || engineState == .recovering {
                 transitionState(to: .running, reason: "Processing live video analytics")
             }
+            let generation = workGeneration(for: workItem.cameraID)
             let cameraName = camerasByID[workItem.cameraID]?.name ?? "Camera \(workItem.cameraID.uuidString.prefix(6))"
             let enableEvidence = currentSettings.enableEvidenceRecording
             let postBufferSeconds = currentSettings.postEventBufferSeconds
@@ -281,7 +330,7 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
             let bannerEnabled = currentSettings.enableVisualAlertBanner
 
             analyticsQueue.async { [weak self] in
-                guard let self else { return }
+                guard let self, self.isCurrent(generation, cameraID: workItem.cameraID) else { return }
                 let started = ProcessInfo.processInfo.systemUptime
                 let threshold = workItem.effectiveConfig.personConfidenceThreshold
                 let poseResult = Result { try poseDetector.detect(pixel: workItem.payload.value, threshold: threshold) }
@@ -289,6 +338,11 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
 
                 switch poseResult {
                 case .failure:
+                    self.stateLock.lock()
+                    guard self.matchesLocked(generation, cameraID: workItem.cameraID) else {
+                        self.stateLock.unlock()
+                        return
+                    }
                     self.scheduler.completeWorkItem(
                         cameraID: workItem.cameraID,
                         inferenceLatencyMs: inferenceMs,
@@ -296,6 +350,7 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
                         hasElevatedFallPhase: false,
                         hasActiveIncident: false
                     )
+                    self.stateLock.unlock()
                 case .success(let inference):
                     let observations = inference.people.map { person in
                         FallPoseObservation(
@@ -313,6 +368,10 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
                     }
 
                     self.stateLock.lock()
+                    guard self.matchesLocked(generation, cameraID: workItem.cameraID) else {
+                        self.stateLock.unlock()
+                        return
+                    }
                     var fallConfig = FallDetectorConfiguration()
                     fallConfig.fallPersistenceSeconds = workItem.effectiveConfig.fallConfirmationSeconds
                     fallConfig.personDownSeconds = workItem.effectiveConfig.personDownSeconds
@@ -337,7 +396,6 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
                         wallClockNow: Date()
                     )
                     self.behaviorEnginesByCamera[workItem.cameraID] = behaviorEngine
-                    self.stateLock.unlock()
 
                     let hasElevated = behaviorResult.trackedPeople.contains { $0.fallPhase.isElevated }
                     let hasIncident = !behaviorResult.candidates.isEmpty
@@ -349,6 +407,7 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
                         hasElevatedFallPhase: hasElevated,
                         hasActiveIncident: hasIncident
                     )
+                    self.stateLock.unlock()
 
                     let camTelemetry = self.scheduler.telemetry(for: workItem.cameraID)
                     var triggerJPEG: Data?
@@ -357,7 +416,8 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
                     }
 
                     Task { @MainActor [weak self] in
-                        guard let self else { return }
+                        guard let self, self.isCurrent(generation, cameraID: workItem.cameraID),
+                              self.settings.globalEnabled else { return }
                         self.trackedPosesByCamera[workItem.cameraID] = behaviorResult.trackedPeople
                         self.telemetryByCamera[workItem.cameraID] = camTelemetry
                         self.updatePoseLatency(inference.inferenceMilliseconds)
@@ -390,6 +450,7 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         monotonicTimestamp: TimeInterval
     ) -> [FallEvent] {
         let config = settings.effectiveConfiguration(for: camera.id, cameraYOLOEnabled: camera.yoloEnabled)
+        guard config.analyticsEnabled, config.poseEstimationEnabled else { return [] }
         let observations = people.map { person in
             FallPoseObservation(
                 confidence: person.confidence,
@@ -474,12 +535,17 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
                     activeBannerIncident = incident
                 }
                 if candidate.requiresSecondaryVLMVerification, let verifier = secondaryVLMVerifier {
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        if let verdict = await verifier(incident, triggerJPEG) {
+                    verificationTasks[incident.id]?.cancel()
+                    let generation = workGeneration(for: candidate.cameraID)
+                    verificationTasks[incident.id] = Task { @MainActor [weak self] in
+                        let verdict = await verifier(incident, triggerJPEG)
+                        guard let self, !Task.isCancelled,
+                              self.isCurrent(generation, cameraID: candidate.cameraID) else { return }
+                        self.verificationTasks.removeValue(forKey: incident.id)
+                        if let verdict {
                             _ = self.incidentManager.recordSecondaryVLMVerification(
                                 incidentID: incident.id,
-                                status: verdict.confirmed ? .confirmed : .rejected,
+                                status: verdict.status,
                                 summary: verdict.summary
                             )
                             self.refreshIncidentsAndAudit()
@@ -544,8 +610,10 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         var processedIDs: [UUID] = []
         for env in envelopes {
             let name = camerasByID[env.cameraID]?.name ?? "Camera \(env.cameraID.uuidString.prefix(6))"
-            _ = incidentManager.ingestWorkerEnvelope(env, cameraName: name, cooldownSeconds: settings.alertCooldownSeconds)
-            processedIDs.append(env.id)
+            if incidentManager.ingestWorkerEnvelope(env, cameraName: name, cooldownSeconds: settings.alertCooldownSeconds) != nil,
+               incidentManager.lastPersistenceError == nil, auditLog.lastPersistenceError == nil {
+                processedIDs.append(env.id)
+            }
         }
         _ = try? await spool.acknowledge(Set(processedIDs))
         refreshIncidentsAndAudit()
@@ -554,6 +622,7 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
     private func refreshIncidentsAndAudit() {
         incidents = incidentManager.allIncidents()
         auditEntries = auditLog.recentEntries(limit: 200)
+        persistenceError = incidentManager.lastPersistenceError ?? auditLog.lastPersistenceError
     }
 
     // MARK: - Model Registry & Telemetry
@@ -592,12 +661,12 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
             map[.yoloPose] = AnalyticsModelDescriptor(
                 modelID: .yoloPose,
                 version: "26s-pose-fp16",
-                status: .ready,
+                status: .disabled,
                 backend: "Core ML (CPU + Neural Engine)",
                 filePath: poseURL.path,
                 sizeBytes: info?.sizeBytes ?? 0,
                 sha256Checksum: info?.hash,
-                statusReason: "Discovered local Pose package"
+                statusReason: "Pose package found; runtime session has not been loaded"
             )
         } else {
             map[.yoloPose] = AnalyticsModelDescriptor(

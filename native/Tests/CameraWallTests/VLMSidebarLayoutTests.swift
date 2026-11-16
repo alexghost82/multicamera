@@ -3,6 +3,7 @@ import SwiftUI
 import XCTest
 import ScreenCaptureKit
 import CoreMedia
+import CoreImage
 import CoreVideo
 import Vision
 import CameraCore
@@ -140,9 +141,18 @@ final class VLMSidebarLayoutTests: XCTestCase {
             enlarged.interpolationQuality = .high
             enlarged.draw(originalImage, in: CGRect(x: 0, y: 0, width: originalImage.width * 3, height: originalImage.height * 3))
             try VNImageRequestHandler(cgImage: XCTUnwrap(enlarged.makeImage()), options: [:]).perform([request])
+            // Vision may ignore white text on a saturated accent fill. Retry the
+            // same visible bitmap in grayscale/inverted form without changing its geometry.
+            if request.results?.contains(where: { $0.topCandidates(1).first?.string.lowercased().contains("отправить") == true }) != true {
+                let normalized = CIImage(cgImage: try XCTUnwrap(enlarged.makeImage()))
+                    .applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0])
+                    .applyingFilter("CIColorInvert")
+                let image = try XCTUnwrap(CIContext().createCGImage(normalized, from: normalized.extent))
+                try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+            }
             let button = try XCTUnwrap(request.results?.first { result in
                 result.topCandidates(1).first?.string.lowercased().contains("отправить") == true
-            }, "The real visible Send label must be readable at width \(width)")
+            }, "The real visible Send label must be readable at width \(width); recognized: \(request.results?.compactMap { $0.topCandidates(1).first?.string } ?? [])")
             let bounds = button.boundingBox
             XCTAssertGreaterThan(bounds.minX, 0)
             XCTAssertLessThan(bounds.maxX, 1)

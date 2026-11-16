@@ -6,6 +6,7 @@ public enum SecondaryVerificationStatus: String, Codable, CaseIterable, Sendable
     case confirmed = "CONFIRMED"
     case rejected = "REJECTED"
     case unavailable = "UNAVAILABLE"
+    case inconclusive = "INCONCLUSIVE"
 }
 
 public struct SafetyIncident: Codable, Equatable, Identifiable, Sendable {
@@ -147,12 +148,26 @@ public final class OperatorAuditLog: @unchecked Sendable {
     public let url: URL
     public let maxEntries: Int
     private let lock = NSLock()
+    private var persistenceError: String?
+    private var loadFailed = false
+
+    /// A failed load is sticky: never overwrite an unreadable history with an empty snapshot.
+    public var lastPersistenceError: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return persistenceError
+    }
+
     private var entries: [OperatorAuditEntry] = []
 
     public init(url: URL = OperatorAuditLog.defaultURL, maxEntries: Int = 1000) {
         self.url = url
         self.maxEntries = max(50, maxEntries)
-        self.entries = (try? Self.loadFromDisk(url: url)) ?? []
+        do { self.entries = try Self.loadFromDisk(url: url) }
+        catch {
+            loadFailed = true
+            persistenceError = "Cannot load operator audit history: \(error.localizedDescription)"
+        }
     }
 
     public func record(
@@ -176,15 +191,22 @@ public final class OperatorAuditLog: @unchecked Sendable {
         if entries.count > maxEntries {
             entries.removeLast(entries.count - maxEntries)
         }
-        let snapshot = entries
+        persistLocked()
         lock.unlock()
-        try? Self.saveToDisk(snapshot, url: url)
     }
 
     public func recentEntries(limit: Int = 200) -> [OperatorAuditEntry] {
         lock.lock()
         defer { lock.unlock() }
         return Array(entries.prefix(max(1, limit)))
+    }
+
+    private func persistLocked() {
+        guard !loadFailed else { return }
+        do {
+            try Self.saveToDisk(entries, url: url)
+            persistenceError = nil
+        } catch { persistenceError = "Cannot save operator audit history: \(error.localizedDescription)" }
     }
 
     private static func loadFromDisk(url: URL) throws -> [OperatorAuditEntry] {
@@ -223,6 +245,16 @@ public final class UnifiedIncidentManager: @unchecked Sendable {
     public let auditLog: OperatorAuditLog
 
     private let lock = NSLock()
+    private var persistenceError: String?
+    private var loadFailed = false
+
+    /// A failed load is sticky: never overwrite an unreadable history with an empty snapshot.
+    public var lastPersistenceError: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return persistenceError
+    }
+
     private var incidents: [SafetyIncident] = []
     private var suppressionUntilByKey: [String: Date] = [:]
 
@@ -234,7 +266,25 @@ public final class UnifiedIncidentManager: @unchecked Sendable {
         self.storageURL = storageURL
         self.maxIncidents = max(50, maxIncidents)
         self.auditLog = auditLog
-        self.incidents = (try? Self.loadFromDisk(url: storageURL)) ?? []
+        do { self.incidents = try Self.loadFromDisk(url: storageURL) }
+        catch {
+            loadFailed = true
+            persistenceError = "Cannot load incident history: \(error.localizedDescription)"
+        }
+    }
+
+    /// Called once by application startup. An interrupted secondary request must
+    /// not remain pending forever or be mistaken for a completed verification.
+    public func recoverInterruptedVerifications() {
+        lock.lock()
+        defer { lock.unlock() }
+        var changed = false
+        for index in incidents.indices where incidents[index].secondaryVLMStatus == .pending {
+            incidents[index].secondaryVLMStatus = .unavailable
+            incidents[index].secondaryVLMSummary = "Secondary verification interrupted; primary detection preserved"
+            changed = true
+        }
+        if changed { persistLocked() }
     }
 
     public func allIncidents() -> [SafetyIncident] {
@@ -303,10 +353,8 @@ public final class UnifiedIncidentManager: @unchecked Sendable {
             if let clipID { existing.clipID = clipID }
             if let snapshotRelativePath { existing.snapshotRelativePath = snapshotRelativePath }
             incidents[idx] = existing
-            let snapshotList = incidents
+            persistLocked()
             lock.unlock()
-
-            try? Self.saveToDisk(snapshotList, url: storageURL)
             auditLog.record(
                 action: .incidentEscalated,
                 incidentID: existing.id,
@@ -336,9 +384,8 @@ public final class UnifiedIncidentManager: @unchecked Sendable {
                 existing.snapshotRelativePath = snapshotRelativePath
             }
             incidents[idx] = existing
-            let snapshotList = incidents
+            persistLocked()
             lock.unlock()
-            try? Self.saveToDisk(snapshotList, url: storageURL)
             return existing
         }
 
@@ -375,10 +422,8 @@ public final class UnifiedIncidentManager: @unchecked Sendable {
         if incidents.count > maxIncidents {
             incidents.removeLast(incidents.count - maxIncidents)
         }
-        let snapshotList = incidents
+        persistLocked()
         lock.unlock()
-
-        try? Self.saveToDisk(snapshotList, url: storageURL)
         auditLog.record(
             action: .incidentCreated,
             incidentID: newIncident.id,
@@ -405,9 +450,8 @@ public final class UnifiedIncidentManager: @unchecked Sendable {
         if let snapshotRelativePath { incidents[idx].snapshotRelativePath = snapshotRelativePath }
         incidents[idx].updatedAt = Date()
         let updated = incidents[idx]
-        let snapshotList = incidents
+        persistLocked()
         lock.unlock()
-        try? Self.saveToDisk(snapshotList, url: storageURL)
         return updated
     }
 
@@ -434,10 +478,8 @@ public final class UnifiedIncidentManager: @unchecked Sendable {
             item.status = .falsePositive
         }
         incidents[idx] = item
-        let snapshotList = incidents
+        persistLocked()
         lock.unlock()
-
-        try? Self.saveToDisk(snapshotList, url: storageURL)
         auditLog.record(
             action: .secondaryVLMVerified,
             incidentID: item.id,
@@ -481,10 +523,8 @@ public final class UnifiedIncidentManager: @unchecked Sendable {
             break
         }
         incidents[idx] = item
-        let snapshotList = incidents
+        persistLocked()
         lock.unlock()
-
-        try? Self.saveToDisk(snapshotList, url: storageURL)
 
         let auditAction: OperatorAuditEntry.ActionType
         switch newStatus {
@@ -557,9 +597,16 @@ public final class UnifiedIncidentManager: @unchecked Sendable {
     public func clearResolvedAndClosed() {
         lock.lock()
         incidents.removeAll { !$0.status.isOpen }
-        let snapshotList = incidents
+        persistLocked()
         lock.unlock()
-        try? Self.saveToDisk(snapshotList, url: storageURL)
+    }
+
+    private func persistLocked() {
+        guard !loadFailed else { return }
+        do {
+            try Self.saveToDisk(incidents, url: storageURL)
+            persistenceError = nil
+        } catch { persistenceError = "Cannot save incident history: \(error.localizedDescription)" }
     }
 
     private static func loadFromDisk(url: URL) throws -> [SafetyIncident] {

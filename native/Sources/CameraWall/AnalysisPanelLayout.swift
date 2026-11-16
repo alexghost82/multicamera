@@ -85,10 +85,11 @@ struct AnalysisQuestionComposer: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(locale.appLanguage.localized(promptLabel))
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.system(size: 12)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             TextField("", text: $question, axis: .vertical)
-                .lineLimit(2...5).textFieldStyle(.roundedBorder)
+                .font(.system(size: 13))
+                .lineLimit(3...3).textFieldStyle(.roundedBorder)
                 .frame(minWidth: 0, maxWidth: .infinity)
                 .accessibilityLabel(Text(locale.appLanguage.localized(promptLabel)))
                 .accessibilityIdentifier(inputIdentifier)
@@ -97,7 +98,7 @@ struct AnalysisQuestionComposer: View {
                 Spacer(minLength: 0)
                 Button(action: submit) {
                     Label(locale.appLanguage.localized("Send question"), systemImage: "arrow.up.circle.fill")
-                        .font(.body.weight(.medium))
+                        .font(.system(size: 13, weight: .medium))
                         .padding(.horizontal, 12).padding(.vertical, 7)
                         .frame(minHeight: 32)
                         .foregroundStyle(Color.white)

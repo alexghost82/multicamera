@@ -9,6 +9,24 @@ final class IncidentReliabilityTests: XCTestCase {
             explanation: "Test fall", detectorSource: "test")
     }
 
+    func testInterruptedSecondaryVerificationIsRecoveredWithoutClosingTheAlert() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("incidents.json")
+        let audit = OperatorAuditLog(url: root.appendingPathComponent("audit.json"))
+        let manager = UnifiedIncidentManager(storageURL: url, auditLog: audit)
+        let event = BehaviorSafetyCandidate(cameraID: UUID(), trackIDs: [UUID()], type: .fallConfirmed,
+            severity: .critical, confidence: 0.9, monotonicTimestamp: 1, explanation: "Test",
+            detectorSource: "test", requiresSecondaryVLMVerification: true)
+        _ = manager.ingest(candidate: event, cameraName: "Camera")
+        XCTAssertEqual(manager.incident(id: event.id)?.secondaryVLMStatus, .pending)
+        let restarted = UnifiedIncidentManager(storageURL: url, auditLog: audit)
+        restarted.recoverInterruptedVerifications()
+        let reloaded = UnifiedIncidentManager(storageURL: url, auditLog: audit)
+        XCTAssertEqual(reloaded.incident(id: event.id)?.secondaryVLMStatus, .unavailable)
+        XCTAssertEqual(reloaded.incident(id: event.id)?.status, .active)
+    }
+
     func testConcurrentMutationsSurviveReloadWithoutAnOlderSnapshotWinning() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

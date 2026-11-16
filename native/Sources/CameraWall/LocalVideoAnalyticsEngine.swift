@@ -37,6 +37,7 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
     private var modelLoadTask: Task<Void, Never>?
     private var verificationTasks: [UUID: Task<Void, Never>] = [:]
     @Published private(set) var persistenceError: String?
+    private var cameraNamesByID: [UUID: String] = [:]
     private var poseDetector: YOLO26PoseDetector?
     private var customPoseModelURL: URL?
     private var isLoopRunning = false
@@ -100,7 +101,7 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         }
 
         // Verify model integrity (SHA-256) and load asynchronously off the main thread
-        let detector = YOLO26PoseDetector(modelURL: resolvedURL)
+        let detector = poseDetector ?? YOLO26PoseDetector(modelURL: resolvedURL)
         self.poseDetector = detector
         updateModelDescriptor(.yoloPose, status: .loading, filePath: resolvedURL.path, reason: "Loading Core ML Pose model…")
 
@@ -149,6 +150,7 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
     }
 
     func updateRunningState(activeCameraCount: Int) {
+        refreshPersistenceStatus()
         guard settings.globalEnabled else {
             if engineState != .disabled {
                 stopEngine()
@@ -193,17 +195,19 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         fallDetectorsByCamera.removeAll()
         behaviorEnginesByCamera.removeAll()
         stateLock.unlock()
-        poseDetector = nil
+        // Keep the prepared model warm; generations and descriptor state gate its use.
         if modelDescriptors[.yoloPose]?.status == .ready || modelDescriptors[.yoloPose]?.status == .loading {
             updateModelDescriptor(.yoloPose, status: .disabled, reason: "Local Pose session is stopped")
         }
         activeBannerIncident = nil
         trackedPosesByCamera.removeAll()
+        cameraNamesByID.removeAll()
         telemetryByCamera.removeAll()
         transitionState(to: .disabled, reason: "Analytics engine disabled")
     }
 
     func removeCamera(_ cameraID: UUID) {
+        cameraNamesByID.removeValue(forKey: cameraID)
         stateLock.lock()
         cameraGenerations[cameraID] = UUID()
         scheduler.removeCamera(cameraID)
@@ -270,6 +274,7 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         monotonicTimestamp: TimeInterval
     ) {
         guard settings.globalEnabled else { return }
+        cameraNamesByID[camera.id] = camera.name
         if engineState == .disabled {
             startIfEnabled(activeCameraCount: 1)
         }
@@ -322,7 +327,7 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
                 transitionState(to: .running, reason: "Processing live video analytics")
             }
             let generation = workGeneration(for: workItem.cameraID)
-            let cameraName = camerasByID[workItem.cameraID]?.name ?? "Camera \(workItem.cameraID.uuidString.prefix(6))"
+            let cameraName = camerasByID[workItem.cameraID]?.name ?? cameraNamesByID[workItem.cameraID] ?? "Camera \(workItem.cameraID.uuidString.prefix(6))"
             let enableEvidence = currentSettings.enableEvidenceRecording
             let postBufferSeconds = currentSettings.postEventBufferSeconds
             let maxQuotaMB = currentSettings.maxEvidenceDiskQuotaMB
@@ -411,7 +416,7 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
 
                     let camTelemetry = self.scheduler.telemetry(for: workItem.cameraID)
                     var triggerJPEG: Data?
-                    if hasIncident && enableEvidence {
+                    if hasIncident && (enableEvidence || workItem.effectiveConfig.secondaryVLMVerificationEnabled) {
                         triggerJPEG = try? Self.encodeTriggerSnapshotJPEG(from: workItem.payload.value)
                     }
 
@@ -505,37 +510,17 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
     ) {
         var createdCritical = false
         for candidate in candidates {
-            var clipID: UUID?
-            var snapshotPath: String?
-            if enableEvidence {
-                if let bundle = try? evidenceStore.createEvidenceBundle(
-                    for: candidate,
-                    cameraName: cameraName,
-                    triggerSnapshotJPEG: triggerJPEG,
-                    postEventBufferSeconds: postBufferSeconds,
-                    maxDiskQuotaMB: maxQuotaMB,
-                    now: candidate.occurredAt
-                ) {
-                    clipID = bundle.bundleID
-                    snapshotPath = bundle.snapshotRelativePath
-                }
-            }
-
-            if let incident = incidentManager.ingest(
-                candidate: candidate,
-                cameraName: cameraName,
-                clipID: clipID,
-                snapshotRelativePath: snapshotPath,
-                cooldownSeconds: cooldownSeconds
-            ) {
+            if let incident = incidentManager.ingestWithEvidence(candidate: candidate, cameraName: cameraName,
+                evidenceStore: evidenceStore, triggerSnapshotJPEG: triggerJPEG, enableEvidence: enableEvidence,
+                postEventBufferSeconds: postBufferSeconds, maxDiskQuotaMB: maxQuotaMB, cooldownSeconds: cooldownSeconds) {
                 if incident.severity == .critical {
                     createdCritical = true
                 }
                 if bannerEnabled && (incident.severity == .critical || incident.severity == .high) {
                     activeBannerIncident = incident
                 }
-                if candidate.requiresSecondaryVLMVerification, let verifier = secondaryVLMVerifier {
-                    verificationTasks[incident.id]?.cancel()
+                if candidate.requiresSecondaryVLMVerification, incident.secondaryVLMStatus == .pending,
+                   verificationTasks[incident.id] == nil, let verifier = secondaryVLMVerifier {
                     let generation = workGeneration(for: candidate.cameraID)
                     verificationTasks[incident.id] = Task { @MainActor [weak self] in
                         let verdict = await verifier(incident, triggerJPEG)
@@ -589,13 +574,21 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         activeBannerIncident = nil
     }
 
+    func updateIncidentNote(_ incidentID: UUID, note: String) {
+        incidentManager.updateOperatorNote(incidentID: incidentID, note: note)
+        refreshIncidentsAndAudit()
+    }
+
     func deleteIncidentEvidence(_ incidentID: UUID) {
-        evidenceStore.deleteEvidence(for: incidentID)
-        auditLog.record(
-            action: .evidenceDeleted,
-            incidentID: incidentID,
-            summary: "Operator deleted stored evidence bundle for incident \(incidentID.uuidString.prefix(8))"
-        )
+        let bundleID = incidentManager.incident(id: incidentID)?.clipID ?? incidentID
+        do {
+            try evidenceStore.deleteEvidence(for: bundleID)
+            incidentManager.clearEvidenceReferences(incidentID: incidentID)
+            auditLog.record(action: .evidenceDeleted, incidentID: incidentID,
+                summary: "Operator deleted stored evidence bundle for incident \(incidentID.uuidString.prefix(8))")
+        } catch {
+            // Store diagnostics remain visible and references are preserved on failure.
+        }
         refreshIncidentsAndAudit()
     }
 
@@ -619,10 +612,16 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         refreshIncidentsAndAudit()
     }
 
+    private func refreshPersistenceStatus() {
+        let next = incidentManager.lastPersistenceError ?? auditLog.lastPersistenceError ?? evidenceStore.lastPersistenceError
+        if persistenceError != next { persistenceError = next }
+    }
+
     private func refreshIncidentsAndAudit() {
         incidents = incidentManager.allIncidents()
         auditEntries = auditLog.recentEntries(limit: 200)
-        persistenceError = incidentManager.lastPersistenceError ?? auditLog.lastPersistenceError
+        refreshPersistenceStatus()
+        if let banner = activeBannerIncident { activeBannerIncident = incidentManager.incident(id: banner.id) }
     }
 
     // MARK: - Model Registry & Telemetry
@@ -758,11 +757,11 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
     }
 
     func reloadPoseModel(customPath: URL? = nil) {
-        if let customPath {
-            customPoseModelURL = customPath
-        }
-        engineState = .disabled
-        startIfEnabled(activeCameraCount: trackedPosesByCamera.count)
+        let cameraCount = trackedPosesByCamera.count
+        stopEngine()
+        poseDetector = nil
+        if let customPath { customPoseModelURL = customPath }
+        startIfEnabled(activeCameraCount: cameraCount)
     }
 
     private func updateModelDescriptor(

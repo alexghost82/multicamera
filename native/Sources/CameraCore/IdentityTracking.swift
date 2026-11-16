@@ -2667,6 +2667,17 @@ public final class LocalTrackingStore: @unchecked Sendable {
         let safeSQL = try ACTAReadOnlySQLGuard.validateAndCap(rawSQL, maxLimit: safeMaxLimit)
         lock.lock()
         defer { lock.unlock() }
+        let deadline = UnsafeMutablePointer<TimeInterval>.allocate(capacity: 1)
+        deadline.initialize(to: ProcessInfo.processInfo.systemUptime + 0.5)
+        sqlite3_progress_handler(database, 1000, { context in
+            guard let context else { return 1 }
+            return ProcessInfo.processInfo.systemUptime >= context.assumingMemoryBound(to: TimeInterval.self).pointee ? 1 : 0
+        }, deadline)
+        defer {
+            sqlite3_progress_handler(database, 0, nil, nil)
+            deadline.deinitialize(count: 1)
+            deadline.deallocate()
+        }
         let stmt = try prepare(safeSQL)
         defer { sqlite3_finalize(stmt) }
         guard sqlite3_stmt_readonly(stmt) != 0 else {
@@ -2674,7 +2685,10 @@ public final class LocalTrackingStore: @unchecked Sendable {
         }
         let colCount = sqlite3_column_count(stmt)
         var rows: [[String: String]] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while true {
+            let step = sqlite3_step(stmt)
+            if step == SQLITE_DONE { break }
+            guard step == SQLITE_ROW else { throw databaseError() }
             var row: [String: String] = [:]
             for c in 0..<colCount {
                 let colName = sqlite3_column_name(stmt, c).map { String(cString: $0) } ?? "col_\(c)"
@@ -3286,17 +3300,22 @@ public final class LocalTrackingStore: @unchecked Sendable {
                                      now: Date = Date()) throws -> ACTAChatActionRecord? {
         lock.lock()
         defer { lock.unlock() }
-        guard var action = try loadACTAChatActionUnlocked(actionID: actionID), action.status == "proposed",
-              expectedAction == nil || expectedAction == action else { return nil }
-        let status = confirmed ? "confirmed" : "rejected"
+        guard var action = try loadACTAChatActionUnlocked(actionID: actionID), action.status == "proposed" else { return nil }
+        if let expected = expectedAction {
+            // Compare the reviewed intent, not Date round-tripping through SQLite REAL.
+            guard expected.actionID == action.actionID, expected.threadID == action.threadID,
+                  expected.actionType == action.actionType, expected.title == action.title,
+                  expected.parameters == action.parameters, expected.status == action.status else { return nil }
+        }
+        let resolvedStatus = confirmed ? "confirmed" : "rejected"
         let upd = try prepare("UPDATE ghost_chat_actions SET status = ?, reviewed_at = ? WHERE action_id = ? AND status = 'proposed'")
         defer { sqlite3_finalize(upd) }
-        bind(status, at: 1, to: upd)
+        bind(resolvedStatus, at: 1, to: upd)
         sqlite3_bind_double(upd, 2, now.timeIntervalSince1970)
         bind(actionID, at: 3, to: upd)
         guard sqlite3_step(upd) == SQLITE_DONE else { throw databaseError() }
         guard sqlite3_changes(database) == 1 else { return nil }
-        action.status = status
+        action.status = resolvedStatus
         action.reviewedAt = now
         return action
     }

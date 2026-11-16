@@ -2055,16 +2055,17 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
                 attachedImages.append(contentsOf: selected.prefix(4).map(\.jpegData))
                 rowsCount = 1
                 if visualHit && conf >= 0.55, let firstFrame = selected.first, let store = trackingStore {
-                    if let clip = try? store.saveACTAChatClip(
+                    let clip = try store.saveACTAChatClip(
                         threadID: threadID,
                         cameraID: firstFrame.cameraID?.uuidString ?? (camera.raw ?? "live"),
                         clipData: firstFrame.jpegData,
                         fileExtension: "jpg",
                         createdAt: now
-                    ) {
-                        savedClipID = clip.clipID
-                        outputDict["clip_id"] = clip.clipID
-                    }
+                    )
+                    savedClipID = clip.clipID
+                    outputDict["clip_id"] = clip.clipID
+                    outputDict["camera_id"] = firstFrame.cameraID?.uuidString ?? ""
+                    outputDict["camera_name"] = firstFrame.cameraName
                 }
 
             case "run_readonly_sql":
@@ -2512,6 +2513,11 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
             guard let updated = try store.applyACTAChatAction(proposal, confirmed: true, now: now, changes: { database in
                 for profile in profilesToSave { try database.upsertACTAIdentityProfile(profile) }
                 if let profileToRemove { try database.deleteACTAIdentityProfile(identityID: profileToRemove) }
+                if let pair = cannotLink {
+                    try database.saveACTADedupDecision(ACTADedupDecision(idA: pair.0, idB: pair.1,
+                        layer: .operatorReview, shouldMerge: false, recordCannotLink: true,
+                        confidence: 1, reason: "Operator-confirmed identity split"), decidedAt: now)
+                }
                 if let rename = dossierRename {
                     _ = try database.rebuildACTAIdentityDossier(identityID: rename.id, displayName: rename.name, kind: rename.kind, now: now)
                 }

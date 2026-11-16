@@ -407,6 +407,7 @@ final class WallModel: ObservableObject {
     @Published var actaChatMessages: [ACTAChatMessageRecord] = []
     @Published var actaThreadFocusEntries: [ACTAThreadFocusEntry] = []
     @Published var actaChatActions: [ACTAChatActionRecord] = []
+    private var actaAgentTask: Task<Void, Never>?
     @Published private(set) var actaAgentBusy = false
     @Published private(set) var actaAgentStatus = "Unified ACTA Agent ready"
     private(set) var actaAnalytics: ACTAAnalyticsCoordinator!
@@ -506,12 +507,19 @@ final class WallModel: ObservableObject {
     init(configURL: URL = ConfigurationStore.defaultURL, workerMode: Bool = false, poseModelURL: URL? = nil,
          relayFactory: @escaping @MainActor () -> Go2RTC = { Go2RTC() },
          trackingStoreURL: URL = LocalTrackingStore.defaultURL,
-         featureCoordinator: CameraFeatureCoordinator = CameraFeatureCoordinator()) {
+         featureCoordinator: CameraFeatureCoordinator = CameraFeatureCoordinator(),
+         analyticsDirectoryURL: URL? = nil) {
         self.workerMode = workerMode
         let resolvedPoseURL = workerMode ? poseModelURL : (poseModelURL ?? YOLO26PoseDetector.defaultModelURL)
         let poseDetectorInstance = resolvedPoseURL.map(YOLO26PoseDetector.init(modelURL:))
         self.poseDetector = poseDetectorInstance
-        self.localAnalyticsEngine = LocalVideoAnalyticsEngine(poseModelURL: resolvedPoseURL)
+        let analyticsRoot = analyticsDirectoryURL ?? UnifiedIncidentManager.defaultURL.deletingLastPathComponent()
+        self.localAnalyticsEngine = LocalVideoAnalyticsEngine(
+            settingsURL: analyticsRoot.appendingPathComponent(VideoAnalyticsSettingsStore.defaultURL.lastPathComponent),
+            incidentsURL: analyticsRoot.appendingPathComponent(UnifiedIncidentManager.defaultURL.lastPathComponent),
+            evidenceDirectoryURL: analyticsRoot.appendingPathComponent(SafetyEvidenceStore.defaultURL.lastPathComponent),
+            auditLogURL: analyticsRoot.appendingPathComponent(OperatorAuditLog.defaultURL.lastPathComponent),
+            poseModelURL: resolvedPoseURL)
         self.workerEventSpool = workerMode ? try? WorkerEventSpool() : nil
         self.featureCoordinator = featureCoordinator
         let detector = YOLO26Detector()
@@ -836,7 +844,20 @@ final class WallModel: ObservableObject {
         }
     }
 
-    func shutdown() { modelRuntime.cancel(); stop(); timer?.invalidate() }
+    func shutdown() {
+        modelRuntime.cancel()
+        trackResearchGeneration = UUID()
+        trackResearchTask?.cancel()
+        trackResearchTask = nil
+        trackResearchBusy = false
+        missionConsultGeneration = UUID()
+        missionConsultTask?.cancel()
+        missionConsultTask = nil
+        actaAgentTask?.cancel()
+        actaAgentTask = nil
+        stop()
+        timer?.invalidate()
+    }
 
     private func connect(_ camera: Camera, expanded: Bool) async throws {
         localAnalyticsEngine.removeCamera(camera.id)
@@ -3299,7 +3320,7 @@ final class WallModel: ObservableObject {
         trackingQueue.async { [weak self] in
             try? store.rebuildAllACTAKnowledge()
             Task { @MainActor [weak self] in
-                self?.notice = "Семантическая база знаний (Knowledge Layer + FTS5) успешно перестроена"
+                self?.notice = "Knowledge index rebuilt successfully"
             }
         }
     }
@@ -3324,7 +3345,9 @@ final class WallModel: ObservableObject {
 
     func reviewACTAChatAction(_ actionID: String, confirmed: Bool) {
         guard let ghost = actaAnalytics else { return }
-        _ = ghost.reviewAndExecuteChatAction(actionID: actionID, confirmed: confirmed)
+        if ghost.reviewAndExecuteChatAction(actionID: actionID, confirmed: confirmed) == nil {
+            notice = "Agent action was not executed. Check the proposal and diagnostics."
+        }
         if let store = trackingStore {
             actaChatActions = (try? store.listACTAChatActions(threadID: activeACTAThreadID, status: "proposed")) ?? []
         }
@@ -3375,9 +3398,9 @@ final class WallModel: ObservableObject {
         }
         actaAgentBusy = true
         actaAgentStatus = "ACTA Agent analyzing multi-memory sources…"
-        Task { @MainActor [weak self] in
+        actaAgentTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.actaAgentBusy = false }
+            defer { self.actaAgentBusy = false; self.actaAgentTask = nil }
             var liveFrames: [ACTALiveCameraFrame] = []
             for snap in livePixelSnapshots.prefix(4) {
                 if let jpeg = try? await VLMFrameEncoder.jpegData(from: snap.pixel.value, maxDimension: 640, quality: 0.45) {
@@ -3392,10 +3415,12 @@ final class WallModel: ObservableObject {
                 cameraNames: cameraNames,
                 onProgress: { [weak self] progress in
                     Task { @MainActor [weak self] in
-                        self?.actaAgentStatus = progress
+                        guard let self, self.activeACTAThreadID == threadID else { return }
+                        self.actaAgentStatus = progress
                     }
                 }
             )
+            guard !Task.isCancelled, self.activeACTAThreadID == threadID else { return }
             if let store = self.trackingStore {
                 self.actaChatThreads = (try? store.listACTAChatThreads(limit: 50)) ?? self.actaChatThreads
                 self.actaChatMessages = (try? store.loadACTAChatMessages(threadID: threadID)) ?? self.actaChatMessages
@@ -3406,9 +3431,9 @@ final class WallModel: ObservableObject {
                 self.actaAgentStatus = "Agent memory storage failed"
                 self.notice = storageError
             } else {
-            self.actaAgentStatus = answer.confidence >= 0.4
-                ? "ACTA Agent answer received (\(Int((answer.confidence * 100).rounded()))% confidence)"
-                : "ACTA Agent answer received"
+                self.actaAgentStatus = answer.confidence >= 0.4
+                    ? "ACTA Agent answer received (\(Int((answer.confidence * 100).rounded()))% confidence)"
+                    : "ACTA Agent answer received"
             }
         }
         return true

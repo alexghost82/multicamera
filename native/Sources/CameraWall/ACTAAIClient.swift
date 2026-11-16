@@ -685,10 +685,13 @@ public final class ACTAAIClient: @unchecked Sendable {
         }
     }
 
-    func sendAuthorized(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+    func sendAuthorized(_ request: URLRequest, requiresExternalConsent: Bool = false) async throws -> (Data, HTTPURLResponse) {
         try Task.checkCancellation()
+        let current = configuration()
+        let cloudMode = current.mode == .openAI || current.mode == .hybridAuto
         guard let url = request.url,
-              Self.isLoopbackURL(url) || configuration().allowExternalAI else {
+              (!requiresExternalConsent || (current.allowExternalAI && cloudMode)),
+              Self.isLoopbackURL(url) || current.allowExternalAI else {
             throw URLError(.appTransportSecurityRequiresSecureConnection)
         }
         return try await transport(request)
@@ -1080,7 +1083,7 @@ public final class ACTAAIClient: @unchecked Sendable {
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, http) = try await sendAuthorized(request)
+        let (data, http) = try await sendAuthorized(request, requiresExternalConsent: true)
         guard (200..<300).contains(http.statusCode) else {
             throw URLError(.badServerResponse)
         }
@@ -1186,7 +1189,7 @@ public final class ACTAAIClient: @unchecked Sendable {
                 http.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 http.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
                 http.httpBody = try JSONSerialization.data(withJSONObject: body)
-                let (data, response) = try await sendAuthorized(http)
+                let (data, response) = try await sendAuthorized(http, requiresExternalConsent: true)
                 if chained, response.statusCode == 400 || response.statusCode == 404 {
                     // Expired/unknown `previous_response_id` or unsettled call debt: caller retries with full history.
                     throw ACTAAgentError.chainRejected

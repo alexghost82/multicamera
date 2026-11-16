@@ -178,7 +178,7 @@ final class TrackResearchTests: XCTestCase {
         let coordinator = CameraFeatureCoordinator(preferencesURL: directory.appendingPathComponent("features.json"),
             databaseURL: directory.appendingPathComponent("features.sqlite3"))
         let wall = WallModel(configURL: directory.appendingPathComponent("cameras.json"),
-            trackingStoreURL: directory.appendingPathComponent("tracking.sqlite3"), featureCoordinator: coordinator)
+            trackingStoreURL: directory.appendingPathComponent("tracking.sqlite3"), featureCoordinator: coordinator, analyticsDirectoryURL: directory)
         defer { wall.shutdown() }
 
         XCTAssertFalse(wall.running)

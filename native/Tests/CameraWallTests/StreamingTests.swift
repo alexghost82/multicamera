@@ -21,7 +21,10 @@ final class StreamingTests: XCTestCase {
         let file = directory.appendingPathComponent("cameras.json")
         try ConfigurationStore.save(config, to: file)
 
-        let model = WallModel(configURL: file)
+        let features = CameraFeatureCoordinator(preferencesURL: directory.appendingPathComponent("features.json"),
+            databaseURL: directory.appendingPathComponent("features.sqlite3"))
+        let model = WallModel(configURL: file, trackingStoreURL: directory.appendingPathComponent("tracking.sqlite3"),
+            featureCoordinator: features, analyticsDirectoryURL: directory)
         defer { model.shutdown() }
         model.setYOLOEnabled(for: first.id, enabled: true)
         model.setAIChatEnabled(for: second.id, enabled: false)
@@ -118,11 +121,14 @@ final class StreamingTests: XCTestCase {
         let file = directory.appendingPathComponent("cameras.json")
         try ConfigurationStore.save(wallConfig, to: file)
         var helpers: [Go2RTC] = []
+        let features = CameraFeatureCoordinator(preferencesURL: directory.appendingPathComponent("features.json"),
+            databaseURL: directory.appendingPathComponent("features.sqlite3"))
         let model = WallModel(configURL: file, relayFactory: {
             let helper = Go2RTC()
             helpers.append(helper)
             return helper
-        })
+        }, trackingStoreURL: directory.appendingPathComponent("tracking.sqlite3"),
+           featureCoordinator: features, analyticsDirectoryURL: directory)
         defer { model.shutdown() }
         model.start()
         try await waitForFrames(model: model, camera: camera)

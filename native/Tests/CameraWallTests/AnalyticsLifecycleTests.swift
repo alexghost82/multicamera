@@ -5,6 +5,18 @@ import XCTest
 
 @MainActor
 final class AnalyticsLifecycleTests: XCTestCase {
+    func testModelReloadInvalidatesWorkFromThePreviousModel() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let engine = LocalVideoAnalyticsEngine(settingsURL: root.appendingPathComponent("settings.json"),
+            incidentsURL: root.appendingPathComponent("incidents.json"),
+            evidenceDirectoryURL: root.appendingPathComponent("evidence"), auditLogURL: root.appendingPathComponent("audit.json"))
+        let camera = UUID(), old = engine.workGeneration(for: camera)
+        engine.reloadPoseModel(customPath: root.appendingPathComponent("new-model.mlpackage"))
+        XCTAssertFalse(engine.isCurrent(old, cameraID: camera))
+        engine.stopEngine()
+    }
+
     func testStopAndCameraReplacementInvalidatePreviouslyScheduledResults() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

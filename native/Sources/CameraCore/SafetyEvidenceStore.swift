@@ -69,6 +69,12 @@ public final class SafetyEvidenceStore: @unchecked Sendable {
 
     public let baseDirectoryURL: URL
     private let lock = NSLock()
+    private var persistenceError: String?
+    public var lastPersistenceError: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return persistenceError
+    }
     private var preEventBuffer = AlertLookbackBuffer()
     private var lastSampledUptimeByCamera: [UUID: TimeInterval] = [:]
     private var frameSerialCounter: UInt64 = 1
@@ -119,11 +125,14 @@ public final class SafetyEvidenceStore: @unchecked Sendable {
                 continue
             }
             if capturedAt.timeIntervalSince(capture.lastCapturedAt) >= 0.45 {
-                capture.capturedCount += 1
-                capture.lastCapturedAt = capturedAt
-                pendingPostCaptures[incidentID] = capture
-                let postIndex = capture.capturedCount
-                try? writePostEventFrameUnlocked(incidentID: incidentID, postIndex: postIndex, jpegData: jpegData)
+                do {
+                    try writePostEventFrameUnlocked(incidentID: incidentID, postIndex: capture.capturedCount + 1, jpegData: jpegData)
+                    capture.capturedCount += 1
+                    capture.lastCapturedAt = capturedAt
+                    pendingPostCaptures[incidentID] = capture
+                } catch {
+                    persistenceError = "Cannot save incident evidence: \(error.localizedDescription)"
+                }
                 if capture.capturedCount >= capture.maxPostFrames {
                     completedIncidentIDs.append(incidentID)
                 }
@@ -140,6 +149,7 @@ public final class SafetyEvidenceStore: @unchecked Sendable {
     @discardableResult
     public func createEvidenceBundle(
         for candidate: BehaviorSafetyCandidate,
+        incidentID: UUID? = nil,
         cameraName: String,
         triggerSnapshotJPEG: Data?,
         postEventBufferSeconds: Double = 6.0,
@@ -149,9 +159,22 @@ public final class SafetyEvidenceStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
+        do {
         try ensureDirectoryUnlocked(baseDirectoryURL)
-        let bundleID = candidate.id
-        let bundleDir = bundleDirectoryURL(for: bundleID)
+        let bundleID = incidentID ?? candidate.id
+        let destination = bundleDirectoryURL(for: bundleID)
+        if FileManager.default.fileExists(atPath: destination.path) {
+            let manifest = try readManifestUnlocked(in: destination)
+            guard manifest.incidentID == bundleID, manifest.cameraID == candidate.cameraID else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            let snapshot = destination.appendingPathComponent("snapshot.jpg")
+            return (bundleID, FileManager.default.fileExists(atPath: snapshot.path)
+                ? "\(bundleID.uuidString.lowercased())/snapshot.jpg" : nil)
+        }
+        // Publish a complete bundle in one rename, never a half-written visible directory.
+        let bundleDir = baseDirectoryURL.appendingPathComponent(".\(UUID().uuidString).pending", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: bundleDir) }
         try FileManager.default.createDirectory(
             at: bundleDir,
             withIntermediateDirectories: true,
@@ -201,6 +224,7 @@ public final class SafetyEvidenceStore: @unchecked Sendable {
             explanation: candidate.explanation
         )
         try writeManifestUnlocked(manifest, in: bundleDir)
+        try FileManager.default.moveItem(at: bundleDir, to: destination)
 
         if postEventBufferSeconds > 0 {
             let maxPost = max(1, min(30, Int((postEventBufferSeconds * 2.0).rounded())))
@@ -217,6 +241,10 @@ public final class SafetyEvidenceStore: @unchecked Sendable {
 
         enforceQuotaUnlocked(maxBytes: Int64(max(64, maxDiskQuotaMB)) * 1024 * 1024, protecting: bundleID)
         return (bundleID, snapshotRelPath)
+        } catch {
+            persistenceError = "Cannot save incident evidence: \(error.localizedDescription)"
+            throw error
+        }
     }
 
     public func loadSnapshot(for incidentID: UUID) -> Data? {
@@ -252,12 +280,17 @@ public final class SafetyEvidenceStore: @unchecked Sendable {
         return try? decoder.decode(SafetyEvidenceBundleManifest.self, from: data)
     }
 
-    public func deleteEvidence(for incidentID: UUID) {
+    public func deleteEvidence(for incidentID: UUID) throws {
         lock.lock()
         defer { lock.unlock() }
-        pendingPostCaptures.removeValue(forKey: incidentID)
         let dir = bundleDirectoryURL(for: incidentID)
-        try? FileManager.default.removeItem(at: dir)
+        do {
+            if FileManager.default.fileExists(atPath: dir.path) { try FileManager.default.removeItem(at: dir) }
+            pendingPostCaptures.removeValue(forKey: incidentID)
+        } catch {
+            persistenceError = "Cannot delete incident evidence: \(error.localizedDescription)"
+            throw error
+        }
     }
 
     public func currentDiskUsageBytes() -> Int64 {
@@ -286,16 +319,20 @@ public final class SafetyEvidenceStore: @unchecked Sendable {
         try jpegData.write(to: file, options: [.atomic])
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
 
-        let manifestURL = dir.appendingPathComponent("manifest.json")
-        if let data = try? Data(contentsOf: manifestURL) {
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            if var manifest = try? decoder.decode(SafetyEvidenceBundleManifest.self, from: data) {
-                manifest.postEventFrameCount = max(manifest.postEventFrameCount, postIndex)
-                manifest.totalBytes += jpegData.count
-                try? writeManifestUnlocked(manifest, in: dir)
-            }
+        var manifest = try readManifestUnlocked(in: dir)
+        manifest.postEventFrameCount = max(manifest.postEventFrameCount, postIndex)
+        let files = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey])
+        manifest.totalBytes = try files.filter { $0.pathExtension == "jpg" }.reduce(0) {
+            $0 + (try $1.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
         }
+        try writeManifestUnlocked(manifest, in: dir)
+    }
+
+    private func readManifestUnlocked(in dir: URL) throws -> SafetyEvidenceBundleManifest {
+        let data = try Data(contentsOf: dir.appendingPathComponent("manifest.json"))
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(SafetyEvidenceBundleManifest.self, from: data)
     }
 
     private func writeManifestUnlocked(_ manifest: SafetyEvidenceBundleManifest, in dir: URL) throws {
@@ -328,8 +365,13 @@ public final class SafetyEvidenceStore: @unchecked Sendable {
         for bundle in bundles.sorted(by: { $0.createdAt < $1.createdAt }) {
             guard total > maxBytes else { break }
             if bundle.url.lastPathComponent == protectedName { continue }
-            try? FileManager.default.removeItem(at: bundle.url)
-            total -= bundle.size
+            do {
+                try FileManager.default.removeItem(at: bundle.url)
+                if let id = UUID(uuidString: bundle.url.lastPathComponent) { pendingPostCaptures.removeValue(forKey: id) }
+                total -= bundle.size
+            } catch {
+                persistenceError = "Cannot delete incident evidence: \(error.localizedDescription)"
+            }
         }
     }
 

@@ -24,6 +24,7 @@ public struct SafetyIncident: Codable, Equatable, Identifiable, Sendable {
     public var updatedAt: Date
     public var acknowledgedAt: Date?
     public var resolvedAt: Date?
+    public var suppressedUntil: Date? = nil
     public var title: String
     public var explanation: String
     public var detectorSource: String
@@ -104,6 +105,7 @@ public struct OperatorAuditEntry: Codable, Equatable, Identifiable, Sendable {
         case incidentSuppressed = "INCIDENT_SUPPRESSED"
         case incidentResolved = "INCIDENT_RESOLVED"
         case incidentClosed = "INCIDENT_CLOSED"
+        case incidentNoteUpdated = "INCIDENT_NOTE_UPDATED"
         case incidentReopened = "INCIDENT_REOPENED"
         case secondaryVLMVerified = "SECONDARY_VLM_VERIFIED"
         case settingsUpdated = "SETTINGS_UPDATED"
@@ -271,6 +273,12 @@ public final class UnifiedIncidentManager: @unchecked Sendable {
             loadFailed = true
             persistenceError = "Cannot load incident history: \(error.localizedDescription)"
         }
+        for incident in incidents where incident.status == .suppressed {
+            if let until = incident.suppressedUntil, until > Date() {
+                let key = "\(incident.cameraID.uuidString):\(incident.type.rawValue)"
+                suppressionUntilByKey[key] = max(suppressionUntilByKey[key] ?? .distantPast, until)
+            }
+        }
     }
 
     /// Called once by application startup. An interrupted secondary request must
@@ -435,6 +443,49 @@ public final class UnifiedIncidentManager: @unchecked Sendable {
         return newIncident
     }
 
+    /// Deduplicate first, then create at most one bundle under the canonical incident ID.
+    /// Evidence failures never suppress the primary safety incident.
+    @discardableResult
+    public func ingestWithEvidence(candidate: BehaviorSafetyCandidate, cameraName: String,
+                                   evidenceStore: SafetyEvidenceStore, triggerSnapshotJPEG: Data?,
+                                   enableEvidence: Bool, postEventBufferSeconds: Double = 6,
+                                   maxDiskQuotaMB: Int = 2048, cooldownSeconds: Double = 30) -> SafetyIncident? {
+        guard let incident = ingest(candidate: candidate, cameraName: cameraName, cooldownSeconds: cooldownSeconds) else { return nil }
+        guard enableEvidence, incident.clipID == nil else { return incident }
+        do {
+            let bundle = try evidenceStore.createEvidenceBundle(for: candidate, incidentID: incident.id,
+                cameraName: cameraName, triggerSnapshotJPEG: triggerSnapshotJPEG,
+                postEventBufferSeconds: postEventBufferSeconds, maxDiskQuotaMB: maxDiskQuotaMB, now: candidate.occurredAt)
+            return attachEvidence(incidentID: incident.id, clipID: bundle.bundleID,
+                snapshotRelativePath: bundle.snapshotRelativePath) ?? incident
+        } catch {
+            // The evidence store exposes the error; keep the original alert visible.
+            return incident
+        }
+    }
+
+    public func updateOperatorNote(incidentID: UUID, note: String) {
+        lock.lock()
+        guard let index = incidents.firstIndex(where: { $0.id == incidentID }) else { lock.unlock(); return }
+        let value = String(note.trimmingCharacters(in: .whitespacesAndNewlines).prefix(4000))
+        incidents[index].operatorNotes = value
+        incidents[index].updatedAt = Date()
+        persistLocked()
+        let cameraID = incidents[index].cameraID
+        lock.unlock()
+        auditLog.record(action: .incidentNoteUpdated, incidentID: incidentID, cameraID: cameraID,
+            summary: "Updated operator incident note", details: value)
+    }
+
+    public func clearEvidenceReferences(incidentID: UUID) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let index = incidents.firstIndex(where: { $0.id == incidentID }) else { return }
+        incidents[index].clipID = nil
+        incidents[index].snapshotRelativePath = nil
+        persistLocked()
+    }
+
     @discardableResult
     public func attachEvidence(
         incidentID: UUID,
@@ -518,9 +569,18 @@ public final class UnifiedIncidentManager: @unchecked Sendable {
         case .suppressed:
             let duration = suppressDurationSeconds ?? 300
             let key = "\(item.cameraID.uuidString):\(item.type.rawValue)"
-            suppressionUntilByKey[key] = now.addingTimeInterval(duration)
+            item.suppressedUntil = now.addingTimeInterval(duration)
+            suppressionUntilByKey[key] = item.suppressedUntil
         default:
             break
+        }
+        if newStatus.isOpen {
+            let key = "\(item.cameraID.uuidString):\(item.type.rawValue)"
+            suppressionUntilByKey.removeValue(forKey: key)
+            for index in incidents.indices where incidents[index].cameraID == item.cameraID && incidents[index].type == item.type {
+                incidents[index].suppressedUntil = nil
+            }
+            item.suppressedUntil = nil
         }
         incidents[idx] = item
         persistLocked()

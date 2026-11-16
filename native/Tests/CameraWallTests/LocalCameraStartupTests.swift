@@ -26,7 +26,11 @@ struct LocalCameraStartupTests {
         // A disabled device avoids requesting hardware access during automated tests.
         config.cameras = [Camera(name: "Mac", substream: "", enabled: false, localDeviceID: "test")]
         try ConfigurationStore.save(config, to: url)
-        let model = WallModel(configURL: url)
+        let root = url.deletingLastPathComponent()
+        let features = CameraFeatureCoordinator(preferencesURL: root.appendingPathComponent("features.json"),
+            databaseURL: root.appendingPathComponent("features.sqlite3"))
+        let model = WallModel(configURL: url, trackingStoreURL: root.appendingPathComponent("tracking.sqlite3"),
+            featureCoordinator: features, analyticsDirectoryURL: root)
         defer { model.shutdown() }
         model.start()
         for _ in 0..<100 {

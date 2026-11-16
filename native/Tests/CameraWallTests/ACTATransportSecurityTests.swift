@@ -21,6 +21,19 @@ final class ACTATransportSecurityTests: XCTestCase {
         XCTAssertEqual(calls.value, 1)
         _ = try await client.sendAuthorized(URLRequest(url: URL(string: "http://127.0.0.1:8000/v1/chat/completions")!))
         XCTAssertEqual(calls.value, 2)
+        do {
+            _ = try await client.sendAuthorized(URLRequest(url: URL(string: "http://127.0.0.1:8018/api/backup/responses")!), requiresExternalConsent: true)
+            XCTFail("A loopback cloud relay still needs external consent")
+        } catch {}
+        XCTAssertEqual(calls.value, 2)
+        config.allowExternalAI = true
+        config.mode = .mlxInProcess
+        client.updateConfiguration(config)
+        do {
+            _ = try await client.sendAuthorized(remote, requiresExternalConsent: true)
+            XCTFail("Switching to local mode must block queued cloud requests")
+        } catch {}
+        XCTAssertEqual(calls.value, 2)
     }
 
     func testLoopbackRedirectCannotExfiltrateDataOrChangePort() {

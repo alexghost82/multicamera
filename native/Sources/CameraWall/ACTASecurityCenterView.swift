@@ -149,6 +149,7 @@ struct ACTASecurityCenterView: View {
     @State private var selectedCameraIDs: Set<UUID>?
     @State private var cameraPickerPresented = false
     @State private var aiChatPresented = false
+    @State private var safetyIncidentsPresented = false
     @State private var cameraPickerSearch = ""
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selectedAlert: VLMAlert?
@@ -1117,6 +1118,15 @@ struct ACTASecurityCenterView: View {
                 operationsWatchPanel
             }
             CameraMissionsPanel(model: model)
+            HStack {
+                Button { safetyIncidentsPresented = true } label: {
+                    Label(languageSettings.localized("Safety incidents (%lld)", arguments: [model.localAnalyticsEngine.incidents.count]), systemImage: "exclamationmark.shield")
+                }
+                .sheet(isPresented: $safetyIncidentsPresented) {
+                    SafetyIncidentCenterView(engine: model.localAnalyticsEngine, languageSettings: languageSettings)
+                }
+                Spacer()
+            }
             if latestAlerts.isEmpty && latestISAPIEvents.isEmpty {
                 emptyPage(title: "No events", icon: "bell",
                           description: "Enable ISAPI events for a network camera or configure scheduled AI alerts.",

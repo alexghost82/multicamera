@@ -30,6 +30,16 @@ final class UIStringVisitor: SyntaxVisitor {
     }
 
     override func visit(_ node: StringLiteralExprSyntax) -> SyntaxVisitorContinueKind {
+        // Comparison operands are stored identifiers, not the labels in ternary branches.
+        if let expressions = node.parent?.as(ExprListSyntax.self) {
+            let elements = Array(expressions)
+            if let index = elements.firstIndex(where: { $0.id == node.id }) {
+                let adjacent = [index - 1, index + 1].filter { elements.indices.contains($0) }
+                if adjacent.contains(where: { ["==", "!="].contains(elements[$0].trimmedDescription) }) {
+                    return .skipChildren
+                }
+            }
+        }
         var key = ""
         var interpolated = false
         for segment in node.segments {
@@ -43,6 +53,8 @@ final class UIStringVisitor: SyntaxVisitor {
            let decoded = try? JSONSerialization.jsonObject(with: data) as? [String], let value = decoded.first {
             key = value
         }
+        // Reverse-DNS service/bundle identifiers remain byte-identical across languages.
+        if key.range(of: #"^[a-z0-9_-]+(?:\.[a-z0-9_-]+){2,}$"#, options: .regularExpression) != nil { return .skipChildren }
         guard key.unicodeScalars.contains(where: { (65...90).contains($0.value) || (97...122).contains($0.value) }),
               let context = context(for: Syntax(node)) else { return .skipChildren }
         strings.append(UIString(file: file, line: locations.location(for: node.positionAfterSkippingLeadingTrivia).line,

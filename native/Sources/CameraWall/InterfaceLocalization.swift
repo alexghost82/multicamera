@@ -93,7 +93,16 @@ final class InterfaceLocalization {
                 let isNestedError = template.key.localizedCaseInsensitiveContains("failed:")
                     || template.key.localizedCaseInsensitiveContains("error:")
                     || template.key.hasPrefix("Cannot load configuration.")
-                values[position] = isNestedError && depth < 3 ? translate(captured, depth: depth + 1) : captured
+                let isFallMetricBlock = position == 1 && (template.key.hasPrefix("Fall confirmed after ")
+                    || template.key.hasPrefix("Person remained down on floor for "))
+                let isPosture = position == 0 && template.key.hasPrefix("Person in %@ posture ")
+                if isFallMetricBlock && depth < 3 {
+                    values[position] = captured.components(separatedBy: ", ")
+                        .map { translate($0, depth: depth + 1) }.joined(separator: ", ")
+                } else {
+                    values[position] = (isNestedError || isPosture) && depth < 3
+                        ? translate(captured, depth: depth + 1) : captured
+                }
             }
             return Self.substitute(template.value, values: values)
         }

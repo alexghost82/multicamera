@@ -34,6 +34,20 @@ final class LanguageSettingsTests: XCTestCase {
         XCTAssertEqual(panel.nameFieldLabel, "Имя файла:")
     }
 
+    func testFallExplanationTranslatesMetricsWithoutTranslatingOperatorNames() {
+        let language = AppLanguage.russian
+        let explanation = "Fall confirmed after 0.8 s transition (horizontal posture, height 97% of upright baseline, aspect ratio 1.39)."
+        let translated = language.localizedMessage(explanation)
+        XCTAssertFalse(translated.contains("horizontal posture"))
+        XCTAssertFalse(translated.contains("upright baseline"))
+        XCTAssertTrue(translated.contains("0.8"))
+        XCTAssertTrue(translated.contains("97%"))
+        XCTAssertTrue(translated.contains("1.39"))
+        let namedZone = language.localizedMessage("Person entered restricted zone 'Fall Confirmed' for 1.0 s (hold threshold 0.5 s).")
+        XCTAssertTrue(namedZone.contains("Fall Confirmed"), "Operator-supplied names remain data")
+        XCTAssertEqual(language.localizedMessage("Unknown external error 123"), "Unknown external error 123")
+    }
+
     func testRussianRuntimeTemplatesAndNestedErrorsAreTranslated() {
         let language = AppLanguage.russian
         XCTAssertEqual(language.localizedMessage("YOLO26n · 12 ms"), "YOLO26n · 12 мс")

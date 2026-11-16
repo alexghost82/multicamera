@@ -1312,6 +1312,7 @@ public struct ACTAFacetSummary: Codable, Sendable, Equatable {
 }
 
 public enum ACTADedupLayer: String, Codable, Sendable, Equatable {
+    case operatorReview = "operator_review"
     case layerALocalSignals = "layer_a_local"
     case layerBLocalFacets = "layer_b_facets"
     case layerCTextLLM = "layer_c_text"

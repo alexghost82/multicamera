@@ -20,7 +20,7 @@ final class LocalVLMClientTests: XCTestCase {
         let coordinator = CameraFeatureCoordinator(preferencesURL: directory.appendingPathComponent("features.json"),
             databaseURL: directory.appendingPathComponent("features.sqlite3"))
         let wall = WallModel(configURL: directory.appendingPathComponent("cameras.json"),
-            trackingStoreURL: trackingURL, featureCoordinator: coordinator)
+            trackingStoreURL: trackingURL, featureCoordinator: coordinator, analyticsDirectoryURL: directory)
         defer { wall.shutdown() }
         wall.vlmPreferences.model = model
         let question = "Какого цвета автомобиль был замечен?"

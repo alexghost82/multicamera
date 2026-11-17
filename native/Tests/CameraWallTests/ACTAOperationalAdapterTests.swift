@@ -134,6 +134,13 @@ final class ACTAOperationalAdapterTests: XCTestCase {
         let listed = try await registry.execute(actionID: "incident.list", parameters: ["camera_id": event.cameraID.uuidString])
         XCTAssertTrue(listed.success)
         XCTAssertTrue(listed.outputJSON.contains(incident.id.uuidString))
+        let detail = try await registry.execute(actionID: "incident.get", parameters: ["incident_id": incident.id.uuidString])
+        XCTAssertTrue(detail.success, detail.summary)
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(detail.outputJSON.utf8)) as? [String: Any])
+        let metadata = try XCTUnwrap(payload["incident"] as? [String: Any])
+        XCTAssertEqual(metadata["id"] as? String, incident.id.uuidString)
+        let tools = try await ACTAAnalyticsCoordinator.registryTools(registry: registry)
+        XCTAssertTrue(tools.contains { $0.name == "acta__incident__get" })
         let result = try await registry.execute(actionID: "incident.transition_status", parameters: [
             "incident_id": incident.id.uuidString, "status": "resolved", "note": "Verified fixture"])
         XCTAssertTrue(result.success, result.summary)

@@ -352,3 +352,32 @@ corrupt/stale stores. Реальные камеры, модели, Keychain и �
 Остаётся Phase 1: модели/backend/credentials, ISAPI/snapshot/reconnect, другие строки
 матрицы, idempotency/audit/recovery и сквозной UI/agent сценарий. Реальный Qwen/vLLM Metal,
 voice/TTS и performance gates остаются отдельными незавершёнными этапами.
+
+## Первая read-only волна: incident.get
+
+Пользователь подтвердил архитектуру от 2026-11-17, отсутствие дополнительных правил
+и первую волну из трёх действий. Три направления исследовались параллельно.
+Реализован только `incident.get`: зарегистрирован в action registry и каталоге
+модели, читает минимальные метаданные через общий `UnifiedIncidentManager`.
+Свободный текст и пути evidence не возвращаются; неверный UUID, отсутствие записи,
+недоступность сервиса и ошибка хранилища различаются. Полный состав экрана инцидента
+и настоящий Qwen не проверены. Изменений форматов, миграций и зависимостей нет.
+
+Проверки:
+
+- `swift test --package-path native --disable-automatic-resolution --jobs 2 --filter 'ACTAIncidentReadActionsTests|ACTAOperationalAdapterTests|ACTAServiceAdapterTests|ACTAActionRegistryTests|ACTATransportSecurityTests'`:
+  exit code 0, 15 XCTest и 15 Swift Testing прошли. Тесты используют синтетические
+  и временные данные, включая повреждённый файл инцидентов.
+- `make -C native localization-audit`: первый запуск exit code 2 из-за двух строк,
+  после добавления RU/EN переводов повторный запуск exit code 0.
+- `swift build --package-path native --disable-automatic-resolution --jobs 2`:
+  exit code 0. `git diff --check`: exit code 0.
+- SwiftPM выводит существующее предупреждение о Cmlx bundle.
+
+`alert.vlm_list` и `monitor.get_isapi_events` не реализованы: источники не дают
+надёжно отличить ошибку загрузки от пустого списка, а некоторые существующие
+методы чтения изменяют хранилище. Требуется отдельный проект безопасного источника
+и согласование его изменений. Phase 1 остаётся незавершённой.
+
+Откат этого участка — выборочно вернуть относящиеся к `incident.get` изменения,
+сохранив другие правки. Данные приложения не требуют миграции или удаления.

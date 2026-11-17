@@ -1824,3 +1824,7 @@
 "Model preferences changed on disk; reload them before inspecting." = "Настройки моделей изменились на диске; загрузите их перед просмотром.";
 
 "Feature policy changed on disk; reload it before making changes." = "Политика функций изменилась на диске; загрузите её перед изменением.";
+
+"Get Incident" = "Получить инцидент";
+
+"INVALID_ARGUMENT: Expected only incident_id as a UUID." = "INVALID_ARGUMENT: Ожидается только incident_id в формате UUID.";

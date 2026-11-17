@@ -8,7 +8,7 @@ Version: 1.0.0-baseline
 
 ## 1. Executive Summary
 
-Current implementation checkpoint: **53 advertised actions**, with row-specific limitations below. The original baseline inventory is not proof of exhaustive UI coverage.
+Current implementation checkpoint: **54 advertised actions**, with row-specific limitations below. The original baseline inventory is not proof of exhaustive UI coverage.
 
 This working inventory maps currently identified UI/domain operations to agent action contracts. Exhaustive control-by-control parity has not been established.
 
@@ -77,7 +77,7 @@ This working inventory maps currently identified UI/domain operations to agent a
 | Action ID | UI Route / Screen | Service Owner | Typed Arguments | Action Type | Policy | Unit / Parity Test | State |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `incident.list` | `SafetyIncidentCenterView` | `LocalVideoAnalyticsEngine` | `openOnly: Bool?, cameraID: String?, query: String?, limit: Int?` | `Inspect` | Auto | `testIncidentTransitionAndQueryUsePersistentDomainService` | `PARTIAL — FILTERS/STATUS TESTED; QUERY PENDING` |
-| `incident.get` | `SafetyIncidentDetailView` | `LocalVideoAnalyticsEngine` | `incidentID: String` | `Inspect` | Auto | `testIncidentGet` | `PLANNED` |
+| `incident.get` | `SafetyIncidentDetailView` | `LocalVideoAnalyticsEngine` | `incident_id: UUID` | `Inspect` | Auto | `ACTAIncidentReadActionsTests`, `testIncidentTransitionAndQueryUsePersistentDomainService` | `PARTIAL — MINIMAL METADATA; GUI DETAIL FIELDS NOT EXPOSED` |
 | `incident.transition_status` | `SafetyIncidentDetailView` | `LocalVideoAnalyticsEngine` | `incidentID: String, status: String ("acknowledged", "confirmed", "resolved", "false_positive", "suppressed", "active"), note: String?, suppressDurationSec: Int?` | `Reversible` | Auto (Confirm for `false_positive`) | `testIncidentTransitionAndQueryUsePersistentDomainService` | `PARTIAL — STATUS/NOTE; CUSTOM SUPPRESSION PENDING` |
 | `incident.update_note` | `SafetyIncidentDetailView` | `LocalVideoAnalyticsEngine` | `incidentID: String, note: String` | `Reversible` | Auto | `testIncidentUpdateNote` | `PLANNED` |
 | `incident.delete_evidence` | `SafetyIncidentDetailView` | `LocalVideoAnalyticsEngine` | `incidentID: String` | `Destructive` | **Confirm** | `testEvidenceDeletionRequiresApprovalAndPreservesIncidentRecord` | `IMPLEMENTED — SERVICE/CONFIRMATION TEST` |
@@ -334,3 +334,16 @@ Runtime, feature, operations and AI stores reject stale/corrupt on-disk state be
 Temporary-store tests cover all 22 advanced fall GUI fields, nine crop fields, six storage
 fields, five event fields, memory policy, schedule selection and alert-rule lifecycle.
 This does not establish exhaustive GUI parity, real inference, janitor execution or model readiness.
+
+### Incident inspection checkpoint
+
+The catalogue now advertises 54 actions. `incident.get` reads minimal metadata from
+the same incident manager used by the GUI; it excludes free-form text and evidence paths.
+Invalid IDs, absent incidents, unavailable providers and storage errors are distinguished.
+Synthetic and temporary-storage tests cover discovery, real domain-service integration,
+redaction and corrupt incident storage. GUI detail parity and real Qwen remain unverified.
+
+`alert.vlm_list` and `monitor.get_isapi_events` remain planned: their current cached
+sources do not reliably distinguish a failed load from an empty collection, and some
+existing retrieval paths can write or purge data. They require a separate safe-source
+design before implementation.

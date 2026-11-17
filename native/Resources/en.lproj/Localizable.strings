@@ -781,3 +781,7 @@
 "Model preferences changed on disk; reload them before inspecting." = "Model preferences changed on disk; reload them before inspecting.";
 
 "Feature policy changed on disk; reload it before making changes." = "Feature policy changed on disk; reload it before making changes.";
+
+"Get Incident" = "Get Incident";
+
+"INVALID_ARGUMENT: Expected only incident_id as a UUID." = "INVALID_ARGUMENT: Expected only incident_id as a UUID.";

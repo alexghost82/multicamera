@@ -390,6 +390,7 @@ func registerAllWallActions(registry: ACTAActionRegistry, model: WallModel) asyn
 
     // Core Incident Actions
     await registry.register(WallOperationalAction(specification: IncidentListAction(), model: model))
+    await registry.register(ACTAIncidentGetAction(provider: ACTAEngineIncidentReadProvider(engine: model.localAnalyticsEngine)))
     await registry.register(WallOperationalAction(specification: IncidentTransitionStatusAction(), model: model))
     await registry.register(WallOperationalAction(specification: IncidentDeleteEvidenceAction(), model: model))
 

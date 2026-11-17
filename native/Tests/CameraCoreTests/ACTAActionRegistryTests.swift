@@ -50,6 +50,12 @@ struct ACTAActionRegistryTests {
         }
     }
 
+    @Test func parameterSchemasDecodeBeforeEmptyStringSupport() throws {
+        let legacy = Data(#"{"name":"name","type":"string","description":"Name","isRequired":true}"#.utf8)
+        let schema = try JSONDecoder().decode(ACTAActionParameterSchema.self, from: legacy)
+        #expect(!schema.allowsEmpty)
+    }
+
     @Test func registrationAndOpenAIToolsSchemaExport() async throws {
         let registry = ACTAActionRegistry()
         await registry.register(SettingsGetSectionAction())

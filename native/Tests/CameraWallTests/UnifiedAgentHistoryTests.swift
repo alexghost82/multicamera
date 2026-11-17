@@ -28,15 +28,36 @@ final class UnifiedAgentHistoryTests: XCTestCase {
 
     @MainActor
     func testFrameQuestionEntryUsesOneHistoryAgentEvenWithNoLiveCameras() async throws {
-        let (directory, store, scans) = try fixture()
+        let (directory, _, scans) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let wall = WallModel(configURL: directory.appendingPathComponent("cameras.json"),
+        let configURL = directory.appendingPathComponent("cameras.json")
+        try ConfigurationStore.save(WallConfiguration(), to: configURL)
+        let features = CameraFeatureCoordinator(preferencesURL: directory.appendingPathComponent("features.json"),
+            databaseURL: directory.appendingPathComponent("features.sqlite"))
+        try features.savePreferences(CameraFeaturePreferences(enabledFeatures: []))
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), transport: { _ in
+            XCTFail("Unexpected network request")
+            throw URLError(.notConnectedToInternet)
+        })
+        let wall = WallModel(configURL: configURL, workerMode: false,
             trackingStoreURL: directory.appendingPathComponent("history.sqlite"),
-            featureCoordinator: CameraFeatureCoordinator(preferencesURL: directory.appendingPathComponent("features.json"), databaseURL: directory.appendingPathComponent("features.sqlite")), analyticsDirectoryURL: directory)
+            featureCoordinator: features,
+            analyticsDirectoryURL: directory.appendingPathComponent("analytics"),
+            agentClient: client,
+            cameraMemoryStore: CameraMemoryStore(url: directory.appendingPathComponent("frames")),
+            operationsWatchURL: directory.appendingPathComponent("watches.json"),
+            missionStoreURL: directory.appendingPathComponent("missions.json"),
+            cameraCredentialStore: HistoryTestCredentials(),
+            operationsPreferencesURL: directory.appendingPathComponent("operations.json"),
+            alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")),
+            languageSettings: LanguageSettings(storage: HistoryTestLanguageStorage()),
+            monitorHistoryURL: directory.appendingPathComponent("monitor.json"))
         defer { wall.shutdown() }
         var prefs = wall.vlmPreferences; prefs.actaBackendMode = .dryRun
         try wall.saveVLMPreferences(prefs)
         XCTAssertFalse(wall.running)
+        XCTAssertTrue(wall.config.cameras.isEmpty)
+        XCTAssertFalse(wall.featurePreferences.enabledFeatures.contains(.independentWatcher))
         XCTAssertTrue(wall.askVLM(question: "Что происходило за всё время на всех камерах?", cameraIDs: []))
         XCTAssertEqual(wall.actaChatMessages.last?.role, "user")
         let deadline = Date().addingTimeInterval(10)
@@ -47,6 +68,32 @@ final class UnifiedAgentHistoryTests: XCTestCase {
         let cameras = Set(answer.structuredAnswer?.evidenceReferences.compactMap(\.cameraID) ?? [])
         for scan in scans { XCTAssertTrue(cameras.contains(scan.cameraID.uuidString)) }
         XCTAssertTrue(wall.vlmMessages.isEmpty, "Manual requests must not go to the frame-only chat")
+    }
+
+    private struct HistoryTestCredentials: CameraCredentialStore {
+        private struct UnexpectedAccess: Error {}
+
+        func read(_ id: UUID) throws -> Credentials? {
+            XCTFail("Unexpected credential read")
+            throw UnexpectedAccess()
+        }
+
+        func save(_ credentials: Credentials, for id: UUID) throws {
+            XCTFail("Unexpected credential save")
+            throw UnexpectedAccess()
+        }
+
+        func remove(_ id: UUID) throws {
+            XCTFail("Unexpected credential removal")
+            throw UnexpectedAccess()
+        }
+    }
+
+    @MainActor
+    private final class HistoryTestLanguageStorage: LanguageSettingsStorage {
+        private var values: [String: String] = [:]
+        func string(forKey key: String) -> String? { values[key] }
+        func set(_ value: String, forKey key: String) { values[key] = value }
     }
 
     func testRealQwenAnswersAllCameraHistoryAndFollowUp() async throws {
@@ -114,14 +161,36 @@ final class UnifiedAgentHistoryTests: XCTestCase {
     func testDeadlineAndCancellationDoNotLeaveChatBusyOrAppendLateAnswers() async throws {
         let (directory, _, _) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
+        let previousModels = ModelSelectionPreferences(
+            enabled: Set(LocalModelService.allCases.filter { ModelSelectionRegistry.isEnabled($0) }),
+            paths: Dictionary(uniqueKeysWithValues: LocalModelService.allCases.compactMap { service in
+                ModelSelectionRegistry.path(service).map { (service, $0.path) }
+            }))
+        defer { ModelSelectionRegistry.update(previousModels) }
+        let configURL = directory.appendingPathComponent("cameras.json")
+        try ConfigurationStore.save(WallConfiguration(), to: configURL)
+        let features = CameraFeatureCoordinator(preferencesURL: directory.appendingPathComponent("features.json"),
+            databaseURL: directory.appendingPathComponent("features.sqlite"))
+        try features.savePreferences(CameraFeaturePreferences(enabledFeatures: []))
         let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .localVLLM), transport: { request in
             try await Task.sleep(for: .seconds(2))
             return (Data("{\"choices\":[{\"message\":{\"content\":\"late answer\"}}]}".utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
         })
-        let wall = WallModel(configURL: directory.appendingPathComponent("cameras.json"),
+        let wall = WallModel(configURL: configURL, workerMode: false,
             trackingStoreURL: directory.appendingPathComponent("history.sqlite"),
-            featureCoordinator: CameraFeatureCoordinator(preferencesURL: directory.appendingPathComponent("features.json"), databaseURL: directory.appendingPathComponent("features.sqlite")), analyticsDirectoryURL: directory, agentClient: client)
+            featureCoordinator: features, analyticsDirectoryURL: directory.appendingPathComponent("analytics"),
+            agentClient: client, cameraMemoryStore: CameraMemoryStore(url: directory.appendingPathComponent("frames")),
+            operationsWatchURL: directory.appendingPathComponent("watches.json"),
+            missionStoreURL: directory.appendingPathComponent("missions.json"),
+            cameraCredentialStore: HistoryTestCredentials(),
+            operationsPreferencesURL: directory.appendingPathComponent("operations.json"),
+            alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")),
+            languageSettings: LanguageSettings(storage: HistoryTestLanguageStorage()),
+            monitorHistoryURL: directory.appendingPathComponent("monitor.json"))
         defer { wall.shutdown() }
+        XCTAssertTrue(wall.config.cameras.isEmpty)
+        XCTAssertTrue(wall.featurePreferences.enabledFeatures.isEmpty)
+        XCTAssertFalse(wall.running)
         wall.agentRequestDeadline = .milliseconds(100)
         XCTAssertTrue(wall.askACTAAgent(question: "Что было на всех камерах?"))
         let deadline = Date().addingTimeInterval(2)
@@ -162,7 +231,8 @@ final class UnifiedAgentHistoryTests: XCTestCase {
     }
 
     private func fixture() throws -> (URL, LocalTrackingStore, [CameraScanRecord]) {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("unified-agent-\(UUID())")
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".unified-agent-\(UUID())", isDirectory: true)
         let store = try LocalTrackingStore(url: directory.appendingPathComponent("history.sqlite"))
         let now = Date()
         let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: Calendar.current.startOfDay(for: now))!.addingTimeInterval(36000)

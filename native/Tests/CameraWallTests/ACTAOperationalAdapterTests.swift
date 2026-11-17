@@ -164,8 +164,19 @@ final class ACTAOperationalAdapterTests: XCTestCase {
         XCTAssertEqual(metadata["id"] as? String, incident.id.uuidString)
         let tools = try await ACTAAnalyticsCoordinator.registryTools(registry: registry)
         XCTAssertTrue(tools.contains { $0.name == "acta__incident__get" })
-        let result = try await registry.execute(actionID: "incident.transition_status", parameters: [
+        let pendingNote = try await registry.execute(actionID: "incident.transition_status", parameters: [
             "incident_id": incident.id.uuidString, "status": "resolved", "note": "Verified fixture"])
+        XCTAssertTrue(pendingNote.requiresOperatorConfirmation)
+        XCTAssertFalse(pendingNote.summary.contains("Verified fixture"))
+        XCTAssertNotEqual(engine.incidentManager.incident(id: incident.id)?.status, .resolved)
+        let direct = WallOperationalAction(specification: IncidentTransitionStatusAction(), model: model)
+        do {
+            _ = try await direct.execute(parameters: [
+                "incident_id": incident.id.uuidString, "status": "resolved", "note": "Unreviewed"
+            ], context: ACTAActionContext())
+            XCTFail("Direct unconfirmed transition with a note must fail")
+        } catch {}
+        let result = try await registry.confirmAndExecute(token: XCTUnwrap(pendingNote.confirmationToken), confirmed: true)
         XCTAssertTrue(result.success, result.summary)
         let restored = UnifiedIncidentManager(storageURL: engine.incidentManager.storageURL, auditLog: engine.auditLog)
         XCTAssertEqual(restored.incident(id: incident.id)?.status, .resolved)
@@ -174,6 +185,10 @@ final class ACTAOperationalAdapterTests: XCTestCase {
             "incident_id": incident.id.uuidString, "status": "false_positive"])
         XCTAssertTrue(dismiss.requiresOperatorConfirmation)
         XCTAssertEqual(engine.incidentManager.incident(id: incident.id)?.status, .resolved)
+        let oversized = try await registry.execute(actionID: "incident.transition_status", parameters: [
+            "incident_id": incident.id.uuidString, "status": "resolved", "note": String(repeating: " ", count: 4001)])
+        XCTAssertFalse(oversized.success)
+        XCTAssertFalse(oversized.requiresOperatorConfirmation)
         let unknown = try await registry.execute(actionID: "incident.transition_status", parameters: [
             "incident_id": UUID().uuidString, "status": "resolved"])
         XCTAssertFalse(unknown.success)

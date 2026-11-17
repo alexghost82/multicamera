@@ -487,3 +487,122 @@ non-ACTA fixtures и сценарии реальных потоков/устро
 `settings.update_reid_calibration` не реализовано: GUI вычисляет рекомендацию,
 а ранее указанные сохраняемые настройки отсутствуют. Экспорт отчёта требует
 общего проверяемого UI-сервиса выбора пути; произвольная запись не включена.
+
+Добавлено отдельное `reid.calibrate`: GUI и агент используют общий расчёт по
+локальным размеченным парам; агент получает только агрегированные показатели
+и не сохраняет порог. Подтверждение `incident.update_note` теперь объявляет
+заметку обязательной, допускает пустую строку для очистки и ограничивает длину
+исходной строки до 4000 символов.
+
+Целевой изолированный прогон с ReID, заметками, alert, registry и выбранными
+GUI/store fixtures: **64 XCTest + 24 Swift Testing, 0 ошибок**. Проверка
+локализации и `git diff --check` прошли. Полный suite и оборудование не проверены.
+
+Язык интерфейса подключён к тому же экземпляру `LanguageSettings`, что и GUI.
+Он меняется отдельным вызовом, чтобы не смешивать записи в разные хранилища;
+проверка `UserDefaults` подтверждает чтение в процессе, но не durability после
+аварийного завершения. Переход инцидента с непустой заметкой теперь тоже
+требует подтверждения; заметка в аргументах аудита скрывается.
+
+`camera.reconnect` остаётся недоступным: существующий GUI путь не связывает
+новые кадры с идентификатором попытки. `monitor.export_report_html` пока не
+уточняет тип отчёта (операционный или отчёт миссий) и доверенное назначение.
+Чтение номера не подключено: GUI OCR может сохранять evidence при включённой
+настройке, а отдельное только-чтение не обеспечивало бы паритет этого поведения.
+
+Финальная проверка этой волны (код возврата `0`): **69 XCTest + 24 Swift
+Testing**, без ошибок:
+
+```sh
+swift test --package-path native --disable-automatic-resolution --jobs 2 --filter 'ACTAActionRegistryTests|ACTAIncidentSearchTests|ACTAIncidentNoteActionTests|ACTAAlertMutationActionsTests|ACTALegacyReviewIntegrityTests|ACTAOperationalAdapterTests|ACTAServiceAdapterTests|ACTACameraConfigurationActionTests|ACTAAnalyticsActionAdapterTests|ACTAMissionActionAdapterTests|ACTASettingsActionAdapterTests|ACTAReIDCalibrationActionTests|ACTASystemLanguageActionTests|IdentityTrackingTests.testValidationPairsNormalizeLabelsAndReplaceDifferentWithOperatorGroup|SettingsHubTests.testCentralSettingsApplyPortsAndAIConfigurationWithoutChangingCameras'
+make -C native localization-audit
+git --no-pager diff --check
+```
+
+Последние две проверки также вернули `0`; предупреждение SwiftPM о Cmlx
+сохраняется. Phase 1 не завершена: полный inventory и непокрытые операции,
+безопасный полный suite и проверка UI/устройств остаются открытыми.
+В текущей матрице 30 строк помечены `PLANNED` или `GAP`; это не оценка
+полного количества недостающих GUI-контролов, поскольку inventory не завершён.
+
+`settings.run_health_check` использует общий с GUI in-app monitor, выдаёт
+уникальную проверяемую квитанцию и сообщает о возможной записи истории.
+История внедряется отдельно для тестов; обнаруженная до проверки повреждённая
+или изменённая другим процессом история не перезаписывается. Проверка и запись
+не образуют межпроцессную транзакцию. При ошибке записи действие
+сообщает о возможном частичном изменении. Независимого фонового watcher оно
+не создаёт; живые камеры и аппаратные сценарии не проверены.
+Заметки скрываются и в кратком тексте запроса подтверждения; исходные параметры
+всё ещё сохраняются в записи предложения для показа оператору.
+
+Последующий прогон после подключения health check и изоляции двух дополнительных
+fixtures: **78 XCTest + 24 Swift Testing, 0 ошибок** (код возврата `0`):
+
+```sh
+swift test --package-path native --disable-automatic-resolution --jobs 2 --filter 'ACTAActionRegistryTests|ACTAIncidentSearchTests|ACTAIncidentNoteActionTests|ACTAAlertMutationActionsTests|ACTALegacyReviewIntegrityTests|ACTAOperationalAdapterTests|ACTAServiceAdapterTests|ACTACameraConfigurationActionTests|ACTAAnalyticsActionAdapterTests|ACTAMissionActionAdapterTests|ACTASettingsActionAdapterTests|ACTAReIDCalibrationActionTests|ACTASystemLanguageActionTests|ACTARunHealthCheckActionTests|IdentityTrackingTests.testValidationPairsNormalizeLabelsAndReplaceDifferentWithOperatorGroup|SettingsHubTests.testCentralSettingsApplyPortsAndAIConfigurationWithoutChangingCameras|TrackResearchTests.testEmptyHistoryAndEnablingPersistenceKeepTheCurrentConversation|StreamingTests.testPerCameraAnalysisFlagsPersistIndependently'
+make -C native localization-audit
+git --no-pager diff --check
+```
+
+Последние две проверки также прошли с кодом `0`. Полный suite не запускался.
+В форме подтверждения параметры больше не свёрнуты по умолчанию; полная
+визуальная проверка SwiftUI не проводилась. `settings.update_models` и
+`settings.update_ai_budget` не подключены: первый требует защиты объекта пути
+до отложенной загрузки, второй — строгой проверки типов и безопасного
+сохранения privacy-настроек без потери конкурентных изменений.
+Закрытие главы памяти не подключено: существующий GUI-путь освобождает
+буфер до сохранения, а восстановление при ошибке не доказано.
+Массовая очистка VLM-оповещений не подключена к агенту.
+
+В следующей доработке GUI сначала сохраняет пустой список и только при успехе
+очищает связанное состояние. Ошибки удаления клипов и отзывов показываются как
+частичный результат; удаление файла клипа больше не подавляет ошибки. Записи
+списка, индекса клипов, файлов и SQLite не образуют транзакцию: например, при
+ошибке удаления каталога индекс уже может быть изменён. Восстановление после
+частичного сбоя не доказано, поэтому `alert.clear_all` не опубликован.
+
+Для вызовов реестра от модели сохраняется исходный JSON: типы, обязательные и
+неизвестные параметры проверяются до подтверждения и исполнения с захватом
+действия и схемы внутри actor. Недопустимые вызовы записываются в audit без
+исходных аргументов; отсутствие audit store возвращает ошибку. Совместимость
+legacy tools и отзыв токена при замене действия покрыты изолированными тестами.
+Независимое ревью изменений JSON осталось заблокировано: reviewer не имел
+доступа к diff; полная проверка не заявляется.
+
+Расширенный изолированный прогон после этих изменений прошёл: **84 XCTest +
+28 Swift Testing**, без ошибок. После добавления audit отклонённых вызовов
+отдельно прошли **6 XCTest + 28 Swift Testing**, затем после дополнительных
+тестов недоступного audit и удаления каталога — **8 XCTest**, без ошибок:
+
+```sh
+swift test --package-path native --disable-automatic-resolution --jobs 2 --filter 'ACTAJSONActionRegistryTests|ACTAModelGeneratedRegistryJSONTests|ClearVLMAlertsTests|UnifiedAgentHistoryTests.testFrameQuestionEntryUsesOneHistoryAgentEvenWithNoLiveCameras|ACTAActionRegistryTests|ACTAIncidentSearchTests|ACTAIncidentNoteActionTests|ACTAAlertMutationActionsTests|ACTALegacyReviewIntegrityTests|ACTAOperationalAdapterTests|ACTAServiceAdapterTests|ACTACameraConfigurationActionTests|ACTAAnalyticsActionAdapterTests|ACTAMissionActionAdapterTests|ACTASettingsActionAdapterTests|ACTAReIDCalibrationActionTests|ACTASystemLanguageActionTests|ACTARunHealthCheckActionTests|IdentityTrackingTests.testValidationPairsNormalizeLabelsAndReplaceDifferentWithOperatorGroup|SettingsHubTests.testCentralSettingsApplyPortsAndAIConfigurationWithoutChangingCameras|TrackResearchTests.testEmptyHistoryAndEnablingPersistenceKeepTheCurrentConversation|StreamingTests.testPerCameraAnalysisFlagsPersistIndependently'
+swift test --package-path native --disable-automatic-resolution --jobs 2 --filter 'ACTAModelGeneratedRegistryJSONTests|ACTAJSONActionRegistryTests|ClearVLMAlertsTests|ACTAActionRegistryTests'
+swift test --package-path native --disable-automatic-resolution --jobs 2 --filter 'ACTAModelGeneratedRegistryJSONTests|ClearVLMAlertsTests'
+make -C native localization-audit
+git --no-pager diff --check
+```
+
+Локализация и проверка diff прошли; полная тестовая серия не запускалась
+из-за не полностью изолированных fixtures в общей пользовательской среде.
+
+Независимая проверка операций идентичностей не обнаружила безопасного общего
+контракта для публикации: устаревшие предложения могут ссылаться на удалённый
+трек; последствия отмены слияния зависят от изменившегося графа; удаление
+трека может завершиться частично; очистка номера не гарантирует удаление из
+поискового индекса. Эти действия остаются недоступными агенту.
+
+Дальнейшее частичное усиление narrative flush: результат возвращается только
+после чтения сохранённой записи и проверки JPEG; ошибка не обновляет последнюю
+сводку. Даты сравниваются после нормализации через SQLite Unix epoch. GUI
+сообщает, если сохранение не подтверждено. Это не восстановление:
+автоматический и GUI-путь по-прежнему освобождают буфер до обработки, а при
+сбое или завершении процесса кадры в RAM могут пропасть. Автоматический путь
+теперь возвращает отдельный результат «не подтверждено» и показывает в GUI
+общее предупреждение без имени камеры, данных кадров и текста ошибки. Он не
+отличает ошибку записи от неопределённого результата и не обещает восстановление.
+Нет стабильного ID и reconciliation при
+неопределённом commit, сериализации и ограниченной очереди с backpressure;
+настройка сохранения JPEG захватывается до `await` и может устареть.
+`memory.close_chapter_now` не опубликован. SQLite и JPEG не образуют одну
+транзакцию; успешное немедленное чтение не доказывает crash durability.
+Focused тест использует локальную временную фикстуру, dry-run и отсутствие камер.

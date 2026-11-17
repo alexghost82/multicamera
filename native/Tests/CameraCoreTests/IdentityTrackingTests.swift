@@ -527,12 +527,16 @@ final class IdentityTrackingTests: XCTestCase {
         XCTAssertEqual(samples.count, 1)
         XCTAssertFalse(try XCTUnwrap(samples.first).pair.sameObject)
         XCTAssertEqual(try XCTUnwrap(samples.first).pair.distance, 1, accuracy: 0.0001)
+        XCTAssertEqual(try store.reidCalibration(targetPrecision: 0.995),
+                       ReIDThresholdCalibrator.calibrate(samples.map(\.pair), targetPrecision: 0.995))
 
         _ = try store.mergeTracks([first, second])
         samples = try store.reidValidationSamples()
         XCTAssertEqual(samples.count, 1)
         XCTAssertTrue(try XCTUnwrap(samples.first).pair.sameObject)
         XCTAssertEqual(try XCTUnwrap(samples.first).pair.distance, 1, accuracy: 0.0001)
+        XCTAssertEqual(try store.reidCalibration(targetPrecision: 0.95),
+                       ReIDThresholdCalibrator.calibrate(samples.map(\.pair), targetPrecision: 0.95))
     }
 
     func testValidationLabelsRequireEmbeddingsAndAreRemovedOnDeleteAndRetention() throws {

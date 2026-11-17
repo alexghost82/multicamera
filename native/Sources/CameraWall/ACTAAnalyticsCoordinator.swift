@@ -3,6 +3,23 @@ import CameraCore
 import CoreGraphics
 import Foundation
 
+private final class ACTAValidatedArguments: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [String: String]?
+
+    func set(_ value: [String: String]) {
+        lock.lock()
+        defer { lock.unlock() }
+        stored = value
+    }
+
+    func get() -> [String: String]? {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+}
+
 // MARK: - 1. Pending Queue Items
 
 public struct ACTAPendingDescribeItem: Sendable {
@@ -205,6 +222,15 @@ public struct ACTACameraNarrativeState: Sendable {
 }
 
 // MARK: - 4. Ghost Analytics Coordinator
+
+public enum ACTANarrativeFlushOutcome: Sendable, Equatable {
+    case notAttempted
+    case saved
+    case notVerified
+
+    public static let notVerifiedNotice =
+        "A narrative chapter could not be verified as saved. Buffered frames may have been lost; check local memory storage."
+}
 
 /// A live camera snapshot captured when the operator asks Ghost Chat a question.
 public struct ACTALiveCameraFrame: Sendable, Equatable {
@@ -860,6 +886,7 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
 
     // MARK: - Step C: Real-Time 4-Frame Critical Alert Ring + 16-Frame Alert Mentor + Narrative Sampler ("ACTA Memory")
 
+    @discardableResult
     public func offerCameraFrame(
         cameraID: UUID,
         cameraName: String,
@@ -874,7 +901,7 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         sampleNarrative: Bool = true,
         retainCollageJPEG: Bool = true,
         now: Date = Date()
-    ) async {
+    ) async -> ACTANarrativeFlushOutcome {
         let effectiveLabels = activeLabels.isEmpty ? (hasActiveObjects ? ["person"] : []) : activeLabels
         let (ringReady, narrativeFlush, prevNarrativeSummary): ([ACTAAlertRingFrame]?, (frames: [ACTANarrativeSampledFrame], sightingCount: Int, identityCount: Int)?, String?) = lock.withLock {
             var rReady: [ACTAAlertRingFrame]?
@@ -918,7 +945,7 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         }
 
         if sampleNarrative, let narrativeFlush {
-            await flushNarrativeChapter(
+            let saved = await flushNarrativeChapter(
                 cameraID: cameraID,
                 cameraName: cameraName,
                 sampledFrames: narrativeFlush.frames,
@@ -927,7 +954,9 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
                 previousSummary: prevNarrativeSummary,
                 retainCollageJPEG: retainCollageJPEG
             )
+            return saved == nil ? .notVerified : .saved
         }
+        return .notAttempted
     }
 
     /// Immediately closes and summarizes the in-progress ACTA Memory chapter for a camera (e.g., on camera stop or operator button).
@@ -1085,6 +1114,7 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         previousSummary: String?,
         retainCollageJPEG: Bool = true
     ) async -> ACTANarrativeChapterRecord? {
+        guard let trackingStore else { return nil }
         guard let startedAt = sampledFrames.first?.capturedAt,
               let endedAt = sampledFrames.last?.capturedAt else { return nil }
         let thinned = ACTANarrativeSamplerRules.thinFrames(sampledFrames, maxFrames: ACTACameraNarrativeState.flushFrameThreshold)
@@ -1095,7 +1125,7 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
 
         // If previousSummary is nil in RAM (e.g. after app restart), fetch the latest chapter for this camera from SQLite
         let effectivePreviousSummary: String? = previousSummary ?? {
-            guard let latest = try? trackingStore?.loadACTANarrativeChapterRecords(cameraID: cameraID, limit: 1).first else {
+            guard let latest = try? trackingStore.loadACTANarrativeChapterRecords(cameraID: cameraID, limit: 1).first else {
                 return nil
             }
             return latest.effectiveSummary
@@ -1128,10 +1158,6 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
             }
         )
 
-        lock.withLock {
-            narrativeStatesByCamera[cameraID]?.lastChapterSummary = chapter.summary
-        }
-
         let record = ACTANarrativeChapterRecord(
             chapterID: UUID().uuidString,
             cameraID: cameraID,
@@ -1148,11 +1174,29 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
             identityCount: identityCount,
             collagePath: nil
         )
-        try? trackingStore?.saveACTANarrativeChapterRecord(
-            record,
-            collageJPEG: retainCollageJPEG ? collage.jpegData : nil
-        )
-        return record
+        do {
+            try trackingStore.saveACTANarrativeChapterRecord(
+                record,
+                collageJPEG: retainCollageJPEG ? collage.jpegData : nil
+            )
+            guard let saved = try trackingStore.loadACTANarrativeChapterRecord(chapterID: record.chapterID) else {
+                return nil
+            }
+            var expected = record
+            expected.startedAt = Date(timeIntervalSince1970: record.startedAt.timeIntervalSince1970)
+            expected.endedAt = Date(timeIntervalSince1970: record.endedAt.timeIntervalSince1970)
+            expected.collagePath = retainCollageJPEG ? "narrative_\(record.chapterID.lowercased()).jpg" : nil
+            guard saved == expected else { return nil }
+            if retainCollageJPEG {
+                guard trackingStore.actaNarrativeCollageData(for: saved) == collage.jpegData else { return nil }
+            }
+            lock.withLock {
+                narrativeStatesByCamera[cameraID]?.lastChapterSummary = saved.aiSummary
+            }
+            return saved
+        } catch {
+            return nil
+        }
     }
 
     // MARK: - Step D: Spoken Briefing Service (18s Priority Feed)
@@ -1429,13 +1473,13 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
             "canvas.set_columns", "canvas.reset_layout", "camera.toggle_expand", "settings.get_section", "settings.update_system",
             "settings.update_feature_toggles", "settings.update_permissions", "settings.update_runtime_fall",
             "settings.update_runtime_storage", "settings.update_runtime_crop", "settings.update_events_alerts",
-            "settings.update_memory_policy", "settings.update_schedules", "settings.save_alert_rule", "settings.remove_alert_rule",
+            "settings.update_memory_policy", "settings.update_schedules", "settings.save_alert_rule", "settings.remove_alert_rule", "settings.run_health_check",
             "analytics.get_settings", "analytics.set_global_toggle", "analytics.set_threshold",
             "analytics.set_sampling_fps", "analytics.set_overlay", "analytics.set_camera_override",
             "analytics.set_restricted_zone", "analytics.remove_restricted_zone", "analytics.update_restricted_zone",
             "analytics.set_sensitivity_profile", "analytics.remove_camera_override", "incident.list", "incident.get", "incident.transition_status", "incident.update_note",
             "watch.list", "watch.create", "watch.cancel", "memory.delete_frame", "incident.delete_evidence",
-            "alert.vlm_list", "alert.vlm_acknowledge", "alert.vlm_review", "monitor.get_isapi_events", "memory.toggle_pin", "memory.set_chapter_text", "mission.list", "mission.create", "mission.edit",
+            "alert.vlm_list", "alert.vlm_acknowledge", "alert.vlm_review", "monitor.get_isapi_events", "reid.calibrate", "memory.toggle_pin", "memory.set_chapter_text", "mission.list", "mission.create", "mission.edit",
             "mission.delete", "mission.history", "mission.clear_consult", "mission.run_now", "mission.ask_consult"]
         return try await registry.allActions().filter { enabled.contains($0.id) }.map { action in
             var properties: [String: Any] = [:]
@@ -1451,6 +1495,102 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
                 description: action.description + " Never claim execution before receiving a successful verified result; approval_required is not success.",
                 parametersSchemaJSON: String(decoding: data, as: UTF8.self))
         }
+    }
+
+    private static let legacyAgentToolNames: Set<String> = [
+        "search_identities_by_attributes", "get_identity_dossier", "get_identity_route",
+        "who_was_present", "list_visits", "find_companions", "list_narrative_chapters",
+        "get_channel_narrative", "get_narrative_chapter", "list_memory_frames", "view_memory_frame",
+        "get_timeline", "get_camera_alert_history", "search_tracked_objects", "get_operational_events",
+        "live_look", "run_readonly_sql"
+    ]
+
+    func executeModelGeneratedAgentTool(
+        _ call: ACTAAgentFunctionCall, threadID: String,
+        liveFrames: [ACTALiveCameraFrame] = [], cameraNames: [UUID: String] = [:],
+        now: Date = Date(), registry: ACTAActionRegistry = .shared
+    ) async -> (outputJSON: String, resultRows: Int, savedClipID: String?, attachedImages: [Data]) {
+        if Self.legacyAgentToolNames.contains(call.name) {
+            return await executeAgentTool(toolName: call.name, arguments: call.arguments, threadID: threadID,
+                                          liveFrames: liveFrames, cameraNames: cameraNames, now: now)
+        }
+
+        let start = Date()
+        let registryID = call.name.hasPrefix("acta__")
+            ? String(call.name.dropFirst(6)).replacingOccurrences(of: "__", with: ".") : call.name
+        let validated = ACTAValidatedArguments()
+        let store = trackingStore
+        var output: [String: Any] = ["tool": call.name]
+        var rows = 0
+        var errorMessage: String?
+        do {
+            let result = try await registry.executeJSON(
+                actionID: registryID, argumentsJSON: call.rawArgumentsJSON,
+                context: ACTAActionContext(threadID: threadID, initiator: "text_chat", now: now, trackingStore: store),
+                beforeExecution: { arguments in
+                    guard let store else { throw ConfigurationError.invalid("Action audit store is unavailable.") }
+                    let audit = actaActionAuditArguments(registryID, arguments)
+                    try store.recordACTAToolCallAudit(ACTAToolCallAuditRecord(
+                        threadID: threadID, toolName: registryID,
+                        argsJSON: String(decoding: try JSONEncoder().encode(audit), as: UTF8.self),
+                        resultRows: 0, durationMs: 0, ok: false, error: "PENDING_EXECUTION", createdAt: now))
+                    validated.set(arguments)
+                }
+            )
+            if validated.get() == nil, result.error?.hasPrefix("UNSUPPORTED: Unsupported action:") == true {
+                output["status"] = "unknown_tool"
+                output["available_tools"] = Self.agentTools.map(\.name)
+            } else {
+                output["action_result"] = result.summary
+                output["action_success"] = result.success
+                output["action_verified"] = result.verified
+                if result.requiresOperatorConfirmation {
+                    output["requires_operator_confirmation"] = true
+                    output["confirmation_token"] = result.confirmationToken
+                    if let token = result.confirmationToken, let arguments = validated.get(), let store {
+                        try store.saveACTAChatAction(ACTAChatActionRecord(
+                            actionID: token, threadID: threadID, actionType: registryID, title: result.summary,
+                            parameters: arguments, status: "proposed", createdAt: now))
+                    }
+                }
+                if let error = result.error { output["error"] = error; errorMessage = error }
+                if let data = result.outputJSON.data(using: .utf8),
+                   let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    for (key, value) in parsed { output[key] = value }
+                }
+                rows = result.success ? 1 : 0
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+            output["error"] = error.localizedDescription
+        }
+
+        if validated.get() == nil {
+            if let store {
+                do {
+                    try store.recordACTAToolCallAudit(ACTAToolCallAuditRecord(
+                        threadID: threadID, toolName: registryID, argsJSON: "{}",
+                        resultRows: 0, durationMs: max(1, Int(Date().timeIntervalSince(start) * 1000)),
+                        ok: false, error: "REJECTED_BEFORE_EXECUTION", createdAt: now))
+                } catch {
+                    reportStorageFailure(error)
+                    output["error"] = "AUDIT_FAILED: Could not record rejected action."
+                }
+            } else {
+                output["error"] = "AUDIT_FAILED: Action audit store is unavailable."
+            }
+        } else if let arguments = validated.get(), let store {
+            let audit = actaActionAuditArguments(registryID, arguments)
+            let argsJSON = (try? String(data: JSONEncoder().encode(audit), encoding: .utf8)) ?? "{}"
+            do {
+                try store.recordACTAToolCallAudit(ACTAToolCallAuditRecord(
+                    threadID: threadID, toolName: call.name, argsJSON: argsJSON,
+                    resultRows: rows, durationMs: max(1, Int(Date().timeIntervalSince(start) * 1000)),
+                    ok: errorMessage == nil, error: errorMessage, createdAt: now))
+            } catch { reportStorageFailure(error) }
+        }
+        let data = (try? JSONSerialization.data(withJSONObject: output)) ?? Data("{}".utf8)
+        return (String(decoding: data, as: UTF8.self), rows, nil, [])
     }
 
     /// Executes a supported agent tool and records an audit entry in `ghost_chat_tool_calls`.
@@ -2473,9 +2613,8 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
             var toolImages: [(String, [Data])] = []
             for call in result.functionCalls {
                 onProgress?(call.name)
-                let output = await executeAgentTool(
-                    toolName: call.name,
-                    arguments: call.arguments,
+                let output = await executeModelGeneratedAgentTool(
+                    call,
                     threadID: threadID,
                     liveFrames: allLiveFrames,
                     cameraNames: cameraNames,

@@ -13,7 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let index = args.firstIndex(of: "--config"), args.indices.contains(index + 1) {
             configURL = URL(fileURLWithPath: args[index + 1])
         } else { configURL = ConfigurationStore.defaultURL }
-        let model = WallModel(configURL: configURL)
+        let model = WallModel(configURL: configURL, languageSettings: languageSettings)
         self.model = model
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1536, height: 1024),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],

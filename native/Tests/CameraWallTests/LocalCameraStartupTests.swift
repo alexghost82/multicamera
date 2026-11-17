@@ -5,7 +5,7 @@ import CameraCore
 
 struct LocalCameraStartupTests {
     @Test @MainActor func packagedAppPrefersBundledGo2RTC() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = fixtureDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let bundleURL = directory.appendingPathComponent("CameraWall.app", isDirectory: true)
         let helper = bundleURL.appendingPathComponent("Contents/Helpers/go2rtc")
@@ -18,8 +18,14 @@ struct LocalCameraStartupTests {
     }
 
     @Test @MainActor func localOnlyWallDoesNotRequireRelay() async throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = fixtureDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
+        let previousModels = ModelSelectionPreferences(
+            enabled: Set(LocalModelService.allCases.filter { ModelSelectionRegistry.isEnabled($0) }),
+            paths: Dictionary(uniqueKeysWithValues: LocalModelService.allCases.compactMap { service in
+                ModelSelectionRegistry.path(service).map { (service, $0.path) }
+            }))
+        defer { ModelSelectionRegistry.update(previousModels) }
         let url = directory.appendingPathComponent("cameras.json")
         var config = WallConfiguration()
         config.go2rtcPath = "/nonexistent/go2rtc"
@@ -29,9 +35,24 @@ struct LocalCameraStartupTests {
         let root = url.deletingLastPathComponent()
         let features = CameraFeatureCoordinator(preferencesURL: root.appendingPathComponent("features.json"),
             databaseURL: root.appendingPathComponent("features.sqlite3"))
-        let model = WallModel(configURL: url, trackingStoreURL: root.appendingPathComponent("tracking.sqlite3"),
-            featureCoordinator: features, analyticsDirectoryURL: root)
+        try features.savePreferences(CameraFeaturePreferences(enabledFeatures: [.operationalAlerts]))
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), transport: { _ in
+            Issue.record("Unexpected network request")
+            throw URLError(.notConnectedToInternet)
+        })
+        let model = WallModel(configURL: url, workerMode: false,
+            trackingStoreURL: root.appendingPathComponent("tracking.sqlite3"),
+            featureCoordinator: features, analyticsDirectoryURL: root.appendingPathComponent("analytics"),
+            agentClient: client, cameraMemoryStore: CameraMemoryStore(url: root.appendingPathComponent("frames")),
+            operationsWatchURL: root.appendingPathComponent("watches.json"),
+            missionStoreURL: root.appendingPathComponent("missions.json"),
+            cameraCredentialStore: StartupTestCredentials(),
+            operationsPreferencesURL: root.appendingPathComponent("operations.json"),
+            alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")),
+            languageSettings: LanguageSettings(storage: StartupTestLanguageStorage()),
+            monitorHistoryURL: root.appendingPathComponent("monitor.json"))
         defer { model.shutdown() }
+        #expect(!model.featurePreferences.enabledFeatures.contains(.independentWatcher))
         model.start()
         for _ in 0..<100 {
             if !model.connecting { break }
@@ -41,5 +62,25 @@ struct LocalCameraStartupTests {
         #expect(model.running)
         #expect(!model.connecting)
         #expect(model.error == nil)
+        #expect(model.tiles[config.cameras[0].id]?.session == nil)
     }
+
+    private func fixtureDirectory() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent(".startup-test-\(UUID().uuidString)", isDirectory: true)
+    }
+}
+
+private struct StartupTestCredentials: CameraCredentialStore {
+    private struct UnexpectedAccess: Error {}
+    func read(_ id: UUID) throws -> Credentials? { Issue.record("Unexpected credential read"); throw UnexpectedAccess() }
+    func save(_ credentials: Credentials, for id: UUID) throws { Issue.record("Unexpected credential save"); throw UnexpectedAccess() }
+    func remove(_ id: UUID) throws { Issue.record("Unexpected credential removal"); throw UnexpectedAccess() }
+}
+
+@MainActor
+private final class StartupTestLanguageStorage: LanguageSettingsStorage {
+    private var values: [String: String] = [:]
+    func string(forKey key: String) -> String? { values[key] }
+    func set(_ value: String, forKey key: String) { values[key] = value }
 }

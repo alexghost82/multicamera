@@ -146,6 +146,10 @@ struct WallOperationalAction: ACTAActionProtocol {
                 return success("Reviewed incident note saved and verified.")
 
             case "incident.transition_status":
+                try specification.validate(parameters: parameters)
+                guard !specification.requiresConfirmation(parameters: parameters) || context.isConfirmed else {
+                    throw ConfigurationError.invalid("Operator confirmation is required.")
+                }
                 let incidentID = try uuid("incident_id")
                 guard engine.incidentManager.incident(id: incidentID) != nil,
                       let status = SafetyIncidentStatus(rawValue: (parameters["status"] ?? "").uppercased()) else {

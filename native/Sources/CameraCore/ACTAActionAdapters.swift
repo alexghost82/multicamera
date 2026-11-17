@@ -359,6 +359,13 @@ public struct IncidentTransitionStatusAction: ACTAActionProtocol {
 
     public func requiresConfirmation(parameters: [String: String]) -> Bool {
         parameters["status"] == "false_positive"
+            || !(parameters["note"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    public func validate(parameters: [String: String]) throws {
+        guard parameters["note"].map({ $0.count <= 4000 }) ?? true else {
+            throw ConfigurationError.invalid("INVALID_ARGUMENT: Incident note must be at most 4000 characters.")
+        }
     }
 
     public func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
@@ -373,7 +380,7 @@ public struct IncidentUpdateNoteAction: ACTAActionProtocol {
     public let classification = ACTAActionClassification.reversible
     public let parameters = [
         ACTAActionParameterSchema(name: "incident_id", type: "string", description: "Incident UUID", isRequired: true),
-        ACTAActionParameterSchema(name: "note", type: "string", description: "Required replacement note, at most 4000 characters after trimming; empty clears it")
+        ACTAActionParameterSchema(name: "note", type: "string", description: "Replacement note, at most 4000 characters; empty clears it", isRequired: true, allowsEmpty: true)
     ]
 
     public init() {}
@@ -382,7 +389,7 @@ public struct IncidentUpdateNoteAction: ACTAActionProtocol {
         guard Set(parameters.keys) == Set(["incident_id", "note"]),
               let value = parameters["incident_id"], UUID(uuidString: value) != nil,
               let note = parameters["note"],
-              note.trimmingCharacters(in: .whitespacesAndNewlines).count <= 4000 else {
+              note.count <= 4000 else {
             throw ConfigurationError.invalid("INVALID_ARGUMENT: Provide an incident UUID and a note of at most 4000 characters.")
         }
     }

@@ -24,19 +24,36 @@ public struct ACTAActionParameterSchema: Codable, Sendable, Equatable {
     public let description: String
     public let isRequired: Bool
     public let allowedValues: [String]?
+    public let allowsEmpty: Bool
 
     public init(
         name: String,
         type: String,
         description: String,
         isRequired: Bool = false,
-        allowedValues: [String]? = nil
+        allowedValues: [String]? = nil,
+        allowsEmpty: Bool = false
     ) {
         self.name = name
         self.type = type
         self.description = description
         self.isRequired = isRequired
         self.allowedValues = allowedValues
+        self.allowsEmpty = allowsEmpty
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, type, description, isRequired, allowedValues, allowsEmpty
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        type = try container.decode(String.self, forKey: .type)
+        description = try container.decode(String.self, forKey: .description)
+        isRequired = try container.decode(Bool.self, forKey: .isRequired)
+        allowedValues = try container.decodeIfPresent([String].self, forKey: .allowedValues)
+        allowsEmpty = try container.decodeIfPresent(Bool.self, forKey: .allowsEmpty) ?? false
     }
 }
 

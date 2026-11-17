@@ -82,10 +82,22 @@ final class SettingsHubTests: XCTestCase {
     func testCentralSettingsApplyPortsAndAIConfigurationWithoutChangingCameras() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory); ModelSelectionRegistry.update(ModelSelectionPreferences()) }
-        let model = WallModel(configURL: directory.appendingPathComponent("cameras.json"),
+        let configURL = directory.appendingPathComponent("cameras.json")
+        try ConfigurationStore.save(WallConfiguration(), to: configURL)
+        let features = CameraFeatureCoordinator(preferencesURL: directory.appendingPathComponent("features.json"),
+            databaseURL: directory.appendingPathComponent("features.sqlite"))
+        try features.savePreferences(CameraFeaturePreferences(enabledFeatures: []))
+        let model = WallModel(configURL: configURL,
             trackingStoreURL: directory.appendingPathComponent("tracks.sqlite"),
-            featureCoordinator: CameraFeatureCoordinator(preferencesURL: directory.appendingPathComponent("features.json"), databaseURL: directory.appendingPathComponent("features.sqlite")),
-            analyticsDirectoryURL: directory.appendingPathComponent("analytics"))
+            featureCoordinator: features,
+            analyticsDirectoryURL: directory.appendingPathComponent("analytics"),
+            cameraMemoryStore: CameraMemoryStore(url: directory.appendingPathComponent("frames")),
+            operationsWatchURL: directory.appendingPathComponent("watches.json"),
+            missionStoreURL: directory.appendingPathComponent("missions.json"),
+            cameraCredentialStore: SettingsTestCredentials(),
+            operationsPreferencesURL: directory.appendingPathComponent("operations.json"),
+            alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")))
+        defer { model.shutdown() }
         var system = model.config
         system.apiPort = 22001; system.rtspPort = 22002; system.columns = 7
         let cameras = system.cameras
@@ -104,7 +116,6 @@ final class SettingsHubTests: XCTestCase {
         var runtime = model.runtimePreferences; runtime.storage.maxCropsPerIdentity = 17
         try model.saveRuntimePreferences(runtime)
         XCTAssertEqual(model.actaAnalytics.janitorPolicy.maxCropsPerIdentity, 17)
-        model.stop()
     }
 
     private func object<T: Encodable>(_ value: T) throws -> [String: NSObject] {
@@ -113,6 +124,12 @@ final class SettingsHubTests: XCTestCase {
     private func changed(_ before: [String: NSObject], _ after: [String: NSObject]) -> Set<String> {
         Set(before.keys.filter { before[$0] != after[$0] })
     }
+}
+
+private struct SettingsTestCredentials: CameraCredentialStore {
+    func read(_ id: UUID) throws -> Credentials? { XCTFail("Unexpected credential read"); return nil }
+    func save(_ credentials: Credentials, for id: UUID) throws { XCTFail("Unexpected credential save") }
+    func remove(_ id: UUID) throws { XCTFail("Unexpected credential removal") }
 }
 
 private actor SettingsModelLoadRecorder {

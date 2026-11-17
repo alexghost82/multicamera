@@ -13,9 +13,17 @@ final class StreamingTests: XCTestCase {
     @MainActor
     func testPerCameraAnalysisFlagsPersistIndependently() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let first = Camera(name: "Front", substream: "rtsp://front.local/live")
-        let second = Camera(name: "Back", substream: "rtsp://back.local/live")
+        let previousModels = ModelSelectionPreferences(
+            enabled: Set(LocalModelService.allCases.filter { ModelSelectionRegistry.isEnabled($0) }),
+            paths: Dictionary(uniqueKeysWithValues: LocalModelService.allCases.compactMap { service in
+                ModelSelectionRegistry.path(service).map { (service, $0.path) }
+            }))
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            ModelSelectionRegistry.update(previousModels)
+        }
+        let first = Camera(name: "Front", substream: "rtsp://front.local/live", enabled: false)
+        let second = Camera(name: "Back", substream: "rtsp://back.local/live", enabled: false)
         var config = WallConfiguration()
         config.cameras = [first, second]
         let file = directory.appendingPathComponent("cameras.json")
@@ -23,8 +31,16 @@ final class StreamingTests: XCTestCase {
 
         let features = CameraFeatureCoordinator(preferencesURL: directory.appendingPathComponent("features.json"),
             databaseURL: directory.appendingPathComponent("features.sqlite3"))
-        let model = WallModel(configURL: file, trackingStoreURL: directory.appendingPathComponent("tracking.sqlite3"),
-            featureCoordinator: features, analyticsDirectoryURL: directory)
+        try features.savePreferences(CameraFeaturePreferences(enabledFeatures: []))
+        let model = WallModel(configURL: file, workerMode: false,
+            trackingStoreURL: directory.appendingPathComponent("tracking.sqlite3"),
+            featureCoordinator: features, analyticsDirectoryURL: directory.appendingPathComponent("analytics"),
+            cameraMemoryStore: CameraMemoryStore(url: directory.appendingPathComponent("frames")),
+            operationsWatchURL: directory.appendingPathComponent("watches.json"),
+            missionStoreURL: directory.appendingPathComponent("missions.json"),
+            cameraCredentialStore: StreamingTestCredentials(),
+            operationsPreferencesURL: directory.appendingPathComponent("operations.json"),
+            alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")))
         defer { model.shutdown() }
         model.setYOLOEnabled(for: first.id, enabled: true)
         model.setAIChatEnabled(for: second.id, enabled: false)
@@ -37,6 +53,13 @@ final class StreamingTests: XCTestCase {
         XCTAssertFalse(model.running)
         XCTAssertNil(model.tiles[first.id]?.session)
         XCTAssertNil(model.tiles[second.id]?.session)
+    }
+
+    private struct StreamingTestCredentials: CameraCredentialStore {
+        private struct UnexpectedAccess: Error {}
+        func read(_ id: UUID) throws -> Credentials? { XCTFail("Unexpected credential read"); throw UnexpectedAccess() }
+        func save(_ credentials: Credentials, for id: UUID) throws { XCTFail("Unexpected credential save"); throw UnexpectedAccess() }
+        func remove(_ id: UUID) throws { XCTFail("Unexpected credential removal"); throw UnexpectedAccess() }
     }
 
     @MainActor

@@ -235,6 +235,7 @@ final class ACTAAnalyticsTests: XCTestCase {
                 activeTrackIDs: ["T-\(i)"]
             )
         }
+
         let thinned = ACTANarrativeSamplerRules.thinFrames(manyFrames, maxFrames: 28)
         XCTAssertEqual(thinned.count, 28)
         XCTAssertEqual(thinned.first?.capturedAt, manyFrames.first?.capturedAt)
@@ -293,6 +294,90 @@ final class ACTAAnalyticsTests: XCTestCase {
         let restored = try store.loadACTANarrativeChapterRecords(cameraID: camID, limit: 5)
         XCTAssertEqual(restored[0].effectiveSummary, originalAISummary)
         XCTAssertTrue(restored[0].operatorMarked)
+    }
+
+    func testNarrativeCloseReportsOnlyVerifiedPersistence() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".narrative-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try LocalTrackingStore(url: root.appendingPathComponent("tracking.sqlite"))
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), cacheStore: store)
+        let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store)
+        let image = makeTestImage()
+        let cameraID = UUID()
+        let timestamp = Date(timeIntervalSinceReferenceDate: 12_345.123456789)
+        XCTAssertNotEqual(timestamp, Date(timeIntervalSince1970: timestamp.timeIntervalSince1970))
+
+        let cropPath = root.appendingPathComponent("identity-crops")
+        try Data("not a directory".utf8).write(to: cropPath)
+        await coordinator.offerCameraFrame(cameraID: cameraID, cameraName: "Test", cgImage: image,
+            hasActiveObjects: true, activeTrackIDs: ["one"], evaluateAlerts: false, now: timestamp)
+        let failed = await coordinator.forceCloseNarrativeChapter(cameraID: cameraID, cameraName: "Test")
+        XCTAssertNil(failed)
+        XCTAssertTrue(try store.loadACTANarrativeChapterRecords(cameraID: cameraID).isEmpty)
+
+        try FileManager.default.removeItem(at: cropPath)
+        await coordinator.offerCameraFrame(cameraID: cameraID, cameraName: "Test", cgImage: image,
+            hasActiveObjects: true, activeTrackIDs: ["two"], evaluateAlerts: false, now: timestamp.addingTimeInterval(10))
+        await coordinator.offerCameraFrame(cameraID: cameraID, cameraName: "Test", cgImage: image,
+            hasActiveObjects: true, activeTrackIDs: ["two-more"], evaluateAlerts: false, now: timestamp.addingTimeInterval(11))
+        let result = await coordinator.forceCloseNarrativeChapter(cameraID: cameraID, cameraName: "Test")
+        let saved = try XCTUnwrap(result)
+        XCTAssertEqual(saved.startedAt, Date(timeIntervalSince1970: timestamp.addingTimeInterval(10).timeIntervalSince1970))
+        XCTAssertEqual(saved.endedAt, Date(timeIntervalSince1970: timestamp.addingTimeInterval(11).timeIntervalSince1970))
+        XCTAssertEqual(try store.loadACTANarrativeChapterRecord(chapterID: saved.chapterID), saved)
+        XCTAssertNotNil(store.actaNarrativeCollageData(for: saved))
+
+        await coordinator.offerCameraFrame(cameraID: cameraID, cameraName: "Test", cgImage: image,
+            hasActiveObjects: true, activeTrackIDs: ["four"], evaluateAlerts: false, now: timestamp.addingTimeInterval(20))
+        let withoutCollage = await coordinator.forceCloseNarrativeChapter(
+            cameraID: cameraID, cameraName: "Test", retainCollageJPEG: false)
+        let savedWithoutCollage = try XCTUnwrap(withoutCollage)
+        XCTAssertNil(savedWithoutCollage.collagePath)
+        XCTAssertEqual(try store.loadACTANarrativeChapterRecord(chapterID: savedWithoutCollage.chapterID), savedWithoutCollage)
+
+        let noStore = ACTAAnalyticsCoordinator(aiClient: ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun)))
+        await noStore.offerCameraFrame(cameraID: cameraID, cameraName: "Test", cgImage: image,
+            hasActiveObjects: true, activeTrackIDs: ["three"], evaluateAlerts: false, now: timestamp)
+        let missing = await noStore.forceCloseNarrativeChapter(cameraID: cameraID, cameraName: "Test")
+        XCTAssertNil(missing)
+    }
+
+    func testAutomaticNarrativeFlushReportsUnverifiedAndVerifiedOutcomes() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("narrative-automatic-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try LocalTrackingStore(url: root.appendingPathComponent("tracking.sqlite"))
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), cacheStore: store)
+        let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store)
+        let image = makeTestImage()
+        let cameraID = UUID()
+        let timestamp = Date(timeIntervalSince1970: 1_700_000_000)
+        let cropPath = root.appendingPathComponent("identity-crops")
+        try Data("not a directory".utf8).write(to: cropPath)
+
+        for index in 0..<ACTACameraNarrativeState.flushFrameThreshold {
+            let outcome = await coordinator.offerCameraFrame(
+                cameraID: cameraID, cameraName: "sensitive-camera-name", cgImage: image,
+                hasActiveObjects: true, activeTrackIDs: ["failed-\(index)"],
+                evaluateAlerts: false, now: timestamp.addingTimeInterval(Double(index)))
+            XCTAssertEqual(outcome, index == ACTACameraNarrativeState.flushFrameThreshold - 1 ? .notVerified : .notAttempted)
+        }
+        XCTAssertTrue(try store.loadACTANarrativeChapterRecords(cameraID: cameraID).isEmpty)
+        XCTAssertFalse(ACTANarrativeFlushOutcome.notVerifiedNotice.contains("sensitive-camera-name"))
+        XCTAssertFalse(ACTANarrativeFlushOutcome.notVerifiedNotice.contains(root.path))
+
+        try FileManager.default.removeItem(at: cropPath)
+        for index in 0..<ACTACameraNarrativeState.flushFrameThreshold {
+            let outcome = await coordinator.offerCameraFrame(
+                cameraID: cameraID, cameraName: "sensitive-camera-name", cgImage: image,
+                hasActiveObjects: true, activeTrackIDs: ["saved-\(index)"],
+                evaluateAlerts: false, now: timestamp.addingTimeInterval(Double(index + 30)))
+            XCTAssertEqual(outcome, index == ACTACameraNarrativeState.flushFrameThreshold - 1 ? .saved : .notAttempted)
+        }
+        XCTAssertEqual(try store.loadACTANarrativeChapterRecords(cameraID: cameraID).count, 1)
     }
 
     func testSemanticKnowledgeLayerDossiersVisitsRoutesAndRebuild() throws {

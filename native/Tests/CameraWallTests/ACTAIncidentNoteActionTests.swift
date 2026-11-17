@@ -57,11 +57,14 @@ final class ACTAIncidentNoteActionTests: XCTestCase {
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = await registry(model)
         let tools = try await ACTAAnalyticsCoordinator.registryTools(registry: registry)
-        XCTAssertTrue(tools.contains { $0.name == "acta__incident__update_note" })
+        let tool = try XCTUnwrap(tools.first { $0.name == "acta__incident__update_note" })
+        let schema = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(tool.parametersSchemaJSON.utf8)) as? [String: Any])
+        XCTAssertEqual(Set(try XCTUnwrap(schema["required"] as? [String])), ["incident_id", "note"])
         let args = ["incident_id": original.id.uuidString, "note": "  private synthetic note  "]
         let pending = try await registry.execute(actionID: "incident.update_note", parameters: args)
         XCTAssertTrue(pending.requiresOperatorConfirmation)
         XCTAssertFalse(pending.success)
+        XCTAssertFalse(pending.summary.contains("private synthetic note"))
         XCTAssertEqual(model.localAnalyticsEngine.incidentManager.incident(id: original.id), original)
         let result = try await registry.confirmAndExecute(token: XCTUnwrap(pending.confirmationToken), confirmed: true)
         XCTAssertTrue(result.success, result.summary)
@@ -97,6 +100,7 @@ final class ACTAIncidentNoteActionTests: XCTestCase {
             ["incident_id": "bad", "note": "note"],
             ["incident_id": original.id.uuidString],
             ["incident_id": original.id.uuidString, "note": String(repeating: "x", count: 4001)],
+            ["incident_id": original.id.uuidString, "note": String(repeating: " ", count: 4001)],
             ["incident_id": original.id.uuidString, "note": "note", "extra": "value"]
         ] {
             let result = try await registry.execute(actionID: "incident.update_note", parameters: args)

@@ -190,23 +190,29 @@ final class ACTAIncidentSearchTests: XCTestCase {
         let original = await registry.action(for: "incident.list")
         let originalAlert = await registry.action(for: "alert.vlm_review")
         let originalNote = await registry.action(for: "incident.update_note")
+        let originalTransition = await registry.action(for: "incident.transition_status")
         let otherID = "test.incident.audit"
         let originalOther = await registry.action(for: otherID)
         await registry.register(IncidentAuditProbe(id: "incident.list"))
         await registry.register(IncidentAuditProbe(id: "alert.vlm_review"))
         await registry.register(IncidentAuditProbe(id: "incident.update_note"))
+        await registry.register(IncidentAuditProbe(id: "incident.transition_status"))
         await registry.register(IncidentAuditProbe(id: otherID))
         let thread = UUID().uuidString
         let query = "synthetic-private-query"
+        XCTAssertEqual(actaReviewArguments("incident.transition_status", ["note": "https://example.invalid/path"])["note"],
+                       "https://example.invalid/path")
         _ = await coordinator.executeAgentTool(toolName: "acta__incident__list", arguments: ["query": query], threadID: thread)
         _ = await coordinator.executeAgentTool(toolName: "incident.list", arguments: ["query": query], threadID: thread)
         _ = await coordinator.executeAgentTool(toolName: "acta__incident.list", arguments: ["query": query], threadID: thread)
         _ = await coordinator.executeAgentTool(toolName: "acta__alert__vlm_review", arguments: ["note": query], threadID: thread)
         _ = await coordinator.executeAgentTool(toolName: "acta__incident__update_note", arguments: ["note": query], threadID: thread)
+        _ = await coordinator.executeAgentTool(toolName: "acta__incident__transition_status", arguments: ["note": query], threadID: thread)
         _ = await coordinator.executeAgentTool(toolName: otherID, arguments: ["query": query], threadID: thread)
         if let original { await registry.register(original) } else { await registry.unregister(actionID: "incident.list") }
         if let originalAlert { await registry.register(originalAlert) } else { await registry.unregister(actionID: "alert.vlm_review") }
         if let originalNote { await registry.register(originalNote) } else { await registry.unregister(actionID: "incident.update_note") }
+        if let originalTransition { await registry.register(originalTransition) } else { await registry.unregister(actionID: "incident.transition_status") }
         if let originalOther { await registry.register(originalOther) } else { await registry.unregister(actionID: otherID) }
 
         let rows = try store.executeReadOnlyACTASQL("SELECT tool_name, args_json FROM ghost_chat_tool_calls")
@@ -226,8 +232,9 @@ final class ACTAIncidentSearchTests: XCTestCase {
             let args = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: String])
             XCTAssertEqual(args["note"], "[redacted]")
         }
-        let noteRows = rows.filter { ["incident.update_note", "acta__incident__update_note"].contains($0["tool_name"] ?? "") }
-        XCTAssertEqual(noteRows.count, 2)
+        let noteRows = rows.filter { ["incident.update_note", "acta__incident__update_note",
+                                      "incident.transition_status", "acta__incident__transition_status"].contains($0["tool_name"] ?? "") }
+        XCTAssertEqual(noteRows.count, 4)
         for row in noteRows {
             let json = try XCTUnwrap(row["args_json"])
             XCTAssertFalse(json.contains(query))

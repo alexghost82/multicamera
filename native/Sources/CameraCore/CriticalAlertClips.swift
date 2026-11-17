@@ -235,7 +235,12 @@ public final class CriticalAlertClipStore: @unchecked Sendable {
         defer { lock.unlock() }
         let existing = try readIndex()
         try writeIndex(existing.filter { $0.id != alertID })
-        try? FileManager.default.removeItem(at: directoryURL.appendingPathComponent(alertID.uuidString.lowercased(), isDirectory: true))
+        let clipURL = directoryURL.appendingPathComponent(alertID.uuidString.lowercased(), isDirectory: true)
+        do {
+            try FileManager.default.removeItem(at: clipURL)
+        } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError {
+            // Deleting an already-absent clip is idempotent.
+        }
     }
 
     @discardableResult

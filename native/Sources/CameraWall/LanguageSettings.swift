@@ -40,23 +40,42 @@ extension Date {
 }
 
 @MainActor
+protocol LanguageSettingsStorage {
+    func string(forKey key: String) -> String?
+    func set(_ value: String, forKey key: String)
+}
+
+@MainActor
+private struct UserDefaultsLanguageStorage: LanguageSettingsStorage {
+    let defaults: UserDefaults
+
+    func string(forKey key: String) -> String? { defaults.string(forKey: key) }
+    func set(_ value: String, forKey key: String) { defaults.set(value, forKey: key) }
+}
+
+@MainActor
 final class LanguageSettings: ObservableObject {
     private static let storageKey = "ACTA.interfaceLanguage"
-    private let defaults: UserDefaults
+    private let storage: any LanguageSettingsStorage
 
     @Published private(set) var language: AppLanguage {
         didSet {
-            defaults.set(language.rawValue, forKey: Self.storageKey)
+            storage.set(language.rawValue, forKey: Self.storageKey)
             onChange?()
         }
     }
 
     var onChange: (() -> Void)?
     var locale: Locale { language.locale }
+    var storedLanguage: String? { storage.string(forKey: Self.storageKey) }
 
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-        language = AppLanguage(rawValue: defaults.string(forKey: Self.storageKey) ?? "") ?? .english
+    convenience init(defaults: UserDefaults = .standard) {
+        self.init(storage: UserDefaultsLanguageStorage(defaults: defaults))
+    }
+
+    init(storage: any LanguageSettingsStorage) {
+        self.storage = storage
+        language = AppLanguage(rawValue: storage.string(forKey: Self.storageKey) ?? "") ?? .english
     }
 
     func setLanguage(_ value: AppLanguage) { language = value }

@@ -175,13 +175,26 @@ final class TrackResearchTests: XCTestCase {
             createdAt: Date(timeIntervalSince1970: 1_700_000_000))
         let researchURL = directory.appendingPathComponent("track-research.json")
         try TrackResearchStore.save([saved], to: researchURL)
+        let configURL = directory.appendingPathComponent("cameras.json")
+        try ConfigurationStore.save(WallConfiguration(), to: configURL)
         let coordinator = CameraFeatureCoordinator(preferencesURL: directory.appendingPathComponent("features.json"),
             databaseURL: directory.appendingPathComponent("features.sqlite3"))
-        let wall = WallModel(configURL: directory.appendingPathComponent("cameras.json"),
-            trackingStoreURL: directory.appendingPathComponent("tracking.sqlite3"), featureCoordinator: coordinator, analyticsDirectoryURL: directory)
+        try coordinator.savePreferences(CameraFeaturePreferences(enabledFeatures: []))
+        let wall = WallModel(configURL: configURL, workerMode: false,
+            trackingStoreURL: directory.appendingPathComponent("tracking.sqlite3"),
+            featureCoordinator: coordinator,
+            analyticsDirectoryURL: directory.appendingPathComponent("analytics"),
+            cameraMemoryStore: CameraMemoryStore(url: directory.appendingPathComponent("frames")),
+            operationsWatchURL: directory.appendingPathComponent("watches.json"),
+            missionStoreURL: directory.appendingPathComponent("missions.json"),
+            cameraCredentialStore: TrackResearchIsolatedCredentials(),
+            operationsPreferencesURL: directory.appendingPathComponent("operations.json"),
+            alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")))
         defer { wall.shutdown() }
 
         XCTAssertFalse(wall.running)
+        XCTAssertFalse(wall.featurePreferences.enabledFeatures.contains(.independentWatcher))
+        XCTAssertFalse(wall.featurePreferences.enabledFeatures.contains(.knowledgeSearch))
         wall.vlmBusy = true
         XCTAssertTrue(wall.askTrackResearch(question: "Что было вчера?"), "Background VLM work must not block history")
         XCTAssertTrue(wall.trackResearchBusy)
@@ -236,6 +249,25 @@ final class TrackResearchTests: XCTestCase {
         XCTAssertNil(TrackDescriptionBatchReply.parse("```json\n{\"descriptions\":[]}", requestedTrackIDs: [UUID()]))
         for response in ["```", "```json{", "```json\n{", "```json\n{}\ntrailing", "```json\n```"] {
             XCTAssertNil(TrackDescriptionBatchReply.parse(response, requestedTrackIDs: [UUID()]), response)
+        }
+    }
+
+    private struct TrackResearchIsolatedCredentials: CameraCredentialStore {
+        private struct UnexpectedCredentialAccess: Error {}
+
+        func read(_ id: UUID) throws -> Credentials? {
+            XCTFail("Unexpected credential read")
+            throw UnexpectedCredentialAccess()
+        }
+
+        func save(_ credentials: Credentials, for id: UUID) throws {
+            XCTFail("Unexpected credential save")
+            throw UnexpectedCredentialAccess()
+        }
+
+        func remove(_ id: UUID) throws {
+            XCTFail("Unexpected credential removal")
+            throw UnexpectedCredentialAccess()
         }
     }
 

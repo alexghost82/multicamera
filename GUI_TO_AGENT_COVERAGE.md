@@ -8,11 +8,11 @@ Version: 1.0.0-baseline
 
 ## 1. Executive Summary
 
-Current implementation checkpoint: **59 advertised actions**, with row-specific limitations below. The original baseline inventory is not proof of exhaustive UI coverage.
+Current implementation checkpoint: **59 previously advertised actions plus `reid.calibrate` and `settings.run_health_check`**, with row-specific limitations below. The original baseline inventory is not proof of exhaustive UI coverage.
 
 This working inventory maps currently identified UI/domain operations to agent action contracts. Exhaustive control-by-control parity has not been established.
 
-- **Action rows:** 105 (97 baseline rows, 4 analytics contracts, mission.history, camera.set_processing and two alert-rule contracts; exhaustive UI coverage remains unverified)
+- **Action rows:** baseline inventory plus subsequently discovered contracts; exhaustive UI coverage remains unverified.
 - **Baseline legacy tools:** 16 read-only query tools + 1 terminal tool (`present_answer`)
 - **Baseline legacy mutations:** 3 (`rename_identity`, `merge_identities`, `split_identity`)
 - **Baseline gap estimate:** the old 89 / 82.4% figure depended on the unsupported 108-operation total and is not accepted as a coverage measurement.
@@ -45,7 +45,7 @@ This working inventory maps currently identified UI/domain operations to agent a
 | `camera.set_enabled` | `CameraManager` toggle | `WallModel` | `cameraID: String, enabled: Bool` | `ServiceAffecting` | **Confirm on enable** | `testMetadataProcessingAndURLChangesPreserveCredentialAndSourceIdentity` | `IMPLEMENTED — CONFIG FLAG; STREAM UNVERIFIED` |
 | `camera.remove` | `WallView` remove alert | `WallModel` | `cameraID: String` | `Destructive` | **Confirm** | `testRemovalRequiresReviewAndChecksCredentialDeletion` | `IMPLEMENTED — CONFIG/FAKE CREDENTIAL STORE; LIVE KEYCHAIN UNVERIFIED` |
 | `camera.reconnect` | Camera context menu | `WallModel` | `cameraID: String` | `ServiceAffecting` | Auto | `ACTAServiceAdapterTests.testActionsApplyToLiveModelAndPersistThroughGUIService` | `PLANNED — REGISTRY RETURNS UNSUPPORTED UNTIL STREAM RECOVERY IS VERIFIED` |
-| `camera.snapshot` | Camera action bar | `WallModel` | `cameraID: String` | `Inspect` | Auto | `testCameraSnapshot` | `PLANNED` |
+| `camera.snapshot` | Camera action bar | `WallModel` | `cameraID: String` | `ServiceAffecting` | Destination/confirmation policy pending | Not implemented | `GAP — GUI WRITES JPEG THROUGH A SAVE PANEL; NOT A READ-ONLY QUERY` |
 | `camera.toggle_expand` | Video canvas double-click | `WallModel` | `cameraID: String` | `Reversible` | Auto | `testCanvasActionsShareGUIStateAndVerifySavedLayout` | `IMPLEMENTED — UI STATE; STREAM UNVERIFIED` |
 | `canvas.set_columns` | SystemSettings / Canvas | `WallModel` | `columns: Int (1...16)` | `Reversible` | Auto | `testCanvasSetColumns` | `IMPLEMENTED — SERVICE TEST` |
 | `canvas.reset_layout` | Window menu / Toolbar | `WallModel` | `none` | `Reversible` | Auto | `testCanvasActionsShareGUIStateAndVerifySavedLayout` | `IMPLEMENTED — DISK/FAILURE TEST` |
@@ -78,13 +78,13 @@ This working inventory maps currently identified UI/domain operations to agent a
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `incident.list` | `SafetyIncidentCenterView` | `LocalVideoAnalyticsEngine` | `open_only: Bool?, camera_id: UUID?, query: String?, limit: Int?` | `Inspect` | Auto | `ACTAIncidentSearchTests`, `testIncidentTransitionAndQueryUsePersistentDomainService` | `PARTIAL — QUERY/SERVICE TESTED; FULL RECORDS ARE SENSITIVE` |
 | `incident.get` | `SafetyIncidentDetailView` | `LocalVideoAnalyticsEngine` | `incident_id: UUID` | `Inspect` | Auto | `ACTAIncidentReadActionsTests`, `testIncidentTransitionAndQueryUsePersistentDomainService` | `PARTIAL — MINIMAL METADATA; GUI DETAIL FIELDS NOT EXPOSED` |
-| `incident.transition_status` | `SafetyIncidentDetailView` | `LocalVideoAnalyticsEngine` | `incidentID: String, status: String ("acknowledged", "confirmed", "resolved", "false_positive", "suppressed", "active"), note: String?, suppressDurationSec: Int?` | `Reversible` | Auto (Confirm for `false_positive`) | `testIncidentTransitionAndQueryUsePersistentDomainService` | `PARTIAL — STATUS/NOTE; CUSTOM SUPPRESSION PENDING` |
+| `incident.transition_status` | `SafetyIncidentDetailView` | `LocalVideoAnalyticsEngine` | `incident_id: UUID, status: enum, note: String?` | `Reversible` | Confirm for `false_positive` or a nonempty note | `testIncidentTransitionAndQueryUsePersistentDomainService` | `PARTIAL — STATUS/NOTE; CUSTOM SUPPRESSION PENDING; FULL RECORD IN OUTPUT` |
 | `incident.update_note` | `SafetyIncidentDetailView` | `LocalVideoAnalyticsEngine` | `incident_id: UUID, note: String (empty clears)` | `Reversible` | **Confirm — operator attribution** | `ACTAIncidentNoteActionTests` | `PARTIAL — GUI SERVICE/PERSISTENCE TESTED; RAW NOTE IN EXISTING OPERATOR AUDIT` |
 | `incident.delete_evidence` | `SafetyIncidentDetailView` | `LocalVideoAnalyticsEngine` | `incidentID: String` | `Destructive` | **Confirm** | `testEvidenceDeletionRequiresApprovalAndPreservesIncidentRecord` | `IMPLEMENTED — SERVICE/CONFIRMATION TEST` |
 | `alert.vlm_list` | Events / Timeline | `WallModel` | `camera_id: UUID?, unacknowledged_only: Bool?, limit: Int? (1...100)` | `Inspect` | Auto | `ACTAAlertReadActionsTests`, `testAlertAndISAPIReadsUseVerifiedGUIState` | `PARTIAL — MINIMAL METADATA; SOURCE MUST MATCH GUI` |
 | `alert.vlm_acknowledge` | Events / Alerts Queue | `WallModel` | `alert_id: UUID, acknowledged: Bool` | `Reversible` | Auto | `ACTAAlertMutationActionsTests` | `PARTIAL — GUI SERVICE/SQL/LOCK TESTED; NO SWIFTUI OR FAILURE RECOVERY TEST` |
 | `alert.vlm_review` | Events / Alerts Queue | `WallModel` | `alert_id: UUID, status: String, priority: String?, note: String?` | `Reversible` | **Confirm — operator review** | `ACTAAlertMutationActionsTests` | `PARTIAL — GUI SERVICE/SQL/LOCK TESTED; NO SWIFTUI OR FAILURE RECOVERY TEST` |
-| `alert.clear_all` | Events / Alerts Queue | `WallModel` | `none` | `Destructive` | **Confirm** | `testAlertClearAll` | `PLANNED` |
+| `alert.clear_all` | Events / Alerts Queue | `WallModel` | `none` | `Destructive` | **Confirm** | `ClearVLMAlertsTests` (GUI only) | `GAP — GUI REPORTS PARTIAL FAILURES; CROSS-STORE RECOVERY REQUIRED` |
 
 ---
 
@@ -101,11 +101,12 @@ This working inventory maps currently identified UI/domain operations to agent a
 | `identity.rename` | Identity Detail / Chat | `ACTAAnalyticsCoordinator` | `identityID: String, newName: String` | `Reversible` | Auto | `testIdentityRename` | `EXISTING` |
 | `identity.merge` | Cross-Camera Identity | `ACTAAnalyticsCoordinator` | `sourceID: String, targetID: String` | `Destructive` | **Confirm** | `testIdentityMerge` | `EXISTING` |
 | `identity.split` | Cross-Camera Identity | `ACTAAnalyticsCoordinator` | `identityID: String, trackID: String` | `Destructive` | **Confirm** | `testIdentitySplit` | `EXISTING` |
-| `identity.review_proposal` | Cross-Camera Identity | `WallModel` | `proposalID: String, accept: Bool` | `Reversible` | Auto | `testIdentityReviewProposal` | `PLANNED` |
-| `identity.undo_merge` | Cross-Camera Identity | `WallModel` | `proposalID: String` | `Reversible` | Auto | `testIdentityUndoMerge` | `PLANNED` |
-| `identity.delete_tracked_object`| `IdentityHistoryView` | `WallModel` | `trackID: String` | `Destructive` | **Confirm** | `testIdentityDeleteTrack` | `PLANNED` |
-| `identity.read_vehicle_plate` | `IdentityHistoryView` | `WallModel` | `trackID: String` | `Inspect` | Auto | `testIdentityReadPlate` | `PLANNED` |
-| `identity.clear_vehicle_plate` | `IdentityHistoryView` | `WallModel` | `trackID: String` | `Destructive` | Auto | `testIdentityClearPlate` | `PLANNED` |
+| `identity.review_proposal` | Cross-Camera Identity | `WallModel` | `proposalID: String, accept: Bool` | `Reversible` | Policy pending | Not implemented | `GAP — STALE PROPOSALS CAN REFERENCE DELETED TRACKS; CROSS-STORE CHECK REQUIRED` |
+| `identity.undo_merge` | Cross-Camera Identity | `WallModel` | `proposalID: String` | `Reversible` | Confirmation/version policy pending | Not implemented | `GAP — CONSEQUENCES CHANGE IF THE IDENTITY GRAPH CHANGES` |
+| `identity.delete_tracked_object`| `IdentityHistoryView` | `WallModel` | `trackID: String` | `Destructive` | **Confirm** | Not implemented | `GAP — PARTIAL DELETE AND CROP FAILURE RECOVERY REQUIRED` |
+| `identity.read_vehicle_plate` | `IdentityHistoryView` | `WallModel` | `trackID: String` | `ServiceAffecting` | Privacy/persistence policy pending | Not implemented | `GAP — GUI OCR MAY PERSIST EVIDENCE WHEN OPTED IN; SHARED VERIFIED WORKFLOW REQUIRED` |
+| `identity.clear_vehicle_plate` | `IdentityHistoryView` | `WallModel` | `trackID: String` | `Destructive` | Policy pending | Not implemented | `GAP — MISSING TRACK AND STALE SEARCH INDEX MUST BE HANDLED` |
+| `reid.calibrate` | `ReIDCalibrationView` | `LocalTrackingStore` / `ReIDThresholdCalibrator` | `target_precision: number (0.90...1.0)` | `Inspect` | Auto | `ACTAReIDCalibrationActionTests`; isolated GUI/store integration | `PARTIAL — AGGREGATE RECOMMENDATION ONLY; DOES NOT APPLY SETTINGS` |
 
 ---
 
@@ -136,7 +137,7 @@ This working inventory maps currently identified UI/domain operations to agent a
 | `memory.get_chapter` | `CameraMemoryView` | `ACTAAnalyticsCoordinator` | `chapterID: String` | `Inspect` | Auto | `testMemoryGetChapter` | `EXISTING` |
 | `memory.set_chapter_text` | `CameraMemoryView` | `WallModel` | `chapter_id: String, text: String? (<=16000), clear: Bool?` | `Reversible` | **Confirm — operator attribution** | `testNarrativeActionsRequireReviewAndPreserveAISummary` | `IMPLEMENTED — SQL/REVIEW TEST` |
 | `memory.toggle_pin` | `CameraMemoryView` | `WallModel` | `chapterID: String, pinned: Bool` | `Reversible` | **Confirm — operator attribution** | `testNarrativeActionsRequireReviewAndPreserveAISummary` | `IMPLEMENTED — IDEMPOTENT STATE/REVIEW TEST` |
-| `memory.close_chapter_now` | `CameraMemoryView` | `WallModel` | `cameraID: String` | `Reversible` | Auto | `testMemoryCloseChapterNow` | `PLANNED` |
+| `memory.close_chapter_now` | `CameraMemoryView` | `WallModel` | `cameraID: String` | `ServiceAffecting` | Policy pending | Not implemented | `GAP — GUI/AUTOMATIC FLUSH DRAINS BUFFER BEFORE PERSISTENCE; FAILURE RECOVERY NOT PROVEN` |
 | `memory.rebuild_knowledge` | `CameraMemoryView` | `WallModel` | `none` | `ServiceAffecting` | Auto | `testMemoryRebuildKnowledge` | `PLANNED` |
 
 ---
@@ -152,7 +153,7 @@ This working inventory maps currently identified UI/domain operations to agent a
 | `monitor.clear_isapi_events`| `ISAPIEventMonitor` | `WallModel` | `none` | `Destructive` | Auto | `testMonitorClearISAPIEvents` | `PLANNED` |
 | `monitor.get_operational_events`| Unified Timeline | `ACTAAnalyticsCoordinator` | `cameraID: String?, kind: String?, limit: Int?` | `Inspect` | Auto | `testMonitorGetOperationalEvents` | `EXISTING` |
 | `monitor.live_look` | Unified Chat | `ACTAAnalyticsCoordinator` | `camera: String?` | `Inspect` | Auto | `testMonitorLiveLook` | `EXISTING` |
-| `monitor.export_report_html`| Reports | `WallModel` | `none` | `Inspect` | Auto | `testMonitorExportReportHTML` | `PLANNED` |
+| `monitor.export_report_html`| Reports | `WallModel` | GUI chooses report and destination | `ServiceAffecting` | Report/destination/confirmation policy pending | Not implemented | `GAP — OPERATIONS AND MISSION REPORTS ARE DISTINCT; FILE EXPORT IS NOT READ-ONLY` |
 
 ---
 
@@ -161,13 +162,13 @@ This working inventory maps currently identified UI/domain operations to agent a
 | Action ID | UI Section / Key | Service Owner | Typed Arguments | Action Type | Policy | Unit / Parity Test | State |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `settings.get_section` | SettingsHub sections | `WallSettingsAction` / `WallModel` | `section: enum` | `Inspect` | Auto | `testSectionInspectionRedactsEndpointsAndReturnsUnsupportedInsteadOfInventing` | `PARTIAL — CONFIGURATION ONLY; IDENTITY UNSUPPORTED; NO HEALTH/READINESS PROOF` |
-| `settings.update_system` | Sec 1: General & Streams | `WallModel` | `language: String?, columns: Int?, staleTimeoutMs: Int?, go2rtcPath: String?, apiPort: Int?, rtspPort: Int?, yoloThreshold: Double?, detectionFPS: Int?` | `Reversible` | Auto | `testSettingsUpdateSystem` | `PARTIAL — FOUR FIELDS` |
-| `settings.update_models` | Sec 3: AI Models | `WallModel` | `enabledServices: [String]?, customPaths: [String: String]?` | `ServiceAffecting` | Auto | `testSettingsUpdateModels` | `PLANNED` |
+| `settings.update_system` | Sec 1: General & Streams | `WallModel` / GUI `LanguageSettings` | `language: en/ru (separate call), columns?, stale_threshold_ms?, detection_threshold?, detection_fps?` | `Reversible` | Auto | `ACTASystemLanguageActionTests`; isolated GUI/store integration | `PARTIAL — LANGUAGE + FOUR FIELDS; PORTS/PATH UNSUPPORTED` |
+| `settings.update_models` | Sec 3: AI Models | `WallModel` | GUI service selection and custom paths | `ServiceAffecting` | Confirmation and path identity policy pending | Not implemented | `GAP — PATH OBJECT MAY CHANGE BEFORE DEFERRED MODEL LOAD` |
 | `settings.update_runtime_fall` | Sec 4: Advanced Runtime | `WallModel.saveRuntimePreferences` | 22 advanced GUI fields; four common fields use analytics actions | `ServiceAffecting` | Auto | `testAllGUIFallFieldsAndCropFieldsPersistThroughRuntimeService` | `IMPLEMENTED — TEMP STORE / SERVICE TEST` |
 | `settings.update_runtime_storage` | Sec 4: Storage Cleanup | `WallModel.saveRuntimePreferences` | `maxMediaDiskMB: Double?, minFreeDiskGB: Double?, maxCropsPerIdentity: Int?, dataSaverEnabled: Bool?, trackImageRetentionDays: Int?, logRetentionDays: Int?` | `SecuritySensitive` | **Confirm** | `testReviewedStorageAndMemoryPolicyMatchDiskWithoutClaimingCleanup` | `IMPLEMENTED — POLICY VERIFIED; CLEANUP NOT RUN` |
 | `settings.update_runtime_crop` | Sec 4: Crop Selection | `WallModel.saveRuntimePreferences` | Six capture scheduler fields plus `cropWindowSeconds: Double?, cropTopK: Int?, cropImprovementRatio: Double?` | `ServiceAffecting` | Auto | `testAllGUIFallFieldsAndCropFieldsPersistThroughRuntimeService` | `IMPLEMENTED — TEMP STORE / SERVICE TEST` |
 | `settings.update_ai_config` | Sec 6: AI Backends | `WallModel` | `mode: String ("mlx", "vllm", "openai", "hybrid", "dry_run"), vllmURL: String?, vllmModel: String?, openAIURL: String?, cloudNanoModel: String?, cloudMiniModel: String?, cloudFullModel: String?, spokenBriefingEnabled: Bool?, language: String?` | `Reversible` | Auto | `testSettingsUpdateAIConfig` | `PLANNED` |
-| `settings.update_ai_budget` | Sec 6: Cloud Privacy & Budget | `WallModel` | `blurFaces: Bool?, blurPlates: Bool?, dailyBudgetUSD: Double?, monthlyBudgetUSD: Double?` | `Reversible` | Auto | `testSettingsUpdateAIBudget` | `PLANNED` |
+| `settings.update_ai_budget` | Sec 6: Cloud Privacy & Budget | `WallModel` | `blurFaces: Bool?, blurPlates: Bool?, dailyBudgetUSD: Double?, monthlyBudgetUSD: Double?` | `SecuritySensitive` | Confirmation and persistence policy pending | Not implemented | `GAP — PRIVACY CHANGE; TRANSPORT TYPES AND PERSISTENCE REQUIRE HARDENING` |
 | `settings.set_api_key` | Sec 6: Keychain Credentials | `ACTAKeychainStore` | `account: String ("primary", "alert"), apiKey: String` | `Reversible` | Auto | `testSettingsSetAPIKey` | `PLANNED` |
 | `settings.clear_api_key` | Sec 6: Keychain Credentials | `ACTAKeychainStore` | `account: String` | `Destructive` | **Confirm** | `testSettingsClearAPIKey` | `PLANNED` |
 | `settings.update_schedules` | Sec 7: Scheduled Analysis | `WallModel.saveVLMPreferences` | `scheduleEnabled: Bool?, intervalSeconds: Int?, analyzeAllEnabledCameras: Bool?, camera_ids: CSV UUID string?` | `SecuritySensitive` | **Confirm** | `testEventsAndSchedulesPreserveUnrelatedBackendAndPermissions` | `IMPLEMENTED — CONFIGURATION; NO INFERENCE COMPLETION PROOF` |
@@ -179,8 +180,8 @@ This working inventory maps currently identified UI/domain operations to agent a
 | `settings.update_permissions` | Sec 11: Features & Access | `WallModel` | `allowExternalAI: Bool?, allowVoiceInput: Bool?, allowPlateRegistryLookup: Bool?` | `Reversible` | Auto | `testSettingsUpdatePermissions`| `IMPLEMENTED — CONFIRMATION / SERVICE TEST` |
 | `settings.toggle_showcase` | Sec 12: Local Showcase | `WallModel` | `running: Bool, port: Int?` | `ServiceAffecting` | Auto | `testSettingsToggleShowcase` | `PLANNED` |
 | `settings.update_reid_calibration` | Sec 13: ReID Calibration | `ReIDCalibrationView` / `ReIDThresholdCalibrator` | GUI has transient `targetPrecision`, not the previously listed persistent settings | `Reversible` | Scope decision pending | Not implemented | `GAP — GUI COMPUTES A RECOMMENDATION; NO SETTINGS PERSISTENCE` |
-| `settings.export_diagnostics` | Sec 14: System Diagnostics | `WallModel` | `none` | `Inspect` | Auto | `testSettingsExportDiagnostics`| `PLANNED` |
-| `settings.run_health_check` | Sec 14: System Diagnostics | `WallModel` | `none` | `Inspect` | Auto | `testSettingsRunHealthCheck` | `PLANNED` |
+| `settings.export_diagnostics` | Sec 14: System Diagnostics | `WallModel` | GUI chooses destination | `ServiceAffecting` | Destination/confirmation policy pending | Not implemented | `GAP — FILE EXPORT; NOT A READ-ONLY QUERY` |
+| `settings.run_health_check` | Sec 14: System Diagnostics | `WallModel` | `none` | `ServiceAffecting` | Notice | `ACTARunHealthCheckActionTests` | `PARTIAL — FRESH IN-APP SNAPSHOT/HISTORY TESTED; NO INDEPENDENT WATCHER OR LIVE CAMERAS` |
 | `settings.reload_models` | Sec 14: System Diagnostics | `WallModel` | `none` | `ServiceAffecting` | Auto | `testSettingsReloadModels` | `PLANNED` |
 
 ---

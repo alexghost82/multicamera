@@ -513,6 +513,10 @@ final class WallModel: ObservableObject {
     private var lastAlertClipPrune: TimeInterval = -.infinity
     private var localOperationsMonitor = LocalOperationsMonitor()
     private var lastLocalMonitorCheck: TimeInterval = -.infinity
+    private let monitorHistoryURL: URL
+    private var monitorHistoryTrusted = true
+    private var lastMonitorCheckReceipt: LocalMonitorCheckReceipt?
+    private var monitorCheckInProgress = false
     private var lastOperationsWatchCheck: TimeInterval = -.infinity
     @Published var localAnalyticsEngine: LocalVideoAnalyticsEngine
     private var analyticsEngineCancellable: AnyCancellable?
@@ -530,7 +534,10 @@ final class WallModel: ObservableObject {
          missionConsultResponder: (@Sendable (String) async throws -> String)? = nil,
          cameraCredentialStore: any CameraCredentialStore = SystemCameraCredentialStore(),
          operationsPreferencesURL: URL = OperationsPreferencesStore.defaultURL,
-         alertClipStore: CriticalAlertClipStore = CriticalAlertClipStore()) {
+         alertClipStore: CriticalAlertClipStore = CriticalAlertClipStore(),
+         languageSettings: LanguageSettings? = nil,
+         monitorHistoryURL: URL = LocalOperationsMonitorStore.defaultURL) {
+        self.monitorHistoryURL = monitorHistoryURL
         self.alertClipStore = alertClipStore
         self.operationsPreferencesURL = operationsPreferencesURL
         self.cameraCredentialStore = cameraCredentialStore
@@ -587,9 +594,12 @@ final class WallModel: ObservableObject {
         catch { notice = "Feature settings could not be loaded; new features remain disabled" }
         if featurePreferences.enabledFeatures.contains(.independentWatcher) {
             do {
-                localOperationsMonitor = LocalOperationsMonitor(history: try LocalOperationsMonitorStore.load())
+                localOperationsMonitor = LocalOperationsMonitor(history: try LocalOperationsMonitorStore.load(from: monitorHistoryURL))
                 localMonitorHistory = localOperationsMonitor.history
-            } catch { notice = "Local monitor history could not be loaded" }
+            } catch {
+                monitorHistoryTrusted = false
+                notice = "Local monitor history could not be loaded"
+            }
         }
         if featurePreferences.enabledFeatures.contains(.scheduledMissions) {
             do {
@@ -673,7 +683,7 @@ final class WallModel: ObservableObject {
         syncACTAOperationalMemory()
         Task { [weak self] in
             guard let self else { return }
-            await registerAllWallActions(registry: ACTAActionRegistry.shared, model: self)
+            await registerAllWallActions(registry: ACTAActionRegistry.shared, model: self, languageSettings: languageSettings)
         }
         if workerMode {
             workerProvisionedCameras = config.cameras.filter {
@@ -1484,15 +1494,22 @@ final class WallModel: ObservableObject {
         )
         if enabled, featureID == .independentWatcher {
             do {
-                localOperationsMonitor = LocalOperationsMonitor(history: try LocalOperationsMonitorStore.load())
+                localOperationsMonitor = LocalOperationsMonitor(history: try LocalOperationsMonitorStore.load(from: monitorHistoryURL))
                 localMonitorHistory = localOperationsMonitor.history
+                monitorHistoryTrusted = true
+                lastMonitorCheckReceipt = nil
                 lastLocalMonitorCheck = -.infinity
                 updateLocalOperationsMonitor(now: ProcessInfo.processInfo.systemUptime, force: true)
-            } catch { notice = "Local monitor history could not be loaded" }
+            } catch {
+                monitorHistoryTrusted = false
+                lastMonitorCheckReceipt = nil
+                notice = "Local monitor history could not be loaded"
+            }
         }
         if !enabled, featureID == .independentWatcher {
             localMonitorSnapshot = .empty
             localMonitorHistory = []
+            lastMonitorCheckReceipt = nil
         }
         if featureID == .operatorActions { reloadOperatorActions() }
         if featureID == .plateRecognition {
@@ -2090,13 +2107,20 @@ final class WallModel: ObservableObject {
 
     func clearVLMAlerts() {
         let clipIDs = vlmAlerts.compactMap(\.clipID)
-        vlmAlerts = []
-        do { try VLMStore.save(vlmAlerts, to: vlmAlertsURL) }
+        do { try VLMStore.save([], to: vlmAlertsURL) }
         catch {
             actaVLMAlertsLoaded = false
-            notice = "Could not clear local VLM alerts"
+            let message = "Could not clear local VLM alerts. The saved alert list may have changed; clips and review state were not cleared."
+            notice = message
+            self.error = message
+            return
         }
-        for clipID in clipIDs { try? alertClipStore.delete(clipID) }
+        vlmAlerts = []
+        var partialFailure = false
+        for clipID in clipIDs {
+            do { try alertClipStore.delete(clipID) }
+            catch { partialFailure = true }
+        }
         if featurePreferences.enabledFeatures.contains(.operationalAlerts) {
             do {
                 try featureCoordinator.clearOperationsAlertAcknowledgements()
@@ -2105,8 +2129,13 @@ final class WallModel: ObservableObject {
             } catch {
                 actaAlertReviewsLoaded = false
                 actaAlertReviewsFailed = true
-                notice = "Could not clear local alert acknowledgements"
+                partialFailure = true
             }
+        }
+        if partialFailure {
+            let message = "Alerts were cleared, but some clips or review state could not be removed."
+            notice = message
+            self.error = message
         }
     }
 
@@ -2416,6 +2445,17 @@ final class WallModel: ObservableObject {
         }
     }
 
+    func calculateReIDCalibration(targetPrecision: Double) async throws -> ReIDCalibrationResult {
+        guard let store = trackingStore else { throw ReIDCalibrationActionError.unavailable }
+        return try await withCheckedThrowingContinuation { continuation in
+            trackingQueue.async {
+                continuation.resume(with: Result {
+                    try store.reidCalibration(targetPrecision: targetPrecision)
+                })
+            }
+        }
+    }
+
     func refreshReIDValidation(targetPrecision: Double, includeCandidates: Bool = false) {
         guard let store = trackingStore else { return }
         reidValidationCandidatesNeedRefresh = reidValidationCandidatesNeedRefresh || includeCandidates
@@ -2425,10 +2465,7 @@ final class WallModel: ObservableObject {
         reidValidationLoading = true
         trackingQueue.async { [weak self] in
             do {
-                let samples = try store.reidValidationSamples(limit: 50_000)
-                let result = ReIDThresholdCalibrator.calibrate(
-                    samples.map(\.pair), targetPrecision: targetPrecision
-                )
+                let result = try store.reidCalibration(targetPrecision: targetPrecision)
                 let candidates = refreshCandidates ? try store.reidValidationCandidates(limit: 40) : nil
                 let tracks = refreshCandidates ? try store.recentTracks() : nil
                 Task { @MainActor [weak self] in
@@ -2465,10 +2502,7 @@ final class WallModel: ObservableObject {
                     try store.labelDifferent(trackA: candidate.trackA.trackID, trackB: candidate.trackB.trackID)
                 }
                 let tracks = try store.recentTracks()
-                let samples = try store.reidValidationSamples(limit: 50_000)
-                let result = ReIDThresholdCalibrator.calibrate(
-                    samples.map(\.pair), targetPrecision: targetPrecision
-                )
+                let result = try store.reidCalibration(targetPrecision: targetPrecision)
                 let candidates = try store.reidValidationCandidates(limit: 40)
                 Task { @MainActor [weak self] in
                     guard let self, self.reidValidationGeneration == generation else { return }
@@ -2497,10 +2531,7 @@ final class WallModel: ObservableObject {
         trackingQueue.async { [weak self] in
             do {
                 try store.removeDifferentLabel(trackA: candidate.trackA.trackID, trackB: candidate.trackB.trackID)
-                let samples = try store.reidValidationSamples(limit: 50_000)
-                let result = ReIDThresholdCalibrator.calibrate(
-                    samples.map(\.pair), targetPrecision: targetPrecision
-                )
+                let result = try store.reidCalibration(targetPrecision: targetPrecision)
                 let candidates = try store.reidValidationCandidates(limit: 40)
                 Task { @MainActor [weak self] in
                     guard let self, self.reidValidationGeneration == generation else { return }
@@ -3494,7 +3525,7 @@ final class WallModel: ObservableObject {
         let currentThreadID = activeACTAThreadID
         Task { @MainActor [weak self] in
             for item in cameraFramePayloads {
-                await ghost.offerCameraFrame(
+                let outcome = await ghost.offerCameraFrame(
                     cameraID: item.cameraID,
                     cameraName: item.cameraName,
                     cgImage: item.cgImage,
@@ -3505,6 +3536,9 @@ final class WallModel: ObservableObject {
                     sampleNarrative: memoryEnabled,
                     retainCollageJPEG: retainFullFrames
                 )
+                if outcome == .notVerified {
+                    self?.notice = ACTANarrativeFlushOutcome.notVerifiedNotice
+                }
             }
             if descriptionsEnabled {
                 await ghost.flushDescribeGateIfNeeded()
@@ -3576,13 +3610,18 @@ final class WallModel: ObservableObject {
         let camName = config.cameras.first(where: { $0.id == cameraID })?.name ?? cameraID.uuidString
         let retainCollageJPEG = featurePreferences.retainFullFrames
         Task { @MainActor [weak self] in
-            _ = await ghost.forceCloseNarrativeChapter(
+            let saved = await ghost.forceCloseNarrativeChapter(
                 cameraID: cameraID,
                 cameraName: camName,
                 retainCollageJPEG: retainCollageJPEG
             )
-            guard let self, let store = self.trackingStore else { return }
-            self.actaNarrativeChapters = (try? store.loadACTANarrativeChapterRecords(limit: 50)) ?? self.actaNarrativeChapters
+            guard let self else { return }
+            if let store = self.trackingStore {
+                self.actaNarrativeChapters = (try? store.loadACTANarrativeChapterRecords(limit: 50)) ?? self.actaNarrativeChapters
+            }
+            if saved == nil {
+                self.notice = ACTANarrativeFlushOutcome.notVerifiedNotice
+            }
         }
     }
 
@@ -3910,12 +3949,60 @@ final class WallModel: ObservableObject {
     }
 
     func runLocalOperationsMonitorCheck() {
-        updateLocalOperationsMonitor(now: ProcessInfo.processInfo.systemUptime, force: true)
+        do {
+            _ = try runLocalOperationsMonitorCheckChecked()
+        } catch {
+            notice = error.localizedDescription
+        }
+    }
+
+    func runLocalOperationsMonitorCheckChecked() throws -> LocalMonitorCheckReceipt {
+        guard featurePreferences.enabledFeatures.contains(.independentWatcher) else {
+            throw LocalMonitorCheckError.disabled
+        }
+        guard !monitorCheckInProgress else { throw LocalMonitorCheckError.busy }
+        guard monitorHistoryTrusted else { throw LocalMonitorCheckError.historyUnavailable }
+        let previousID = lastMonitorCheckReceipt?.id
+        guard let receipt = try performLocalOperationsMonitorCheck(
+            now: ProcessInfo.processInfo.systemUptime, force: true
+        ), receipt.id != previousID, currentLocalMonitorCheckReceipt() == receipt else {
+            throw LocalMonitorCheckError.observationFailed
+        }
+        return receipt
+    }
+
+    func currentLocalMonitorCheckReceipt() -> LocalMonitorCheckReceipt? {
+        guard featurePreferences.enabledFeatures.contains(.independentWatcher), monitorHistoryTrusted,
+              let receipt = lastMonitorCheckReceipt,
+              receipt.snapshot == localMonitorSnapshot, receipt.history == localMonitorHistory else { return nil }
+        return receipt
     }
 
     private func updateLocalOperationsMonitor(now: TimeInterval, force: Bool = false) {
+        do {
+            _ = try performLocalOperationsMonitorCheck(now: now, force: force)
+        } catch {
+            notice = error.localizedDescription
+        }
+    }
+
+    private func performLocalOperationsMonitorCheck(now: TimeInterval, force: Bool) throws -> LocalMonitorCheckReceipt? {
         guard featurePreferences.enabledFeatures.contains(.independentWatcher),
-              force || now - lastLocalMonitorCheck >= LocalOperationsMonitor.pollIntervalSeconds else { return }
+              force || now - lastLocalMonitorCheck >= LocalOperationsMonitor.pollIntervalSeconds else { return nil }
+        guard monitorHistoryTrusted else { throw LocalMonitorCheckError.historyUnavailable }
+        guard !monitorCheckInProgress else { return nil }
+        monitorCheckInProgress = true
+        defer { monitorCheckInProgress = false }
+        lastMonitorCheckReceipt = nil
+        do {
+            guard try LocalOperationsMonitorStore.load(from: monitorHistoryURL) == localMonitorHistory else {
+                monitorHistoryTrusted = false
+                throw LocalMonitorCheckError.historyUnavailable
+            }
+        } catch {
+            monitorHistoryTrusted = false
+            throw LocalMonitorCheckError.historyUnavailable
+        }
         lastLocalMonitorCheck = now
         let checkedAt = Date()
         let enabledCameras = config.cameras.filter(\.enabled)
@@ -3961,10 +4048,31 @@ final class WallModel: ObservableObject {
         let changes = localOperationsMonitor.update(probes, at: checkedAt)
         localMonitorSnapshot = localOperationsMonitor.snapshot
         localMonitorHistory = localOperationsMonitor.history
-        if !changes.isEmpty {
-            do { try LocalOperationsMonitorStore.save(localMonitorHistory) }
-            catch { notice = "Local monitor history could not be saved" }
+        guard localMonitorSnapshot.checkedAt == checkedAt, localMonitorSnapshot.probes == probes,
+              localMonitorHistory == localOperationsMonitor.history else {
+            throw LocalMonitorCheckError.observationFailed
         }
+        if !changes.isEmpty {
+            do {
+                try LocalOperationsMonitorStore.save(localMonitorHistory, to: monitorHistoryURL)
+                guard try LocalOperationsMonitorStore.load(from: monitorHistoryURL) == localMonitorHistory else {
+                    throw LocalMonitorCheckError.historyWriteFailed
+                }
+            }
+            catch {
+                monitorHistoryTrusted = false
+                notice = "Local monitor history could not be saved"
+                throw LocalMonitorCheckError.historyWriteFailed
+            }
+        }
+        guard localMonitorSnapshot == localOperationsMonitor.snapshot,
+              localMonitorHistory == localOperationsMonitor.history else {
+            throw LocalMonitorCheckError.observationFailed
+        }
+        let receipt = LocalMonitorCheckReceipt(id: UUID(), snapshot: localMonitorSnapshot,
+                                               history: localMonitorHistory, historyWritten: !changes.isEmpty)
+        lastMonitorCheckReceipt = receipt
+        return receipt
     }
 
     private func scheduleDetection(now: TimeInterval) {

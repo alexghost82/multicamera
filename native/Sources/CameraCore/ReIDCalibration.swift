@@ -136,3 +136,10 @@ public enum ReIDThresholdCalibrator {
         )
     }
 }
+
+public extension LocalTrackingStore {
+    func reidCalibration(targetPrecision: Double) throws -> ReIDCalibrationResult {
+        let samples = try reidValidationSamples(limit: 50_000)
+        return ReIDThresholdCalibrator.calibrate(samples.map(\.pair), targetPrecision: targetPrecision)
+    }
+}

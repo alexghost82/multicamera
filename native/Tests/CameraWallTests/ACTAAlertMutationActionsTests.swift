@@ -209,6 +209,7 @@ final class ACTAAlertMutationActionsTests: XCTestCase {
         let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), transport: { _ in
             throw URLError(.notConnectedToInternet)
         })
+        let language = LanguageSettings(storage: InMemoryLanguageStorage())
         let model = WallModel(configURL: root.appendingPathComponent("cameras.json"),
             trackingStoreURL: root.appendingPathComponent("tracks.sqlite"),
             featureCoordinator: CameraFeatureCoordinator(preferencesURL: preferencesURL, databaseURL: databaseURL),
@@ -218,13 +219,28 @@ final class ACTAAlertMutationActionsTests: XCTestCase {
             missionStoreURL: root.appendingPathComponent("missions.json"),
             cameraCredentialStore: AlertTestCredentials(),
             operationsPreferencesURL: root.appendingPathComponent("operations.json"),
-            alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")))
+            alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")),
+            languageSettings: language)
         defer { model.shutdown() }
         let registry = ACTAActionRegistry()
-        await registerAllWallActions(registry: registry, model: model)
+        await registerAllWallActions(registry: registry, model: model, languageSettings: language)
         let advertised = try await ACTAAnalyticsCoordinator.registryTools(registry: registry)
+        let systemTool = try XCTUnwrap(advertised.first { $0.name == "acta__settings__update_system" })
+        let systemSchema = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(systemTool.parametersSchemaJSON.utf8)) as? [String: Any])
+        let properties = try XCTUnwrap(systemSchema["properties"] as? [String: Any])
+        XCTAssertNotNil(properties["language"])
+        let languageResult = try await registry.execute(actionID: "settings.update_system", parameters: ["language": "ru"])
+        XCTAssertTrue(languageResult.success, languageResult.summary)
+        XCTAssertEqual(language.language, .russian)
         XCTAssertTrue(advertised.contains { $0.name == "acta__alert__vlm_acknowledge" })
         XCTAssertTrue(advertised.contains { $0.name == "acta__alert__vlm_review" })
+        XCTAssertTrue(advertised.contains { $0.name == "acta__reid__calibrate" })
+        let calibration = try await registry.execute(actionID: "reid.calibrate", parameters: ["target_precision": "0.995"])
+        XCTAssertTrue(calibration.success, calibration.summary)
+        let aggregate = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(calibration.outputJSON.utf8)) as? [String: Any])
+        XCTAssertEqual(aggregate["positive_pairs"] as? Int, 0)
+        XCTAssertEqual(aggregate["negative_pairs"] as? Int, 0)
+        XCTAssertEqual(aggregate["ready"] as? Bool, false)
         let reviewed = try await review(registry, [
             "alert_id": alert.id.uuidString, "status": "resolved", "priority": "normal", "note": "synthetic note"
         ])

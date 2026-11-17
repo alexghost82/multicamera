@@ -387,6 +387,31 @@ struct LocalMonitorSnapshot: Equatable {
     }
 }
 
+struct LocalMonitorCheckReceipt: Equatable {
+    let id: UUID
+    let snapshot: LocalMonitorSnapshot
+    let history: [LocalMonitorEvent]
+    let historyWritten: Bool
+}
+
+enum LocalMonitorCheckError: LocalizedError {
+    case disabled
+    case busy
+    case historyUnavailable
+    case observationFailed
+    case historyWriteFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .disabled: return "FEATURE_DISABLED: The in-app monitor is disabled."
+        case .busy: return "ACTION_BUSY: A monitor check is already in progress."
+        case .historyUnavailable: return "HISTORY_UNAVAILABLE: Monitor history could not be trusted; no check was requested."
+        case .observationFailed: return "OBSERVATION_FAILED: The new monitor snapshot could not be verified; state may have changed."
+        case .historyWriteFailed: return "HISTORY_WRITE_FAILED: Monitor counters and history changed in memory; the history file may have been partially written."
+        }
+    }
+}
+
 struct LocalOperationsMonitor {
     static let pollIntervalSeconds: TimeInterval = 5
     static let failureThreshold = 3

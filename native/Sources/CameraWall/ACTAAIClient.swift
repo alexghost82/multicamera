@@ -544,12 +544,20 @@ public struct ACTAAgentToolSpec: Sendable, Equatable {
 public struct ACTAAgentFunctionCall: Sendable, Equatable {
     public var callID: String
     public var name: String
-    public var argumentsJSON: String
+    public var argumentsJSON: String {
+        didSet { rawArgumentsJSON = argumentsJSON }
+    }
+    public private(set) var rawArgumentsJSON: String
 
-    public init(callID: String, name: String, argumentsJSON: String) {
+    public init(callID: String, name: String, argumentsJSON: String, rawArgumentsJSON: String? = nil) {
         self.callID = callID
         self.name = name
         self.argumentsJSON = argumentsJSON.isEmpty ? "{}" : argumentsJSON
+        self.rawArgumentsJSON = rawArgumentsJSON ?? argumentsJSON
+    }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.callID == rhs.callID && lhs.name == rhs.name && lhs.argumentsJSON == rhs.argumentsJSON
     }
 
     /// Flattens the JSON arguments into strings (numbers/bools stringified, nested values re-encoded as JSON).
@@ -571,6 +579,104 @@ public struct ACTAAgentFunctionCall: Sendable, Equatable {
             }
         }
         return out
+    }
+}
+
+private struct ACTARawJSONRanges {
+    private let bytes: [UInt8]
+    private var index = 0
+
+    init(_ json: String) { bytes = Array(json.utf8) }
+
+    private mutating func whitespace() {
+        while index < bytes.count && [UInt8(32), 9, 10, 13].contains(bytes[index]) { index += 1 }
+    }
+
+    private mutating func stringEnd() -> Bool {
+        guard index < bytes.count, bytes[index] == 34 else { return false }
+        index += 1
+        while index < bytes.count {
+            if bytes[index] == 92 { index += 2; continue }
+            if bytes[index] == 34 { index += 1; return true }
+            index += 1
+        }
+        return false
+    }
+
+    private mutating func value() -> String? {
+        whitespace()
+        guard index < bytes.count else { return nil }
+        let start = index
+        if bytes[index] == 34 {
+            guard stringEnd() else { return nil }
+        } else if bytes[index] == 123 || bytes[index] == 91 {
+            var depth = 0
+            while index < bytes.count {
+                if bytes[index] == 34 {
+                    guard stringEnd() else { return nil }
+                    continue
+                }
+                if bytes[index] == 123 || bytes[index] == 91 { depth += 1 }
+                if bytes[index] == 125 || bytes[index] == 93 {
+                    depth -= 1
+                    if depth == 0 { index += 1; break }
+                }
+                index += 1
+            }
+            guard depth == 0 else { return nil }
+        } else {
+            while index < bytes.count && ![UInt8(44), 125, 93, 32, 9, 10, 13].contains(bytes[index]) {
+                index += 1
+            }
+        }
+        guard index > start else { return nil }
+        return String(decoding: bytes[start..<index], as: UTF8.self)
+    }
+
+    mutating func object() -> [String: String]? {
+        whitespace()
+        guard index < bytes.count, bytes[index] == 123 else { return nil }
+        index += 1
+        var fields: [String: String] = [:]
+        while true {
+            whitespace()
+            guard index < bytes.count else { return nil }
+            if bytes[index] == 125 { return fields }
+            let start = index
+            guard stringEnd() else { return nil }
+            let keyJSON = "[" + String(decoding: bytes[start..<index], as: UTF8.self) + "]"
+            guard let keys = try? JSONSerialization.jsonObject(with: Data(keyJSON.utf8)) as? [String],
+                  let key = keys.first, fields[key] == nil else { return nil }
+            whitespace()
+            guard index < bytes.count, bytes[index] == 58 else { return nil }
+            index += 1
+            guard let raw = value() else { return nil }
+            fields[key] = raw
+            whitespace()
+            guard index < bytes.count else { return nil }
+            if bytes[index] == 125 { return fields }
+            guard bytes[index] == 44 else { return nil }
+            index += 1
+        }
+    }
+
+    mutating func array() -> [String]? {
+        whitespace()
+        guard index < bytes.count, bytes[index] == 91 else { return nil }
+        index += 1
+        var items: [String] = []
+        while true {
+            whitespace()
+            guard index < bytes.count else { return nil }
+            if bytes[index] == 93 { return items }
+            guard let raw = value() else { return nil }
+            items.append(raw)
+            whitespace()
+            guard index < bytes.count else { return nil }
+            if bytes[index] == 93 { return items }
+            guard bytes[index] == 44 else { return nil }
+            index += 1
+        }
     }
 }
 
@@ -1342,7 +1448,8 @@ public final class ACTAAIClient: @unchecked Sendable {
             case "function_call":
                 guard let name = item["name"] as? String else { continue }
                 let callID = (item["call_id"] as? String) ?? (item["id"] as? String) ?? "call_\(UUID().uuidString.prefix(12))"
-                calls.append(ACTAAgentFunctionCall(callID: callID, name: name, argumentsJSON: (item["arguments"] as? String) ?? "{}"))
+                let raw = (item["arguments"] as? String) ?? ""
+                calls.append(ACTAAgentFunctionCall(callID: callID, name: name, argumentsJSON: raw))
             case "message", nil:
                 for part in (item["content"] as? [[String: Any]]) ?? [] {
                     if let type = part["type"] as? String, type != "output_text", type != "text" { continue }
@@ -1402,23 +1509,44 @@ public final class ACTAAIClient: @unchecked Sendable {
             let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             return (trimmed.isEmpty ? nil : trimmed, [])
         }
-        func makeCall(_ entry: [String: Any]) -> ACTAAgentFunctionCall? {
+        func makeCall(_ entry: [String: Any], rawEntry: String?) -> ACTAAgentFunctionCall? {
             guard let name = (entry["name"] as? String) ?? (entry["tool"] as? String) else { return nil }
             let args = entry["arguments"] ?? entry["args"] ?? [String: Any]()
             let argsJSON: String
             if let str = args as? String {
                 argsJSON = str
-            } else if let data = try? JSONSerialization.data(withJSONObject: args) {
+            } else if JSONSerialization.isValidJSONObject(args),
+                      let data = try? JSONSerialization.data(withJSONObject: args) {
                 argsJSON = String(decoding: data, as: UTF8.self)
             } else {
                 argsJSON = "{}"
             }
-            return ACTAAgentFunctionCall(callID: "call_local_\(UUID().uuidString.prefix(12))", name: name, argumentsJSON: argsJSON)
+            var rawJSON = ""
+            if let rawEntry {
+                var reader = ACTARawJSONRanges(rawEntry)
+                if let fields = reader.object() {
+                    if let literal = fields["arguments"] ?? fields["args"] {
+                        rawJSON = (args as? String) ?? literal
+                    }
+                }
+            }
+            return ACTAAgentFunctionCall(callID: "call_local_\(UUID().uuidString.prefix(12))", name: name,
+                                         argumentsJSON: argsJSON, rawArgumentsJSON: rawJSON)
         }
         if let list = obj["tool_calls"] as? [[String: Any]] {
-            return (nil, list.compactMap(makeCall))
+            var reader = ACTARawJSONRanges(cleaned)
+            let rawList: [String]?
+            if let rawArray = reader.object()?["tool_calls"] {
+                var arrayReader = ACTARawJSONRanges(rawArray)
+                rawList = arrayReader.array()
+            } else {
+                rawList = nil
+            }
+            return (nil, list.enumerated().compactMap { index, entry in
+                makeCall(entry, rawEntry: rawList.flatMap { index < $0.count ? $0[index] : nil })
+            })
         }
-        if let call = makeCall(obj) {
+        if let call = makeCall(obj, rawEntry: cleaned) {
             return (nil, [call])
         }
         if obj["answerMarkdown"] != nil {

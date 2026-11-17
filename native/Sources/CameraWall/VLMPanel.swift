@@ -154,7 +154,8 @@ struct VLMPanel: View {
                                 .font(.system(size: ACTAType.metadata))
                                 .foregroundStyle(.secondary)
                                 .textSelection(.enabled)
-                            DisclosureGroup {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Action details")
                                 let values = actaReviewArguments(action.actionType, action.parameters)
                                 ForEach(values.keys.sorted(), id: \.self) { key in
                                     Text(verbatim: "\(key): \(values[key] ?? "")")
@@ -162,8 +163,6 @@ struct VLMPanel: View {
                                         .textSelection(.enabled)
                                         .fixedSize(horizontal: false, vertical: true)
                                 }
-                            } label: {
-                                Text("Action details")
                             }
                             .accessibilityIdentifier("acta-action-details-\(action.actionID)")
                             HStack {

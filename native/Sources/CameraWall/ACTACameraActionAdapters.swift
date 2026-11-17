@@ -14,7 +14,7 @@ func actaActionAuditArguments(_ actionID: String, _ arguments: [String: String])
     if actionID == "incident.list", arguments["query"] != nil {
         result["query"] = "[redacted]"
     }
-    if ["alert.vlm_review", "incident.update_note"].contains(actionID), arguments["note"] != nil {
+    if ["alert.vlm_review", "incident.update_note", "incident.transition_status"].contains(actionID), arguments["note"] != nil {
         result["note"] = "[redacted]"
     }
     return result
@@ -22,7 +22,7 @@ func actaActionAuditArguments(_ actionID: String, _ arguments: [String: String])
 
 func actaReviewArguments(_ actionID: String, _ arguments: [String: String]) -> [String: String] {
     var result = actaAuditArguments(arguments)
-    if ["alert.vlm_review", "incident.update_note"].contains(actionID), let note = arguments["note"] {
+    if ["alert.vlm_review", "incident.update_note", "incident.transition_status"].contains(actionID), let note = arguments["note"] {
         result["note"] = note
     }
     return result
@@ -356,7 +356,7 @@ struct WallAnalyticsSettingsProvider: ACTAVideoAnalyticsSettingsProvider {
 // MARK: - Registration Helper
 
 @MainActor
-func registerAllWallActions(registry: ACTAActionRegistry, model: WallModel) async {
+func registerAllWallActions(registry: ACTAActionRegistry, model: WallModel, languageSettings: LanguageSettings? = nil) async {
     await registry.unregister(actionID: "camera.reconnect")
     for kind in WallCameraConfigurationAction.Kind.allCases {
         await registry.register(WallCameraConfigurationAction(kind: kind, model: model))
@@ -377,7 +377,11 @@ func registerAllWallActions(registry: ACTAActionRegistry, model: WallModel) asyn
     for kind in WallSettingsAction.Kind.allCases {
         await registry.register(WallSettingsAction(kind: kind, model: model))
     }
-    await registry.register(SettingsUpdateSystemAction(settingsProvider: settings))
+    if let languageSettings {
+        await registry.register(ACTASystemLanguageAction(settingsProvider: settings, languageSettings: languageSettings))
+    } else {
+        await registry.register(SettingsUpdateSystemAction(settingsProvider: settings))
+    }
     await registry.register(SettingsUpdateFeatureTogglesAction(featureProvider: features))
     await registry.register(SettingsUpdatePermissionsAction(featureProvider: features))
 
@@ -398,6 +402,8 @@ func registerAllWallActions(registry: ACTAActionRegistry, model: WallModel) asyn
     await registry.register(ACTAAlertMutationAction(kind: .acknowledge, provider: alertMutations))
     await registry.register(ACTAAlertMutationAction(kind: .review, provider: alertMutations))
     await registry.register(ACTAISAPIReadAction(provider: ACTAWallISAPIReadProvider(model: model)))
+    await registry.register(ACTAReIDCalibrationAction(provider: ACTAWallReIDCalibrationProvider(model: model)))
+    await registry.register(ACTARunHealthCheckAction(model: model))
 
     await registry.register(WallNarrativeAction(pin: true, model: model))
     await registry.register(WallNarrativeAction(pin: false, model: model))

@@ -28,6 +28,12 @@ public struct OperationsAlertReview: Codable, Equatable, Identifiable, Sendable 
     }
 }
 
+/// A single database snapshot of alert reviews and acknowledgements.
+public struct OperationsAlertReadState: Sendable {
+    public let reviews: [UUID: OperationsAlertReview]
+    public let acknowledgements: [UUID: Date]
+}
+
 public struct CameraFeatureJob: Codable, Equatable, Identifiable, Sendable {
     public let id: UUID
     public let featureID: CameraFeatureID
@@ -985,6 +991,57 @@ public final class CameraFeatureStore: @unchecked Sendable {
                     throw databaseError()
                 }
                 acknowledgements[alertID] = Date(timeIntervalSince1970: sqlite3_column_double(statement, 1))
+            }
+        }
+    }
+
+    /// Reads both tables in one SQLite statement, without purging or modifying the store.
+    /// Legacy acknowledgements without a review are retained, as in purgeExpired.
+    public func readAlertState(retentionDays: Int, at time: Date = Date(), includeExpired: Bool = false) throws -> OperationsAlertReadState {
+        guard (1...365).contains(retentionDays), time.timeIntervalSince1970.isFinite else {
+            throw ConfigurationError.invalid("Invalid alert retention or snapshot time.")
+        }
+        return try locked {
+            let statement = try prepare("""
+                SELECT r.alert_id, r.document_json, a.acknowledged_at
+                FROM operations_alert_reviews r
+                LEFT JOIN operations_alert_acknowledgements a ON a.alert_id = r.alert_id
+                UNION ALL
+                SELECT a.alert_id, NULL, a.acknowledged_at
+                FROM operations_alert_acknowledgements a
+                WHERE NOT EXISTS (SELECT 1 FROM operations_alert_reviews r WHERE r.alert_id = a.alert_id)
+                """)
+            defer { sqlite3_finalize(statement) }
+            let cutoff = time.addingTimeInterval(-Double(retentionDays) * 86_400)
+            var reviews: [UUID: OperationsAlertReview] = [:]
+            var acknowledgements: [UUID: Date] = [:]
+            var seen = Set<UUID>()
+            while true {
+                let step = sqlite3_step(statement)
+                if step == SQLITE_DONE {
+                    return OperationsAlertReadState(reviews: reviews, acknowledgements: acknowledgements)
+                }
+                guard step == SQLITE_ROW, let alertID = UUID(uuidString: text(statement, 0)),
+                      seen.insert(alertID).inserted else {
+                    throw CameraFeatureStoreError.database("Invalid alert snapshot.")
+                }
+                if sqlite3_column_type(statement, 1) != SQLITE_NULL {
+                    guard let review = try? JSONDecoder().decode(OperationsAlertReview.self, from: Data(text(statement, 1).utf8)),
+                          review.alertID == alertID, review.updatedAt.timeIntervalSince1970.isFinite else {
+                        throw CameraFeatureStoreError.database("Invalid alert snapshot.")
+                    }
+                    // purgeExpired removes acknowledgements for expired reviews, but not legacy rows.
+                    if !includeExpired && review.updatedAt < cutoff { continue }
+                    reviews[alertID] = review
+                }
+                if sqlite3_column_type(statement, 2) != SQLITE_NULL {
+                    guard [SQLITE_INTEGER, SQLITE_FLOAT].contains(sqlite3_column_type(statement, 2)) else {
+                        throw CameraFeatureStoreError.database("Invalid alert snapshot.")
+                    }
+                    let value = sqlite3_column_double(statement, 2)
+                    guard value.isFinite else { throw CameraFeatureStoreError.database("Invalid alert snapshot.") }
+                    acknowledgements[alertID] = Date(timeIntervalSince1970: value)
+                }
             }
         }
     }

@@ -785,3 +785,11 @@
 "Get Incident" = "Get Incident";
 
 "INVALID_ARGUMENT: Expected only incident_id as a UUID." = "INVALID_ARGUMENT: Expected only incident_id as a UUID.";
+
+"Invalid alert retention or snapshot time." = "Invalid alert retention or snapshot time.";
+"INVALID_ARGUMENT: Invalid alert list parameters." = "INVALID_ARGUMENT: Invalid alert list parameters.";
+"List VLM alerts" = "List VLM alerts";
+"Read ISAPI events" = "Read ISAPI events";
+"INVALID_ARGUMENT: Unknown parameter." = "INVALID_ARGUMENT: Unknown parameter.";
+"INVALID_ARGUMENT: camera_id must be a UUID." = "INVALID_ARGUMENT: camera_id must be a UUID.";
+"INVALID_ARGUMENT: limit must be an integer in 1...100." = "INVALID_ARGUMENT: limit must be an integer in 1...100.";

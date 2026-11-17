@@ -393,6 +393,8 @@ func registerAllWallActions(registry: ACTAActionRegistry, model: WallModel) asyn
     await registry.register(ACTAIncidentGetAction(provider: ACTAEngineIncidentReadProvider(engine: model.localAnalyticsEngine)))
     await registry.register(WallOperationalAction(specification: IncidentTransitionStatusAction(), model: model))
     await registry.register(WallOperationalAction(specification: IncidentDeleteEvidenceAction(), model: model))
+    await registry.register(ACTAAlertListAction(provider: ACTAWallAlertReadProvider(model: model)))
+    await registry.register(ACTAISAPIReadAction(provider: ACTAWallISAPIReadProvider(model: model)))
 
     await registry.register(WallNarrativeAction(pin: true, model: model))
     await registry.register(WallNarrativeAction(pin: false, model: model))

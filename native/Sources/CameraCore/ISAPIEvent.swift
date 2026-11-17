@@ -156,14 +156,24 @@ public enum ISAPIEventStore {
 
     public static func load(from url: URL = defaultURL, now: Date = Date()) throws -> [ISAPIEventRecord] {
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
-        let cutoff = now.addingTimeInterval(-Double(retentionDays) * 24 * 60 * 60)
         let decoded = try JSONDecoder().decode([ISAPIEventRecord].self, from: Data(contentsOf: url))
-        let retained = Array(decoded
+        let retained = retainedRecords(decoded, now: now)
+        if retained.count != decoded.count { try save(retained, to: url, now: now) }
+        return retained
+    }
+
+    /// Reads an existing history without pruning or creating files. A missing file throws.
+    public static func readSnapshot(from url: URL = defaultURL, now: Date = Date()) throws -> [ISAPIEventRecord] {
+        let decoded = try JSONDecoder().decode([ISAPIEventRecord].self, from: Data(contentsOf: url))
+        return retainedRecords(decoded, now: now)
+    }
+
+    public static func retainedRecords(_ events: [ISAPIEventRecord], now: Date) -> [ISAPIEventRecord] {
+        let cutoff = now.addingTimeInterval(-Double(retentionDays) * 24 * 60 * 60)
+        return Array(events
             .filter { $0.receivedAt >= cutoff }
             .sorted { $0.receivedAt > $1.receivedAt }
             .prefix(maximumRecords))
-        if retained.count != decoded.count { try save(retained, to: url, now: now) }
-        return retained
     }
 
     public static func save(_ events: [ISAPIEventRecord], to url: URL = defaultURL, now: Date = Date()) throws {

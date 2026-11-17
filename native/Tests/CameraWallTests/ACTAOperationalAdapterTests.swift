@@ -156,6 +156,197 @@ final class ACTAOperationalAdapterTests: XCTestCase {
         XCTAssertFalse(unknown.success)
     }
 
+    func testAlertAndISAPIReadsUseVerifiedGUIState() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let prefs = root.appendingPathComponent("features.json")
+        try CameraFeaturePreferencesStore.save(CameraFeaturePreferences(enabledFeatures: [.operationalAlerts]), to: prefs)
+        let cameraID = UUID()
+        let alert = VLMAlert(cameraID: cameraID, cameraName: "Fixture", condition: "Fixture", evidence: "private")
+        let event = ISAPIEventRecord(cameraID: cameraID, cameraName: "Fixture",
+            payload: ISAPIEventPayload(eventType: "VMD", eventState: "active", channelID: nil,
+                                       eventDescription: "private", occurredAt: nil))
+        let alertsURL = root.appendingPathComponent("vlm-alerts.json")
+        let eventsURL = root.appendingPathComponent("isapi-events.json")
+        try VLMStore.save([alert], to: alertsURL)
+        try ISAPIEventStore.save([event], to: eventsURL)
+        let model = WallModel(configURL: root.appendingPathComponent("cameras.json"),
+            trackingStoreURL: root.appendingPathComponent("tracks.sqlite"),
+            featureCoordinator: CameraFeatureCoordinator(preferencesURL: prefs, databaseURL: root.appendingPathComponent("features.sqlite")),
+            analyticsDirectoryURL: root.appendingPathComponent("analytics"),
+            cameraMemoryStore: CameraMemoryStore(url: root.appendingPathComponent("frames")),
+            operationsWatchURL: root.appendingPathComponent("watches.json"))
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let registry = ACTAActionRegistry()
+        await registerAllWallActions(registry: registry, model: model)
+        let tools = try await ACTAAnalyticsCoordinator.registryTools(registry: registry)
+        XCTAssertTrue(tools.contains { $0.name == "acta__alert__vlm_list" })
+        XCTAssertTrue(tools.contains { $0.name == "acta__monitor__get_isapi_events" })
+        let alerts = try await registry.execute(actionID: "alert.vlm_list", parameters: [:])
+        let events = try await registry.execute(actionID: "monitor.get_isapi_events", parameters: [:])
+        XCTAssertTrue(alerts.success, alerts.summary)
+        XCTAssertTrue(alerts.outputJSON.contains(alert.id.uuidString))
+        XCTAssertTrue(events.success, events.summary)
+        XCTAssertTrue(events.outputJSON.contains(event.id.uuidString))
+        XCTAssertFalse(alerts.outputJSON.contains("private"))
+        XCTAssertFalse(events.outputJSON.contains("private"))
+
+        let expired = try await registry.execute(actionID: "monitor.get_isapi_events", parameters: [:],
+            context: ACTAActionContext(now: Date().addingTimeInterval(31 * 86_400)))
+        XCTAssertTrue(expired.success, expired.summary)
+        let expiredOutput = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(expired.outputJSON.utf8)) as? [String: Any])
+        XCTAssertEqual((expiredOutput["events"] as? [Any])?.count, 0)
+        try model.setFeatureEnabled(.operationalAlerts, enabled: false)
+        let disabled = try await registry.execute(actionID: "alert.vlm_list", parameters: [:])
+        XCTAssertFalse(disabled.success)
+        try model.setFeatureEnabled(.operationalAlerts, enabled: true)
+        let reenabled = try await registry.execute(actionID: "alert.vlm_list", parameters: [:])
+        XCTAssertTrue(reenabled.success, reenabled.summary)
+
+        model.vlmAlerts = []
+        model.isapiEvents = []
+        let staleAlerts = try await registry.execute(actionID: "alert.vlm_list", parameters: [:])
+        let staleEvents = try await registry.execute(actionID: "monitor.get_isapi_events", parameters: [:])
+        XCTAssertFalse(staleAlerts.success)
+        XCTAssertFalse(staleEvents.success)
+        model.vlmAlerts = [alert]
+        model.isapiEvents = [event]
+        try Data("{broken".utf8).write(to: alertsURL)
+        try Data("{broken".utf8).write(to: eventsURL)
+        let brokenAlerts = try await registry.execute(actionID: "alert.vlm_list", parameters: [:])
+        let brokenEvents = try await registry.execute(actionID: "monitor.get_isapi_events", parameters: [:])
+        XCTAssertFalse(brokenAlerts.success)
+        XCTAssertFalse(brokenEvents.success)
+    }
+
+    func testReadSourcesStayUnavailableAfterFailedStartupEvenIfFilesReappear() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let prefs = root.appendingPathComponent("features.json")
+        try CameraFeaturePreferencesStore.save(CameraFeaturePreferences(enabledFeatures: [.operationalAlerts]), to: prefs)
+        let alertsURL = root.appendingPathComponent("vlm-alerts.json")
+        let eventsURL = root.appendingPathComponent("isapi-events.json")
+        try Data("{broken".utf8).write(to: alertsURL)
+        try Data("{broken".utf8).write(to: eventsURL)
+        let model = WallModel(configURL: root.appendingPathComponent("cameras.json"),
+            trackingStoreURL: root.appendingPathComponent("tracks.sqlite"),
+            featureCoordinator: CameraFeatureCoordinator(preferencesURL: prefs, databaseURL: root.appendingPathComponent("features.sqlite")),
+            analyticsDirectoryURL: root.appendingPathComponent("analytics"),
+            cameraMemoryStore: CameraMemoryStore(url: root.appendingPathComponent("frames")),
+            operationsWatchURL: root.appendingPathComponent("watches.json"))
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        try Data("[]".utf8).write(to: alertsURL)
+        try Data("[]".utf8).write(to: eventsURL)
+        let registry = ACTAActionRegistry()
+        await registerAllWallActions(registry: registry, model: model)
+        let alerts = try await registry.execute(actionID: "alert.vlm_list", parameters: [:])
+        let events = try await registry.execute(actionID: "monitor.get_isapi_events", parameters: [:])
+        XCTAssertFalse(alerts.success)
+        XCTAssertFalse(events.success)
+    }
+
+    func testExpiredAlertReviewDoesNotLeaveStaleAcknowledgementInGUI() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let prefsURL = root.appendingPathComponent("features.json")
+        let preferences = CameraFeaturePreferences(enabledFeatures: [.operationalAlerts], retentionDays: 1)
+        try CameraFeaturePreferencesStore.save(preferences, to: prefsURL)
+        let alert = VLMAlert(cameraID: UUID(), cameraName: "Fixture", condition: "Fixture", evidence: "Fixture")
+        try VLMStore.save([alert], to: root.appendingPathComponent("vlm-alerts.json"))
+        let databaseURL = root.appendingPathComponent("features.sqlite")
+        let store = try CameraFeatureStore(url: databaseURL)
+        _ = try store.reviewOperationsAlert(alertID: alert.id, status: .acknowledged, preferences: preferences,
+                                            at: Date().addingTimeInterval(-2 * 86_400))
+        let model = WallModel(configURL: root.appendingPathComponent("cameras.json"),
+            trackingStoreURL: root.appendingPathComponent("tracks.sqlite"),
+            featureCoordinator: CameraFeatureCoordinator(preferencesURL: prefsURL, databaseURL: databaseURL),
+            analyticsDirectoryURL: root.appendingPathComponent("analytics"),
+            cameraMemoryStore: CameraMemoryStore(url: root.appendingPathComponent("frames")),
+            operationsWatchURL: root.appendingPathComponent("watches.json"))
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        XCTAssertNil(model.operationsAlertReviews[alert.id])
+        XCTAssertNil(model.operationsAlertAcknowledgements[alert.id])
+        let registry = ACTAActionRegistry()
+        await registerAllWallActions(registry: registry, model: model)
+        let result = try await registry.execute(actionID: "alert.vlm_list", parameters: ["unacknowledged_only": "true"])
+        XCTAssertTrue(result.success, result.summary)
+        XCTAssertTrue(result.outputJSON.contains(alert.id.uuidString))
+    }
+
+    func testAlertsBecomeReadableWhenEnabledAfterStartup() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let prefsURL = root.appendingPathComponent("features.json")
+        try CameraFeaturePreferencesStore.save(CameraFeaturePreferences(), to: prefsURL)
+        try VLMStore.save([], to: root.appendingPathComponent("vlm-alerts.json"))
+        let model = WallModel(configURL: root.appendingPathComponent("cameras.json"),
+            trackingStoreURL: root.appendingPathComponent("tracks.sqlite"),
+            featureCoordinator: CameraFeatureCoordinator(preferencesURL: prefsURL, databaseURL: root.appendingPathComponent("features.sqlite")),
+            analyticsDirectoryURL: root.appendingPathComponent("analytics"),
+            cameraMemoryStore: CameraMemoryStore(url: root.appendingPathComponent("frames")),
+            operationsWatchURL: root.appendingPathComponent("watches.json"))
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let registry = ACTAActionRegistry()
+        await registerAllWallActions(registry: registry, model: model)
+        let disabled = try await registry.execute(actionID: "alert.vlm_list", parameters: [:])
+        XCTAssertFalse(disabled.success)
+        try model.setFeatureEnabled(.operationalAlerts, enabled: true)
+        let enabled = try await registry.execute(actionID: "alert.vlm_list", parameters: [:])
+        XCTAssertTrue(enabled.success, enabled.summary)
+    }
+
+    func testAlertReadIgnoresUnrelatedWatchLoadFailure() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let prefsURL = root.appendingPathComponent("features.json")
+        try CameraFeaturePreferencesStore.save(CameraFeaturePreferences(enabledFeatures: [.operationalAlerts]), to: prefsURL)
+        try VLMStore.save([], to: root.appendingPathComponent("vlm-alerts.json"))
+        let watchURL = root.appendingPathComponent("watches.json")
+        let broken = Data("{invalid".utf8)
+        try broken.write(to: watchURL)
+        let model = WallModel(configURL: root.appendingPathComponent("cameras.json"),
+            trackingStoreURL: root.appendingPathComponent("tracks.sqlite"),
+            featureCoordinator: CameraFeatureCoordinator(preferencesURL: prefsURL, databaseURL: root.appendingPathComponent("features.sqlite")),
+            analyticsDirectoryURL: root.appendingPathComponent("analytics"),
+            cameraMemoryStore: CameraMemoryStore(url: root.appendingPathComponent("frames")),
+            operationsWatchURL: watchURL)
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let registry = ACTAActionRegistry()
+        await registerAllWallActions(registry: registry, model: model)
+        let result = try await registry.execute(actionID: "alert.vlm_list", parameters: [:])
+        XCTAssertTrue(result.success, result.summary)
+        XCTAssertEqual(try Data(contentsOf: watchURL), broken)
+    }
+
+    func testAlertReadMatchesGUIAfterRetentionPolicyChange() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let prefsURL = root.appendingPathComponent("features.json")
+        let preferences = CameraFeaturePreferences(enabledFeatures: [.operationalAlerts], retentionDays: 30)
+        try CameraFeaturePreferencesStore.save(preferences, to: prefsURL)
+        let alert = VLMAlert(cameraID: UUID(), cameraName: "Fixture", condition: "Fixture", evidence: "Fixture")
+        try VLMStore.save([alert], to: root.appendingPathComponent("vlm-alerts.json"))
+        let databaseURL = root.appendingPathComponent("features.sqlite")
+        let store = try CameraFeatureStore(url: databaseURL)
+        _ = try store.reviewOperationsAlert(alertID: alert.id, status: .acknowledged, preferences: preferences,
+                                            at: Date().addingTimeInterval(-2 * 86_400))
+        let model = WallModel(configURL: root.appendingPathComponent("cameras.json"),
+            trackingStoreURL: root.appendingPathComponent("tracks.sqlite"),
+            featureCoordinator: CameraFeatureCoordinator(preferencesURL: prefsURL, databaseURL: databaseURL),
+            analyticsDirectoryURL: root.appendingPathComponent("analytics"),
+            cameraMemoryStore: CameraMemoryStore(url: root.appendingPathComponent("frames")),
+            operationsWatchURL: root.appendingPathComponent("watches.json"))
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        var updated = model.featurePreferences
+        updated.retentionDays = 1
+        try model.saveFeaturePolicy(updated)
+        let registry = ACTAActionRegistry()
+        await registerAllWallActions(registry: registry, model: model)
+        let result = try await registry.execute(actionID: "alert.vlm_list", parameters: [:])
+        XCTAssertTrue(result.success, result.summary)
+        XCTAssertTrue(result.outputJSON.contains("\"status\":\"acknowledged\""))
+    }
+
     func testEvidenceDeletionRequiresApprovalAndPreservesIncidentRecord() async throws {
         let (root, model) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }

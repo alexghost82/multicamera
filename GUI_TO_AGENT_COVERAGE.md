@@ -8,7 +8,7 @@ Version: 1.0.0-baseline
 
 ## 1. Executive Summary
 
-Current implementation checkpoint: **54 advertised actions**, with row-specific limitations below. The original baseline inventory is not proof of exhaustive UI coverage.
+Current implementation checkpoint: **56 advertised actions**, with row-specific limitations below. The original baseline inventory is not proof of exhaustive UI coverage.
 
 This working inventory maps currently identified UI/domain operations to agent action contracts. Exhaustive control-by-control parity has not been established.
 
@@ -81,7 +81,7 @@ This working inventory maps currently identified UI/domain operations to agent a
 | `incident.transition_status` | `SafetyIncidentDetailView` | `LocalVideoAnalyticsEngine` | `incidentID: String, status: String ("acknowledged", "confirmed", "resolved", "false_positive", "suppressed", "active"), note: String?, suppressDurationSec: Int?` | `Reversible` | Auto (Confirm for `false_positive`) | `testIncidentTransitionAndQueryUsePersistentDomainService` | `PARTIAL — STATUS/NOTE; CUSTOM SUPPRESSION PENDING` |
 | `incident.update_note` | `SafetyIncidentDetailView` | `LocalVideoAnalyticsEngine` | `incidentID: String, note: String` | `Reversible` | Auto | `testIncidentUpdateNote` | `PLANNED` |
 | `incident.delete_evidence` | `SafetyIncidentDetailView` | `LocalVideoAnalyticsEngine` | `incidentID: String` | `Destructive` | **Confirm** | `testEvidenceDeletionRequiresApprovalAndPreservesIncidentRecord` | `IMPLEMENTED — SERVICE/CONFIRMATION TEST` |
-| `alert.vlm_list` | Events / Timeline | `WallModel` | `cameraID: String?, unacknowledgedOnly: Bool?` | `Inspect` | Auto | `testAlertVLMList` | `PLANNED` |
+| `alert.vlm_list` | Events / Timeline | `WallModel` | `camera_id: UUID?, unacknowledged_only: Bool?, limit: Int? (1...100)` | `Inspect` | Auto | `ACTAAlertReadActionsTests`, `testAlertAndISAPIReadsUseVerifiedGUIState` | `PARTIAL — MINIMAL METADATA; SOURCE MUST MATCH GUI` |
 | `alert.vlm_acknowledge` | Events / Alerts Queue | `WallModel` | `alertID: String, acknowledged: Bool` | `Reversible` | Auto | `testAlertVLMAcknowledge` | `PLANNED` |
 | `alert.vlm_review` | Events / Alerts Queue | `WallModel` | `alertID: String, status: String, priority: String?, note: String?` | `Reversible` | Auto | `testAlertVLMReview` | `PLANNED` |
 | `alert.clear_all` | Events / Alerts Queue | `WallModel` | `none` | `Destructive` | **Confirm** | `testAlertClearAll` | `PLANNED` |
@@ -148,7 +148,7 @@ This working inventory maps currently identified UI/domain operations to agent a
 | `watch.list` | EventsSettings / WatchRules | `WallModel` | `none` | `Inspect` | Auto | `testWatchActionsShareGUIServiceAndVerifyDisk` | `IMPLEMENTED — SERVICE TEST` |
 | `watch.create` | EventsSettings / WatchRules | `WallModel` | `text: String, cameraIDs: [String]?, ttlMinutes: Int?, forever: Bool?` | `Reversible` | Auto | `testWatchActionsShareGUIServiceAndVerifyDisk` | `IMPLEMENTED — SERVICE/VALIDATION TEST` |
 | `watch.cancel` | EventsSettings / WatchRules | `WallModel` | `watchID: String` | `Reversible` | Auto | `testWatchActionsShareGUIServiceAndVerifyDisk` | `IMPLEMENTED — SERVICE TEST` |
-| `monitor.get_isapi_events` | `ISAPIEventMonitor` | `WallModel` | `cameraID: String?, limit: Int?` | `Inspect` | Auto | `testMonitorGetISAPIEvents` | `PLANNED` |
+| `monitor.get_isapi_events` | `ISAPIEventMonitor` | `WallModel` | `camera_id: UUID?, limit: Int? (1...100)` | `Inspect` | Auto | `ACTAISAPIReadActionsTests`, `testAlertAndISAPIReadsUseVerifiedGUIState` | `PARTIAL — EXISTING LOCAL HISTORY; NO LIVE MONITOR VERIFICATION` |
 | `monitor.clear_isapi_events`| `ISAPIEventMonitor` | `WallModel` | `none` | `Destructive` | Auto | `testMonitorClearISAPIEvents` | `PLANNED` |
 | `monitor.get_operational_events`| Unified Timeline | `ACTAAnalyticsCoordinator` | `cameraID: String?, kind: String?, limit: Int?` | `Inspect` | Auto | `testMonitorGetOperationalEvents` | `EXISTING` |
 | `monitor.live_look` | Unified Chat | `ACTAAnalyticsCoordinator` | `camera: String?` | `Inspect` | Auto | `testMonitorLiveLook` | `EXISTING` |
@@ -343,7 +343,17 @@ Invalid IDs, absent incidents, unavailable providers and storage errors are dist
 Synthetic and temporary-storage tests cover discovery, real domain-service integration,
 redaction and corrupt incident storage. GUI detail parity and real Qwen remain unverified.
 
-`alert.vlm_list` and `monitor.get_isapi_events` remain planned: their current cached
-sources do not reliably distinguish a failed load from an empty collection, and some
-existing retrieval paths can write or purge data. They require a separate safe-source
-design before implementation.
+### Alert and ISAPI inspection checkpoint
+
+`alert.vlm_list` and `monitor.get_isapi_events` expose minimal metadata through
+read-only snapshots. The actions require successful initial loading and agreement
+between GUI state and persisted sources; missing files and inconsistencies fail closed.
+Alerts additionally require an enabled, already-open review store. Failed initialization
+or tracked save errors remain unavailable until restart; a successful enable can establish
+review state only if there was no prior error. A missing history file is not treated as an
+empty first launch. ISAPI applies the same retention to the persisted and GUI snapshots
+before comparing them. Source reads do not purge or save; agent tool audit still writes
+as before. Alert comparison includes retained GUI entries until the normal GUI cleanup
+runs; changing retention alone does not silently alter the GUI snapshot. No cross-process
+atomicity, live cameras, real Qwen, complete
+GUI detail parity or automatic recovery is claimed.

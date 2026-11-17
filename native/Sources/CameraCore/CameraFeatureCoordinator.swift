@@ -1,5 +1,10 @@
 import Foundation
 
+public enum OpenAlertStateError: Error {
+    case unavailable
+    case featureDisabled
+}
+
 public final class CameraFeatureCoordinator: @unchecked Sendable {
     private let preferencesURL: URL
     private let databaseURL: URL
@@ -86,6 +91,18 @@ public final class CameraFeatureCoordinator: @unchecked Sendable {
 
     public func operationsAlertAcknowledgements() throws -> [UUID: Date] {
         try locked { try openStore().operationsAlertAcknowledgements() }
+    }
+
+    /// Never opens a store or loads preferences; unavailable is not an empty result.
+    public func readOpenAlertState(at time: Date = Date(), includeExpired: Bool = false) throws -> OperationsAlertReadState {
+        try locked {
+            guard let preferences = cachedPreferences else { throw OpenAlertStateError.unavailable }
+            guard preferences.enabledFeatures.contains(.operationalAlerts) else {
+                throw OpenAlertStateError.featureDisabled
+            }
+            guard let store else { throw OpenAlertStateError.unavailable }
+            return try store.readAlertState(retentionDays: preferences.retentionDays, at: time, includeExpired: includeExpired)
+        }
     }
 
     public func operationsAlertReviews() throws -> [OperationsAlertReview] {

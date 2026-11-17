@@ -375,6 +375,10 @@ final class WallModel: ObservableObject {
     @Published var vlmAlerts: [VLMAlert] = []
     @Published var operationsAlertAcknowledgements: [UUID: Date] = [:]
     @Published var operationsAlertReviews: [UUID: OperationsAlertReview] = [:]
+    private(set) var actaAlertReviewsLoaded = false
+    private var actaAlertReviewsFailed = false
+    private(set) var actaVLMAlertsLoaded = false
+    private(set) var actaISAPIEventsLoaded = false
     @Published var operationsWatchRules: [OperationsWatchRule] = []
     @Published var localMonitorSnapshot = LocalMonitorSnapshot.empty
     @Published var localMonitorHistory: [LocalMonitorEvent] = []
@@ -602,14 +606,23 @@ final class WallModel: ObservableObject {
         }
         if featurePreferences.enabledFeatures.contains(.operationalAlerts) {
             do {
-                operationsAlertAcknowledgements = try featureCoordinator.operationsAlertAcknowledgements()
                 operationsAlertReviews = Dictionary(uniqueKeysWithValues: try featureCoordinator.operationsAlertReviews().map { ($0.alertID, $0) })
+                operationsAlertAcknowledgements = try featureCoordinator.operationsAlertAcknowledgements()
+                actaAlertReviewsLoaded = true
+            }
+            catch {
+                actaAlertReviewsFailed = true
+                notice = "Local alert acknowledgement state could not be loaded"
+            }
+            do {
                 operationsWatchRules = try OperationsWatchStore.load(from: operationsWatchURL)
                 _ = try alertClipStore.clips()
-            }
-            catch { notice = "Local alert acknowledgement state could not be loaded" }
+            } catch { notice = "Local alert acknowledgement state could not be loaded" }
         }
-        do { isapiEvents = try ISAPIEventStore.load(from: isapiEventsURL) }
+        do {
+            isapiEvents = try ISAPIEventStore.load(from: isapiEventsURL)
+            actaISAPIEventsLoaded = true
+        }
         catch { notice = "ISAPI event history is unavailable" }
         do {
             if FileManager.default.fileExists(atPath: configURL.path) {
@@ -629,6 +642,7 @@ final class WallModel: ObservableObject {
             try preferences.validate()
             vlmPreferences = preferences
             vlmAlerts = try VLMStore.loadAlerts(from: vlmAlertsURL)
+            actaVLMAlertsLoaded = true
         } catch {
             notice = "VLM settings could not be loaded; defaults are active"
         }
@@ -1282,6 +1296,10 @@ final class WallModel: ObservableObject {
     var isapiEventsURL: URL { configURL.deletingLastPathComponent().appendingPathComponent("isapi-events.json") }
     var trackResearchURL: URL { configURL.deletingLastPathComponent().appendingPathComponent("track-research.json") }
 
+    func actaReadOpenAlertState() throws -> OperationsAlertReadState {
+        try featureCoordinator.readOpenAlertState(includeExpired: true)
+    }
+
     private func startISAPIEventMonitors() {
         for camera in config.cameras where camera.enabled && camera.localDeviceID == nil && camera.isapiEventsEnabled {
             guard isapiEventTasks[camera.id] == nil else { continue }
@@ -1308,13 +1326,19 @@ final class WallModel: ObservableObject {
             isapiEvents.removeLast(isapiEvents.count - ISAPIEventStore.maximumRecords)
         }
         do { try ISAPIEventStore.save(isapiEvents, to: isapiEventsURL) }
-        catch { notice = "ISAPI events could not be saved locally" }
+        catch {
+            actaISAPIEventsLoaded = false
+            notice = "ISAPI events could not be saved locally"
+        }
     }
 
     func clearISAPIEvents() {
         isapiEvents = []
         do { try ISAPIEventStore.save([], to: isapiEventsURL) }
-        catch { notice = "ISAPI events could not be cleared" }
+        catch {
+            actaISAPIEventsLoaded = false
+            notice = "ISAPI events could not be cleared"
+        }
     }
 
     private static func makeACTAAIConfiguration(
@@ -1487,15 +1511,23 @@ final class WallModel: ObservableObject {
         }
         if enabled, featureID == .operationalAlerts {
             do {
-                operationsAlertAcknowledgements = try featureCoordinator.operationsAlertAcknowledgements()
                 operationsAlertReviews = Dictionary(uniqueKeysWithValues: try featureCoordinator.operationsAlertReviews().map { ($0.alertID, $0) })
+                operationsAlertAcknowledgements = try featureCoordinator.operationsAlertAcknowledgements()
+                actaAlertReviewsLoaded = !actaAlertReviewsFailed
+            }
+            catch {
+                actaAlertReviewsLoaded = false
+                actaAlertReviewsFailed = true
+                notice = "Local alert acknowledgement state could not be loaded"
+            }
+            do {
                 operationsWatchRules = try OperationsWatchStore.load(from: operationsWatchURL)
                 _ = try alertClipStore.clips()
                 lastOperationsWatchCheck = -.infinity
-            }
-            catch { notice = "Local alert acknowledgement state could not be loaded" }
+            } catch { notice = "Local alert acknowledgement state could not be loaded" }
         }
         if !enabled, featureID == .operationalAlerts {
+            actaAlertReviewsLoaded = false
             operationsAlertAcknowledgements = [:]
             operationsAlertReviews = [:]
             operationsWatchRules = []
@@ -2058,14 +2090,21 @@ final class WallModel: ObservableObject {
         let clipIDs = vlmAlerts.compactMap(\.clipID)
         vlmAlerts = []
         do { try VLMStore.save(vlmAlerts, to: vlmAlertsURL) }
-        catch { notice = "Could not clear local VLM alerts" }
+        catch {
+            actaVLMAlertsLoaded = false
+            notice = "Could not clear local VLM alerts"
+        }
         for clipID in clipIDs { try? alertClipStore.delete(clipID) }
         if featurePreferences.enabledFeatures.contains(.operationalAlerts) {
             do {
                 try featureCoordinator.clearOperationsAlertAcknowledgements()
                 operationsAlertAcknowledgements = [:]
                 operationsAlertReviews = [:]
-            } catch { notice = "Could not clear local alert acknowledgements" }
+            } catch {
+                actaAlertReviewsLoaded = false
+                actaAlertReviewsFailed = true
+                notice = "Could not clear local alert acknowledgements"
+            }
         }
     }
 
@@ -2141,9 +2180,15 @@ final class WallModel: ObservableObject {
             alerts: vlmAlerts, reviews: operationsAlertReviews, acknowledgements: operationsAlertAcknowledgements
         )
         let effectivePriority = priority ?? operationsAlertReviews[alertID]?.priority ?? alert.priority
-        try featureCoordinator.reviewOperationsAlert(alertID: alertID, priority: effectivePriority, status: status, note: note)
-        operationsAlertAcknowledgements = try featureCoordinator.operationsAlertAcknowledgements()
-        operationsAlertReviews = Dictionary(uniqueKeysWithValues: try featureCoordinator.operationsAlertReviews().map { ($0.alertID, $0) })
+        do {
+            try featureCoordinator.reviewOperationsAlert(alertID: alertID, priority: effectivePriority, status: status, note: note)
+            operationsAlertReviews = Dictionary(uniqueKeysWithValues: try featureCoordinator.operationsAlertReviews().map { ($0.alertID, $0) })
+            operationsAlertAcknowledgements = try featureCoordinator.operationsAlertAcknowledgements()
+        } catch {
+            actaAlertReviewsLoaded = false
+            actaAlertReviewsFailed = true
+            throw error
+        }
         soundForNewCriticalAlerts(previous: previous)
     }
 
@@ -2713,7 +2758,10 @@ final class WallModel: ObservableObject {
                     self.vlmAlerts.insert(contentsOf: generatedAlerts.reversed(), at: 0)
                     if self.vlmAlerts.count > 100 { self.vlmAlerts.removeLast(self.vlmAlerts.count - 100) }
                     do { try VLMStore.save(self.vlmAlerts, to: self.vlmAlertsURL) }
-                    catch { self.notice = "VLM alerts could not be saved locally" }
+                    catch {
+                        self.actaVLMAlertsLoaded = false
+                        self.notice = "VLM alerts could not be saved locally"
+                    }
                     self.soundForNewCriticalAlerts(previous: previousCritical)
                 }
                 self.vlmStatus = scheduled ? "Scheduled analysis complete" : "Response received from local model"
@@ -3129,7 +3177,10 @@ final class WallModel: ObservableObject {
         ), at: 0)
         if vlmAlerts.count > 100 { vlmAlerts.removeLast(vlmAlerts.count - 100) }
         do { try VLMStore.save(vlmAlerts, to: vlmAlertsURL) }
-        catch { notice = "Local fall alerts could not be saved" }
+        catch {
+            actaVLMAlertsLoaded = false
+            notice = "Local fall alerts could not be saved"
+        }
         soundForNewCriticalAlerts(previous: previous)
     }
 
@@ -3168,7 +3219,10 @@ final class WallModel: ObservableObject {
         vlmAlerts.insert(contentsOf: alerts.reversed(), at: 0)
         if vlmAlerts.count > 100 { vlmAlerts.removeLast(vlmAlerts.count - 100) }
         do { try VLMStore.save(vlmAlerts, to: vlmAlertsURL) }
-        catch { notice = "Local crowd alerts could not be saved" }
+        catch {
+            actaVLMAlertsLoaded = false
+            notice = "Local crowd alerts could not be saved"
+        }
     }
 
     private func scheduleChronologicalMemory(now: TimeInterval) {
@@ -3397,7 +3451,11 @@ final class WallModel: ObservableObject {
         }
         if added {
             if vlmAlerts.count > 100 { vlmAlerts.removeLast(vlmAlerts.count - 100) }
-            try? VLMStore.save(vlmAlerts, to: vlmAlertsURL)
+            do { try VLMStore.save(vlmAlerts, to: vlmAlertsURL) }
+            catch {
+                actaVLMAlertsLoaded = false
+                notice = "VLM alerts could not be saved locally"
+            }
         }
     }
 
@@ -3827,12 +3885,20 @@ final class WallModel: ObservableObject {
                 rules: loadedRules, records: recentTracks, existingAlerts: vlmAlerts, at: checkedAt
             )
             guard result.changed || Set(loadedRules.map(\.id)) != Set(operationsWatchRules.map(\.id)) else { return }
-            if result.alerts != vlmAlerts { try VLMStore.save(result.alerts, to: vlmAlertsURL) }
+            if result.alerts != vlmAlerts {
+                do { try VLMStore.save(result.alerts, to: vlmAlertsURL) }
+                catch {
+                    actaVLMAlertsLoaded = false
+                    throw error
+                }
+            }
             try OperationsWatchStore.save(result.rules, to: operationsWatchURL)
             vlmAlerts = result.alerts
             operationsWatchRules = result.rules
             soundForNewCriticalAlerts(previous: previousCritical)
-        } catch { notice = "Local watch rules could not be evaluated" }
+        } catch {
+            notice = "Local watch rules could not be evaluated"
+        }
     }
 
     func runLocalOperationsMonitorCheck() {

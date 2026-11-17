@@ -1434,7 +1434,8 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
             "analytics.set_sampling_fps", "analytics.set_overlay", "analytics.set_camera_override",
             "analytics.set_restricted_zone", "analytics.remove_restricted_zone", "analytics.update_restricted_zone",
             "analytics.set_sensitivity_profile", "analytics.remove_camera_override", "incident.list", "incident.get", "incident.transition_status",
-            "watch.list", "watch.create", "watch.cancel", "memory.delete_frame", "incident.delete_evidence", "memory.toggle_pin", "memory.set_chapter_text", "mission.list", "mission.create", "mission.edit",
+            "watch.list", "watch.create", "watch.cancel", "memory.delete_frame", "incident.delete_evidence",
+            "alert.vlm_list", "monitor.get_isapi_events", "memory.toggle_pin", "memory.set_chapter_text", "mission.list", "mission.create", "mission.edit",
             "mission.delete", "mission.history", "mission.clear_consult", "mission.run_now", "mission.ask_consult"]
         return try await registry.allActions().filter { enabled.contains($0.id) }.map { action in
             var properties: [String: Any] = [:]

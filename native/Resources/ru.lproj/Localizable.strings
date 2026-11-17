@@ -1828,3 +1828,11 @@
 "Get Incident" = "Получить инцидент";
 
 "INVALID_ARGUMENT: Expected only incident_id as a UUID." = "INVALID_ARGUMENT: Ожидается только incident_id в формате UUID.";
+
+"Invalid alert retention or snapshot time." = "Неверный срок хранения оповещений или время снимка.";
+"INVALID_ARGUMENT: Invalid alert list parameters." = "INVALID_ARGUMENT: Неверные параметры списка оповещений.";
+"List VLM alerts" = "Показать оповещения VLM";
+"Read ISAPI events" = "Прочитать события ISAPI";
+"INVALID_ARGUMENT: Unknown parameter." = "INVALID_ARGUMENT: Неизвестный параметр.";
+"INVALID_ARGUMENT: camera_id must be a UUID." = "INVALID_ARGUMENT: camera_id должен быть UUID.";
+"INVALID_ARGUMENT: limit must be an integer in 1...100." = "INVALID_ARGUMENT: limit должен быть целым числом от 1 до 100.";

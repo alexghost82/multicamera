@@ -2097,8 +2097,26 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
                 outputDict["rows"] = rows
 
             default:
-                outputDict["status"] = "unknown_tool"
-                outputDict["available_tools"] = Self.agentTools.map(\.name)
+                if let _ = await ACTAActionRegistry.shared.action(for: toolName) {
+                    let actionContext = ACTAActionContext(threadID: threadID, initiator: "text_chat", now: now, trackingStore: trackingStore)
+                    let result = try await ACTAActionRegistry.shared.execute(actionID: toolName, parameters: arguments, context: actionContext)
+                    outputDict["action_result"] = result.summary
+                    outputDict["action_success"] = result.success
+                    outputDict["action_verified"] = result.verified
+                    if result.requiresOperatorConfirmation {
+                        outputDict["requires_operator_confirmation"] = true
+                        outputDict["confirmation_token"] = result.confirmationToken
+                    }
+                    if let error = result.error { outputDict["error"] = error }
+                    if let rawData = result.outputJSON.data(using: .utf8),
+                       let parsed = try? JSONSerialization.jsonObject(with: rawData) as? [String: Any] {
+                        for (k, v) in parsed { outputDict[k] = v }
+                    }
+                    rowsCount = result.success ? 1 : 0
+                } else {
+                    outputDict["status"] = "unknown_tool"
+                    outputDict["available_tools"] = Self.agentTools.map(\.name)
+                }
             }
         } catch {
             errorMsg = error.localizedDescription

@@ -638,6 +638,10 @@ final class WallModel: ObservableObject {
         self.actaThreadFocusEntries = (try? trackingStore?.loadACTAThreadFocusEntries(threadID: activeACTAThreadID, limit: 6)) ?? []
         self.actaChatActions = (try? trackingStore?.listACTAChatActions(threadID: activeACTAThreadID, status: "proposed")) ?? []
         syncACTAOperationalMemory()
+        Task { [weak self] in
+            guard let self else { return }
+            await registerAllWallActions(registry: ACTAActionRegistry.shared, model: self)
+        }
         if workerMode {
             workerProvisionedCameras = config.cameras.filter {
                 $0.enabled && $0.localDeviceID == nil && $0.screenDisplayID == nil && $0.fileURL == nil
@@ -3409,7 +3413,22 @@ final class WallModel: ObservableObject {
     func reviewACTAChatAction(_ actionID: String, confirmed: Bool) {
         guard let ghost = actaAnalytics else { return }
         if ghost.reviewAndExecuteChatAction(actionID: actionID, confirmed: confirmed) == nil {
-            notice = "Agent action was not executed. Check the proposal and diagnostics."
+            Task { @MainActor [weak self] in
+                guard let self, let store = self.trackingStore,
+                      let proposal = try? store.loadACTAChatAction(actionID: actionID),
+                      proposal.status == "proposed" else { return }
+                if !confirmed {
+                    _ = try? store.applyACTAChatAction(proposal, confirmed: false) { _ in }
+                } else {
+                    let result = try? await ACTAActionRegistry.shared.execute(
+                        actionID: proposal.actionType,
+                        parameters: proposal.parameters,
+                        context: ACTAActionContext(threadID: proposal.threadID, initiator: "operator_review", isConfirmed: true)
+                    )
+                    _ = try? store.applyACTAChatAction(proposal, confirmed: result?.success ?? false) { _ in }
+                }
+                self.actaChatActions = (try? store.listACTAChatActions(threadID: self.activeACTAThreadID, status: "proposed")) ?? []
+            }
         }
         if let store = trackingStore {
             actaChatActions = (try? store.listACTAChatActions(threadID: activeACTAThreadID, status: "proposed")) ?? []

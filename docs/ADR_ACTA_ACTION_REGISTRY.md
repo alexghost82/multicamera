@@ -220,3 +220,14 @@ Specific validation runs before proposals; secret-bearing URL arguments are reje
 Keychain identifiers are unchanged; a testable credential store supports checked delete
 and best-effort compensation on config failure. Cross-endpoint credential reuse requires
 the secure native editor. Real discovery/capture/Keychain/reconnect remain runtime gates.
+
+### Уточнение: patch-настройки и проверка состояния на диске (2026-11-17)
+
+Восемь новых settings mutations используют конечные типизированные схемы и существующие
+GUI services WallModel. JSON patch ограничен объявленными полями Codable-моделей;
+секреты/backend/model endpoints не входят в эти контракты. Storage/memory/schedule/rules
+проверяются оператором до применения. Валидация и запись выполняются в MainActor;
+read-after-write сверяет persisted preferences с ожидаемым объектом. Предварительное
+сравнение с диском отклоняет stale/corrupt snapshots, включая обход кэша feature coordinator.
+Это защита от обнаруженного расхождения, не файловая транзакция с внешними процессами.
+Результат settings inspection подтверждает конфигурацию, не inference/health/cleanup.

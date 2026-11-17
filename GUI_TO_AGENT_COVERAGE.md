@@ -8,11 +8,11 @@ Version: 1.0.0-baseline
 
 ## 1. Executive Summary
 
-Current implementation checkpoint: **45 advertised actions**, with row-specific limitations below. The original baseline inventory is not proof of exhaustive UI coverage.
+Current implementation checkpoint: **53 advertised actions**, with row-specific limitations below. The original baseline inventory is not proof of exhaustive UI coverage.
 
 This working inventory maps currently identified UI/domain operations to agent action contracts. Exhaustive control-by-control parity has not been established.
 
-- **Action rows:** 103 (97 baseline rows, 4 analytics contracts, mission.history and camera.set_processing; exhaustive UI coverage remains unverified)
+- **Action rows:** 105 (97 baseline rows, 4 analytics contracts, mission.history, camera.set_processing and two alert-rule contracts; exhaustive UI coverage remains unverified)
 - **Baseline legacy tools:** 16 read-only query tools + 1 terminal tool (`present_answer`)
 - **Baseline legacy mutations:** 3 (`rename_identity`, `merge_identities`, `split_identity`)
 - **Baseline gap estimate:** the old 89 / 82.4% figure depended on the unsupported 108-operation total and is not accepted as a coverage measurement.
@@ -160,19 +160,21 @@ This working inventory maps currently identified UI/domain operations to agent a
 
 | Action ID | UI Section / Key | Service Owner | Typed Arguments | Action Type | Policy | Unit / Parity Test | State |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `settings.get_section` | `SettingsHubView` (all) | `WallModel` | `section: String` | `Inspect` | Auto | `testSettingsGetSection` | `PARTIAL — GENERAL/FEATURES ONLY` |
+| `settings.get_section` | SettingsHub sections | `WallSettingsAction` / `WallModel` | `section: enum` | `Inspect` | Auto | `testSectionInspectionRedactsEndpointsAndReturnsUnsupportedInsteadOfInventing` | `PARTIAL — CONFIGURATION ONLY; IDENTITY UNSUPPORTED; NO HEALTH/READINESS PROOF` |
 | `settings.update_system` | Sec 1: General & Streams | `WallModel` | `language: String?, columns: Int?, staleTimeoutMs: Int?, go2rtcPath: String?, apiPort: Int?, rtspPort: Int?, yoloThreshold: Double?, detectionFPS: Int?` | `Reversible` | Auto | `testSettingsUpdateSystem` | `PARTIAL — FOUR FIELDS` |
 | `settings.update_models` | Sec 3: AI Models | `WallModel` | `enabledServices: [String]?, customPaths: [String: String]?` | `ServiceAffecting` | Auto | `testSettingsUpdateModels` | `PLANNED` |
-| `settings.update_runtime_fall` | Sec 4: Advanced Runtime | `WallModel` | `torsoAngle: Double?, aspectRatio: Double?, heightCollapse: Double?, emaAlpha: Double?, minConfirmingSamples: Int?, maxTracks: Int?` | `Reversible` | Auto | `testSettingsUpdateRuntimeFall` | `PLANNED` |
-| `settings.update_runtime_storage` | Sec 4: Storage Cleanup | `WallModel` | `maxMediaDiskMB: Int?, minFreeDiskGB: Double?, maxCropsPerIdentity: Int?, dataSaver: Bool?, trackRetentionDays: Int?, logRetentionDays: Int?` | `Reversible` | Auto | `testSettingsUpdateRuntimeStorage` | `PLANNED` |
-| `settings.update_runtime_crop` | Sec 4: Crop Selection | `WallModel` | `bootstrapSeconds: Double?, intervalSeconds: Double?, movementFraction: Double?, staleTrackTTL: Double?, cropWindowSeconds: Double?, cropTopK: Int?` | `Reversible` | Auto | `testSettingsUpdateRuntimeCrop` | `PLANNED` |
+| `settings.update_runtime_fall` | Sec 4: Advanced Runtime | `WallModel.saveRuntimePreferences` | 22 advanced GUI fields; four common fields use analytics actions | `ServiceAffecting` | Auto | `testAllGUIFallFieldsAndCropFieldsPersistThroughRuntimeService` | `IMPLEMENTED — TEMP STORE / SERVICE TEST` |
+| `settings.update_runtime_storage` | Sec 4: Storage Cleanup | `WallModel.saveRuntimePreferences` | `maxMediaDiskMB: Double?, minFreeDiskGB: Double?, maxCropsPerIdentity: Int?, dataSaverEnabled: Bool?, trackImageRetentionDays: Int?, logRetentionDays: Int?` | `SecuritySensitive` | **Confirm** | `testReviewedStorageAndMemoryPolicyMatchDiskWithoutClaimingCleanup` | `IMPLEMENTED — POLICY VERIFIED; CLEANUP NOT RUN` |
+| `settings.update_runtime_crop` | Sec 4: Crop Selection | `WallModel.saveRuntimePreferences` | Six capture scheduler fields plus `cropWindowSeconds: Double?, cropTopK: Int?, cropImprovementRatio: Double?` | `ServiceAffecting` | Auto | `testAllGUIFallFieldsAndCropFieldsPersistThroughRuntimeService` | `IMPLEMENTED — TEMP STORE / SERVICE TEST` |
 | `settings.update_ai_config` | Sec 6: AI Backends | `WallModel` | `mode: String ("mlx", "vllm", "openai", "hybrid", "dry_run"), vllmURL: String?, vllmModel: String?, openAIURL: String?, cloudNanoModel: String?, cloudMiniModel: String?, cloudFullModel: String?, spokenBriefingEnabled: Bool?, language: String?` | `Reversible` | Auto | `testSettingsUpdateAIConfig` | `PLANNED` |
 | `settings.update_ai_budget` | Sec 6: Cloud Privacy & Budget | `WallModel` | `blurFaces: Bool?, blurPlates: Bool?, dailyBudgetUSD: Double?, monthlyBudgetUSD: Double?` | `Reversible` | Auto | `testSettingsUpdateAIBudget` | `PLANNED` |
 | `settings.set_api_key` | Sec 6: Keychain Credentials | `ACTAKeychainStore` | `account: String ("primary", "alert"), apiKey: String` | `Reversible` | Auto | `testSettingsSetAPIKey` | `PLANNED` |
 | `settings.clear_api_key` | Sec 6: Keychain Credentials | `ACTAKeychainStore` | `account: String` | `Destructive` | **Confirm** | `testSettingsClearAPIKey` | `PLANNED` |
-| `settings.update_schedules` | Sec 7: Scheduled Analysis | `WallModel` | `vlmScheduleIntervalMinutes: Int?, vlmSchedulePrompts: [String]?` | `Reversible` | Auto | `testSettingsUpdateSchedules` | `PLANNED` |
-| `settings.update_events_alerts` | Sec 9: Events & Alerts | `WallModel` | `personCountAlertsEnabled: Bool?, personThreshold: Int?, holdSeconds: Double?, cooldownSeconds: Double?, criticalSoundEnabled: Bool?` | `Reversible` | Auto | `testSettingsUpdateEventsAlerts` | `PLANNED` |
-| `settings.update_memory_policy`| Sec 10: Memory & Storage | `WallModel` | `chronologicalMemoryEnabled: Bool?, retainFullFrames: Bool?, retentionDays: Int?` | `Reversible` | Auto | `testSettingsUpdateMemoryPolicy`| `PLANNED` |
+| `settings.update_schedules` | Sec 7: Scheduled Analysis | `WallModel.saveVLMPreferences` | `scheduleEnabled: Bool?, intervalSeconds: Int?, analyzeAllEnabledCameras: Bool?, camera_ids: CSV UUID string?` | `SecuritySensitive` | **Confirm** | `testEventsAndSchedulesPreserveUnrelatedBackendAndPermissions` | `IMPLEMENTED — CONFIGURATION; NO INFERENCE COMPLETION PROOF` |
+| `settings.update_events_alerts` | Sec 9: Events & Alerts | `WallModel.saveOperationsPreferences` | `personCountAlertsEnabled: Bool?, personThreshold: Int?, holdSeconds: Int?, cooldownSeconds: Int?, criticalSoundEnabled: Bool?` | `Reversible` | Auto | `testEventsAndSchedulesPreserveUnrelatedBackendAndPermissions` | `IMPLEMENTED — TEMP STORE / SERVICE TEST` |
+| `settings.update_memory_policy` | Sec 10: Memory & Storage | `WallModel.saveFeaturePolicy` | `retainFullFrames: Bool?, retentionDays: Int?`; feature enablement separate; sampled frames cap 7 days | `SecuritySensitive` | **Confirm** | `testReviewedStorageAndMemoryPolicyMatchDiskWithoutClaimingCleanup` | `IMPLEMENTED — POLICY VERIFIED` |
+| `settings.save_alert_rule` | Sec 7: Alert Rules | `WallModel.saveVLMPreferences` | `rule_id: UUID?, condition: String?, enabled: Bool?, cooldownSeconds: Int?, priority: enum?` | `SecuritySensitive` | **Confirm** | `testAlertRuleLifecycleIsReviewedAndUnrelatedPreferencesSurvive` | `IMPLEMENTED — CREATE/EDIT; TEMP STORE TEST` |
+| `settings.remove_alert_rule` | Sec 7: Alert Rules | `WallModel.saveVLMPreferences` | `rule_id: UUID` | `SecuritySensitive` | **Confirm** | `testAlertRuleLifecycleIsReviewedAndUnrelatedPreferencesSurvive` | `IMPLEMENTED — TEMP STORE TEST` |
 | `settings.update_feature_toggles`| Sec 11: Features & Access | `WallModel` | `feature: String, enabled: Bool` | `Reversible` | Auto | `testSettingsUpdateFeatureToggles`| `PARTIAL — UNIT TESTS / LIVE PROVIDER` |
 | `settings.update_permissions` | Sec 11: Features & Access | `WallModel` | `allowExternalAI: Bool?, allowVoiceInput: Bool?, allowPlateRegistryLookup: Bool?` | `Reversible` | Auto | `testSettingsUpdatePermissions`| `IMPLEMENTED — CONFIRMATION / SERVICE TEST` |
 | `settings.toggle_showcase` | Sec 12: Local Showcase | `WallModel` | `running: Bool, port: Int?` | `ServiceAffecting` | Auto | `testSettingsToggleShowcase` | `PLANNED` |
@@ -323,3 +325,12 @@ Malformed/secret-bearing URLs and oversized/conflicting narrative annotations ca
 become durable approval proposals. Camera get/not-found errors do not echo supplied URLs.
 ISAPI editing, capture snapshot, stream-recovery verification and secure voice/text
 credential provisioning remain gaps. No complete camera GUI parity is claimed.
+
+### Settings checkpoint — 2026-11-17
+
+Catalogue: 53 actions. Eight mutations added through existing GUI domain services;
+settings inspection expanded with URL redaction and explicit unsupported identity section.
+Runtime, feature, operations and AI stores reject stale/corrupt on-disk state before writes.
+Temporary-store tests cover all 22 advanced fall GUI fields, nine crop fields, six storage
+fields, five event fields, memory policy, schedule selection and alert-rule lifecycle.
+This does not establish exhaustive GUI parity, real inference, janitor execution or model readiness.

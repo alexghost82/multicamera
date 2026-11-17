@@ -303,3 +303,52 @@ occurrences 0, plutil OK. `git diff --check`: exit code 0.
 Следующий участок: оставшиеся настройки/ISAPI/snapshot/reconnect и безопасный credential
 workflow, затем закрытие idempotency/audit/recovery и реальные Qwen/vLLM Metal gates.
 Phase 1 и production acceptance остаются незавершёнными.
+
+## Продолжение Phase 1: настройки выполнения, памяти, расписания и правил (2026-11-17)
+
+Каталог расширен до 53 действий: восемь новых мутаций и расширенный
+`settings.get_section`. Использован навык ai1-architect-system-designer; область
+ограничена ранее разрешённой Phase 1. Форматы JSON, постоянные ключи, SQLite и
+Keychain identifiers сохранены; новых зависимостей и миграций нет.
+
+Реализованы runtime fall (22 расширенных поля GUI), crop (9), storage (6), events (5),
+политика памяти, расписание и создание/изменение/удаление alert rules через существующие
+методы WallModel. Storage, memory, schedules и rules требуют двухфазного подтверждения.
+Четыре общих поля fall остаются в analytics actions; включение памяти — отдельное действие.
+Сохранение политики очистки не подтверждает выполнение janitor; расписание не подтверждает
+завершение inference. Фиксированный предел sampled frames в семь дней отражён в результате.
+
+Проверки сохранения используют реальные временные файлы, а не только кэш координатора.
+Повреждённые и изменённые на диске runtime/features/operations/AI preferences отклоняются
+до перезаписи. OperationsPreferences URL внедряется для изоляции тестов; production default
+сохранён. Инспекция разделов скрывает query/credentials URL и не заявляет готовность моделей
+или здоровье сервисов; identity явно возвращает UNSUPPORTED. Редактирование backend,
+endpoint, ключей, переключение/перезагрузка моделей здесь не реализованы.
+
+Новый ACTASettingsActionAdapterTests содержит шесть сценариев: поля GUI и валидация,
+review/reject, сохранение несвязанных настроек/permissions, lifecycle правил, redaction,
+corrupt/stale stores. Реальные камеры, модели, Keychain и внешняя инфраструктура в этих
+сценариях не использовались.
+
+Проверки:
+- Первый целевой gate `/tmp/acta-phase1-settings-tests.log`: 49 XCTest и 15 Swift Testing,
+  без ошибок.
+- Общая регрессия `/tmp/acta-phase1-settings-regression.log`: exit code 0;
+  186 XCTest (184 passed, 2 skipped — real Qwen/private history), 20 Swift Testing passed
+  (18 registry/local-camera и 2 startup tests). Фильтр прежнего camera checkpoint расширен
+  ACTASettingsActionAdapterTests, CameraFeatureCoordinatorTests, FeaturePreferencesTests,
+  FallDetectorTests. Команда: `swift test --package-path native --disable-automatic-resolution
+  --jobs 2 --filter 'ACTASettingsActionAdapterTests|ACTACameraConfigurationActionTests|ACTAMissionActionAdapterTests|CameraMissionTests|ACTAAnalyticsActionAdapterTests|ACTAOperationalAdapterTests|ACTAServiceAdapterTests|ACTAActionRegistryTests|CameraMemoryStoreTests|IncidentReliabilityTests|EvidenceReliabilityTests|OperationsPreferencesTests|SafetyIncidentCenterTests|SettingsHubTests|SettingsTests|UnifiedAgentHistoryTests|ACTAAnalyticsTests|ACTATransportSecurityTests|LocalAnalyticsEngineCoreTests|VideoLayoutTests|VideoInteractionTests|AgentMemoryReliabilityTests|AgentRetrievalTests|LanguageSettingsTests|ConfigurationTests|LocalCameraTests|LocalCameraStartupTests|VideoFileSourceConfigurationTests|CameraFeatureCoordinatorTests|FeaturePreferencesTests|FallDetectorTests'`.
+- Первичная localization audit: exit code 2, 29 непереведённых occurrences. Добавлены
+  23 уникальные RU/EN строки. Повторный `make -C native localization-audit`: exit code 0,
+  `/tmp/acta-phase1-settings-localization-final.log`.
+- Финальная сборка: `swift build --package-path native --disable-automatic-resolution --jobs 2`,
+  `/tmp/acta-phase1-settings-final-build.log`, exit code 0. `git diff --check`: exit code 0.
+
+Откат: выборочно вернуть изменения settings checkpoint по diff, сохранив пользовательские
+коммиты и другие участки; резервные копии preferences нужны для восстановления уже
+сохранённых оператором значений. Автоматической обратной миграции нет, схема не менялась.
+
+Остаётся Phase 1: модели/backend/credentials, ISAPI/snapshot/reconnect, другие строки
+матрицы, idempotency/audit/recovery и сквозной UI/agent сценарий. Реальный Qwen/vLLM Metal,
+voice/TTS и performance gates остаются отдельными незавершёнными этапами.

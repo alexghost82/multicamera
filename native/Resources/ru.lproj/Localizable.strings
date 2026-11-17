@@ -1778,3 +1778,49 @@
 "Camera credential deletion verification failed." = "Не удалось подтвердить удаление учётных данных камеры.";
 "Camera removal failed and credential rollback failed." = "Не удалось удалить камеру и восстановить учётные данные.";
 "Use the secure camera editor to move stored credentials to a different network endpoint." = "Для переноса сохранённых учётных данных на другой сетевой адрес используйте защищённый редактор камеры.";
+
+"Settings object serialization failed." = "Не удалось сериализовать объект настроек.";
+
+"Specify at least one settings change." = "Укажите хотя бы одно изменение настроек.";
+
+"Alert condition requires 1...500 characters." = "Условие уведомления должно содержать от 1 до 500 символов.";
+
+"A new alert rule requires a condition." = "Для нового правила уведомления необходимо условие.";
+
+"Alert rule ID must be a UUID." = "Идентификатор правила уведомления должен быть UUID.";
+
+"Unknown settings field." = "Неизвестное поле настроек.";
+
+"Settings field requires an integer." = "Поле настроек требует целого числа.";
+
+"Settings field requires a finite number." = "Поле настроек требует конечного числа.";
+
+"Unsupported settings field type." = "Неподдерживаемый тип поля настроек.";
+
+"Runtime settings persistence verification failed." = "Проверка сохранения настроек выполнения не пройдена.";
+
+"Operations settings persistence verification failed." = "Проверка сохранения настроек событий не пройдена.";
+
+"Feature policy persistence verification failed." = "Проверка сохранения политики функций не пройдена.";
+
+"Alert rule IDs are ambiguous; reload a valid configuration." = "Идентификаторы правил уведомлений неоднозначны; загрузите корректную конфигурацию.";
+
+"Schedule camera IDs must be unique configured UUIDs." = "Идентификаторы камер расписания должны быть уникальными UUID настроенных камер.";
+
+"Select at least one camera for enabled scheduled analysis." = "Выберите хотя бы одну камеру для включённого анализа по расписанию.";
+
+"Alert rule does not exist." = "Правило уведомления не существует.";
+
+"Schedule settings persistence verification failed." = "Проверка сохранения настроек расписания не пройдена.";
+
+"Runtime preferences changed on disk; reload them before making changes." = "Настройки выполнения изменились на диске; загрузите их перед изменением.";
+
+"Analytics settings changed on disk; reload them before inspecting." = "Настройки аналитики изменились на диске; загрузите их перед просмотром.";
+
+"Operations preferences changed on disk; reload them before making changes." = "Настройки событий изменились на диске; загрузите их перед изменением.";
+
+"AI preferences changed on disk; reload them before making changes." = "Настройки ИИ изменились на диске; загрузите их перед изменением.";
+
+"Model preferences changed on disk; reload them before inspecting." = "Настройки моделей изменились на диске; загрузите их перед просмотром.";
+
+"Feature policy changed on disk; reload it before making changes." = "Политика функций изменилась на диске; загрузите её перед изменением.";

@@ -735,3 +735,49 @@
 "Camera credential deletion verification failed." = "Camera credential deletion verification failed.";
 "Camera removal failed and credential rollback failed." = "Camera removal failed and credential rollback failed.";
 "Use the secure camera editor to move stored credentials to a different network endpoint." = "Use the secure camera editor to move stored credentials to a different network endpoint.";
+
+"Settings object serialization failed." = "Settings object serialization failed.";
+
+"Specify at least one settings change." = "Specify at least one settings change.";
+
+"Alert condition requires 1...500 characters." = "Alert condition requires 1...500 characters.";
+
+"A new alert rule requires a condition." = "A new alert rule requires a condition.";
+
+"Alert rule ID must be a UUID." = "Alert rule ID must be a UUID.";
+
+"Unknown settings field." = "Unknown settings field.";
+
+"Settings field requires an integer." = "Settings field requires an integer.";
+
+"Settings field requires a finite number." = "Settings field requires a finite number.";
+
+"Unsupported settings field type." = "Unsupported settings field type.";
+
+"Runtime settings persistence verification failed." = "Runtime settings persistence verification failed.";
+
+"Operations settings persistence verification failed." = "Operations settings persistence verification failed.";
+
+"Feature policy persistence verification failed." = "Feature policy persistence verification failed.";
+
+"Alert rule IDs are ambiguous; reload a valid configuration." = "Alert rule IDs are ambiguous; reload a valid configuration.";
+
+"Schedule camera IDs must be unique configured UUIDs." = "Schedule camera IDs must be unique configured UUIDs.";
+
+"Select at least one camera for enabled scheduled analysis." = "Select at least one camera for enabled scheduled analysis.";
+
+"Alert rule does not exist." = "Alert rule does not exist.";
+
+"Schedule settings persistence verification failed." = "Schedule settings persistence verification failed.";
+
+"Runtime preferences changed on disk; reload them before making changes." = "Runtime preferences changed on disk; reload them before making changes.";
+
+"Analytics settings changed on disk; reload them before inspecting." = "Analytics settings changed on disk; reload them before inspecting.";
+
+"Operations preferences changed on disk; reload them before making changes." = "Operations preferences changed on disk; reload them before making changes.";
+
+"AI preferences changed on disk; reload them before making changes." = "AI preferences changed on disk; reload them before making changes.";
+
+"Model preferences changed on disk; reload them before inspecting." = "Model preferences changed on disk; reload them before inspecting.";
+
+"Feature policy changed on disk; reload it before making changes." = "Feature policy changed on disk; reload it before making changes.";

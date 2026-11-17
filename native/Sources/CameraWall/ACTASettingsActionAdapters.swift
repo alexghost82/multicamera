@@ -147,6 +147,9 @@ struct WallSettingsAction: ACTAActionProtocol {
                 return result("{\"policy\":\(try json(next)),\"sampled_frame_retention_days_cap\":\(CameraMemoryStore.retentionDays)}")
             case .schedules, .saveRule, .removeRule:
                 var next = model.vlmPreferences
+                guard Set(next.alertRules.map(\.id)).count == next.alertRules.count else {
+                    throw ConfigurationError.invalid("Alert rule IDs are ambiguous; reload a valid configuration.")
+                }
                 if kind == .schedules {
                     if let value = parameters["scheduleEnabled"] { next.scheduleEnabled = value == "true" }
                     if let value = parameters["intervalSeconds"].flatMap(Int.init) { next.intervalSeconds = value }
@@ -204,24 +207,51 @@ struct WallSettingsAction: ACTAActionProtocol {
         let output: String
         switch section {
         case "general", "system":
+            _ = try model.cameraConfigurationChecked()
             output = try object(["columns": model.config.columns, "detectionThreshold": model.config.detectionThreshold,
                 "detectionFPS": model.config.detectionFPS, "staleAfterMilliseconds": model.config.staleAfterMilliseconds,
                 "apiPort": model.config.apiPort, "rtspPort": model.config.rtspPort, "go2rtcPath": model.config.go2rtcPath,
                 "running": model.running, "connecting": model.connecting, "health_verified": false])
-        case "advanced", "runtime": output = try json(model.runtimePreferences)
+        case "advanced", "runtime":
+            guard try AdvancedRuntimePreferences.load(from: model.runtimePreferencesURL) == model.runtimePreferences else {
+                throw ConfigurationError.invalid("Runtime preferences changed on disk; reload them before making changes.")
+            }
+            output = try json(model.runtimePreferences)
         case "features", "permissions": output = try json(model.featurePolicySnapshotChecked())
         case "memory": output = "{\"policy\":\(try json(model.featurePolicySnapshotChecked())),\"sampled_frame_retention_days_cap\":\(CameraMemoryStore.retentionDays)}"
-        case "analytics": output = try json(model.localAnalyticsEngine.settings)
-        case "events": output = try json(model.operationsPreferences)
-        case "schedules": output = try scheduleJSON(model.vlmPreferences)
-        case "models": output = "{\"configuration\":\(try json(model.modelPreferences)),\"readiness_verified\":false}"
+        case "analytics":
+            guard try VideoAnalyticsSettingsStore.load(from: model.localAnalyticsEngine.settingsURL) == model.localAnalyticsEngine.settings else {
+                throw ConfigurationError.invalid("Analytics settings changed on disk; reload them before inspecting.")
+            }
+            output = try json(model.localAnalyticsEngine.settings)
+        case "events":
+            guard try OperationsPreferencesStore.load(from: model.operationsPreferencesURL) == model.operationsPreferences else {
+                throw ConfigurationError.invalid("Operations preferences changed on disk; reload them before making changes.")
+            }
+            output = try json(model.operationsPreferences)
+        case "schedules":
+            guard try VLMStore.loadPreferences(from: model.vlmPreferencesURL) == model.vlmPreferences else {
+                throw ConfigurationError.invalid("AI preferences changed on disk; reload them before making changes.")
+            }
+            output = try scheduleJSON(model.vlmPreferences)
+        case "models":
+            let url = model.configURL.deletingLastPathComponent().appendingPathComponent("model-preferences.json")
+            guard try ModelSelectionPreferences.load(from: url) == model.modelPreferences else {
+                throw ConfigurationError.invalid("Model preferences changed on disk; reload them before inspecting.")
+            }
+            output = "{\"configuration\":\(try json(model.modelPreferences)),\"readiness_verified\":false}"
         case "missions": output = try json(CameraMissionStore.loadDocument(from: model.missionStoreURL).missions)
         case "showcase": output = try object(["configured_url": model.localShowcaseURL.map { actaRedactedStreamURL($0.absoluteString) } ?? "", "status": model.localShowcaseStatus, "health_verified": false])
-        case "cameras": output = try object(["cameras": model.config.cameras.map { camera -> [String: Any] in
+        case "cameras":
+            _ = try model.cameraConfigurationChecked()
+            output = try object(["cameras": model.config.cameras.map { camera -> [String: Any] in
             ["camera_id": camera.id.uuidString, "name": camera.name, "enabled": camera.enabled,
              "substream": actaRedactedStreamURL(camera.substream), "mainstream": camera.mainstream.map(actaRedactedStreamURL) ?? "",
              "device_id": camera.localDeviceID ?? "", "display_id": camera.screenDisplayID ?? "", "file_path": camera.fileURL?.path ?? ""] }])
         case "ai":
+            guard try VLMStore.loadPreferences(from: model.vlmPreferencesURL) == model.vlmPreferences else {
+                throw ConfigurationError.invalid("AI preferences changed on disk; reload them before making changes.")
+            }
             let ai = model.vlmPreferences
             output = try object(["backend": ai.actaBackendMode.rawValue, "model_path": ai.model,
                 "vllm_url": actaRedactedStreamURL(ai.actaVLLMBaseURL), "vllm_model": ai.actaVLLMModelName,

@@ -618,6 +618,11 @@
 "Reject and prevent this pair from being proposed again" = "Отклонить пару и запретить её повторное предложение";
 "Rejected" = "Отклонено";
 "Remove saved text" = "Удалить сохранённый текст";
+"Remove saved vehicle text?" = "Удалить сохранённый текст автомобиля?";
+"Saved vehicle text changed; review it again before removing." = "Сохранённый текст автомобиля изменился; проверьте его снова перед удалением.";
+"Track: %@" = "Трек: %@";
+"This removes saved OCR from the track only. Copies may remain in search indexes and other records." = "Это удаляет распознанный текст только из трека. Копии могут остаться в поисковых индексах и других записях.";
+"Vehicle text was not removed: track no longer exists" = "Текст автомобиля не удалён: трек больше не существует.";
 "Reopen" = "Открыть повторно";
 "Required in addition to operations-alert opt-in. Alert frames stay local for up to seven days." = "Требует отдельного включения вместе с оперативными оповещениями. Кадры оповещений хранятся локально до семи дней.";
 "Resolve" = "Закрыть оповещение";
@@ -1876,6 +1881,9 @@
 "Could not clear local VLM alerts. The saved alert list may have changed; clips and review state were not cleared." = "Не удалось очистить локальные оповещения VLM. Сохранённый список мог измениться; клипы и состояние проверки не очищены.";
 "Alerts were cleared, but some clips or review state could not be removed." = "Оповещения очищены, но некоторые клипы или состояние проверки удалить не удалось.";
 "Clear ISAPI event history" = "Очистить историю событий ISAPI";
+"A narrative chapter could not be verified as saved. Any pending frames remain in process memory; recovery and crash survival are not guaranteed." = "Не удалось подтвердить сохранение главы. Ожидающие кадры остаются в памяти процесса; восстановление и сохранность при сбое не гарантируются.";
+"This narrative frame was not accepted because the buffer is full or a pending chapter prevents a clock-change split. Pending chapters are not guaranteed saved." = "Кадр хроники не принят: буфер заполнен или ожидающая глава не позволяет разделить хронику при изменении времени. Сохранение ожидающих глав не гарантируется.";
+"A stale or repeated narrative frame was skipped." = "Устаревший или повторный кадр хроники пропущен.";
 "Incident missing or incident state is inconsistent." = "Инцидент не найден или его состояние несогласованно.";
 "Incident audit state is inconsistent." = "Состояние журнала инцидента несогласованно.";
 "Incident note audit verification failed." = "Не удалось проверить журнал заметки об инциденте.";

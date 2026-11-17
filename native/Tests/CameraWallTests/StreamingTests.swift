@@ -12,7 +12,9 @@ final class StreamingTests: XCTestCase {
 
     @MainActor
     func testPerCameraAnalysisFlagsPersistIndependently() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".streaming-fixture-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         let previousModels = ModelSelectionPreferences(
             enabled: Set(LocalModelService.allCases.filter { ModelSelectionRegistry.isEnabled($0) }),
             paths: Dictionary(uniqueKeysWithValues: LocalModelService.allCases.compactMap { service in
@@ -28,20 +30,33 @@ final class StreamingTests: XCTestCase {
         config.cameras = [first, second]
         let file = directory.appendingPathComponent("cameras.json")
         try ConfigurationStore.save(config, to: file)
+        var models = ModelSelectionPreferences(); models.enabled = []
+        try models.save(to: directory.appendingPathComponent("model-preferences.json"))
+        var aiPreferences = VLMPreferences(); aiPreferences.actaBackendMode = .dryRun
+        try VLMStore.save(aiPreferences, to: directory.appendingPathComponent("vlm.json"))
 
         let features = CameraFeatureCoordinator(preferencesURL: directory.appendingPathComponent("features.json"),
             databaseURL: directory.appendingPathComponent("features.sqlite3"))
         try features.savePreferences(CameraFeaturePreferences(enabledFeatures: []))
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), transport: { _ in
+            XCTFail("Unexpected network request")
+            throw URLError(.notConnectedToInternet)
+        })
         let model = WallModel(configURL: file, workerMode: false,
             trackingStoreURL: directory.appendingPathComponent("tracking.sqlite3"),
             featureCoordinator: features, analyticsDirectoryURL: directory.appendingPathComponent("analytics"),
+            agentClient: client,
             cameraMemoryStore: CameraMemoryStore(url: directory.appendingPathComponent("frames")),
             operationsWatchURL: directory.appendingPathComponent("watches.json"),
             missionStoreURL: directory.appendingPathComponent("missions.json"),
             cameraCredentialStore: StreamingTestCredentials(),
             operationsPreferencesURL: directory.appendingPathComponent("operations.json"),
-            alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")))
+            alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")),
+            languageSettings: LanguageSettings(storage: InMemoryLanguageStorage()),
+            monitorHistoryURL: directory.appendingPathComponent("monitor.json"))
         defer { model.shutdown() }
+        XCTAssertTrue(model.featurePreferences.enabledFeatures.isEmpty)
+        XCTAssertTrue(model.config.cameras.allSatisfy { !$0.enabled })
         model.setYOLOEnabled(for: first.id, enabled: true)
         model.setAIChatEnabled(for: second.id, enabled: false)
 

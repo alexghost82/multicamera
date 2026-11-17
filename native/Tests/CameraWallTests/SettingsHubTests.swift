@@ -80,24 +80,45 @@ final class SettingsHubTests: XCTestCase {
     }
 
     func testCentralSettingsApplyPortsAndAIConfigurationWithoutChangingCameras() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory); ModelSelectionRegistry.update(ModelSelectionPreferences()) }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".settings-hub-fixture-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        let previousModels = ModelSelectionPreferences(
+            enabled: Set(LocalModelService.allCases.filter { ModelSelectionRegistry.isEnabled($0) }),
+            paths: Dictionary(uniqueKeysWithValues: LocalModelService.allCases.compactMap { service in
+                ModelSelectionRegistry.path(service).map { (service, $0.path) }
+            }))
+        defer { try? FileManager.default.removeItem(at: directory); ModelSelectionRegistry.update(previousModels) }
         let configURL = directory.appendingPathComponent("cameras.json")
         try ConfigurationStore.save(WallConfiguration(), to: configURL)
+        var models = ModelSelectionPreferences(); models.enabled = []
+        try models.save(to: directory.appendingPathComponent("model-preferences.json"))
+        var aiPreferences = VLMPreferences(); aiPreferences.actaBackendMode = .dryRun
+        try VLMStore.save(aiPreferences, to: directory.appendingPathComponent("vlm.json"))
         let features = CameraFeatureCoordinator(preferencesURL: directory.appendingPathComponent("features.json"),
             databaseURL: directory.appendingPathComponent("features.sqlite"))
         try features.savePreferences(CameraFeaturePreferences(enabledFeatures: []))
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), transport: { _ in
+            XCTFail("Unexpected network request")
+            throw URLError(.notConnectedToInternet)
+        })
         let model = WallModel(configURL: configURL,
             trackingStoreURL: directory.appendingPathComponent("tracks.sqlite"),
             featureCoordinator: features,
             analyticsDirectoryURL: directory.appendingPathComponent("analytics"),
+            agentClient: client,
             cameraMemoryStore: CameraMemoryStore(url: directory.appendingPathComponent("frames")),
             operationsWatchURL: directory.appendingPathComponent("watches.json"),
             missionStoreURL: directory.appendingPathComponent("missions.json"),
             cameraCredentialStore: SettingsTestCredentials(),
             operationsPreferencesURL: directory.appendingPathComponent("operations.json"),
-            alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")))
+            alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")),
+            languageSettings: LanguageSettings(storage: InMemoryLanguageStorage()),
+            monitorHistoryURL: directory.appendingPathComponent("monitor.json"))
         defer { model.shutdown() }
+        XCTAssertTrue(model.config.cameras.isEmpty)
+        XCTAssertTrue(model.featurePreferences.enabledFeatures.isEmpty)
+        XCTAssertFalse(model.running)
         var system = model.config
         system.apiPort = 22001; system.rtspPort = 22002; system.columns = 7
         let cameras = system.cameras
@@ -127,9 +148,10 @@ final class SettingsHubTests: XCTestCase {
 }
 
 private struct SettingsTestCredentials: CameraCredentialStore {
-    func read(_ id: UUID) throws -> Credentials? { XCTFail("Unexpected credential read"); return nil }
-    func save(_ credentials: Credentials, for id: UUID) throws { XCTFail("Unexpected credential save") }
-    func remove(_ id: UUID) throws { XCTFail("Unexpected credential removal") }
+    private struct UnexpectedAccess: Error {}
+    func read(_ id: UUID) throws -> Credentials? { XCTFail("Unexpected credential read"); throw UnexpectedAccess() }
+    func save(_ credentials: Credentials, for id: UUID) throws { XCTFail("Unexpected credential save"); throw UnexpectedAccess() }
+    func remove(_ id: UUID) throws { XCTFail("Unexpected credential removal"); throw UnexpectedAccess() }
 }
 
 private actor SettingsModelLoadRecorder {

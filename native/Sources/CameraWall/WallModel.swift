@@ -2352,14 +2352,19 @@ final class WallModel: ObservableObject {
     }
 
     func clearVehicleTextEvidence(for trackID: UUID) {
-        guard let trackingStore else { return }
-        vehicleTextLoadGeneration = UUID()
-        vehicleTextRequestIDs.removeValue(forKey: trackID)
-        readingVehicleTextTrackIDs.remove(trackID)
+        guard let trackingStore else {
+            notice = "Local track history is unavailable"
+            return
+        }
         do {
             try trackingStore.clearVehicleTextEvidence(for: trackID)
+            vehicleTextLoadGeneration = UUID()
+            vehicleTextRequestIDs.removeValue(forKey: trackID)
+            readingVehicleTextTrackIDs.remove(trackID)
             savedVehicleTextEvidence.removeValue(forKey: trackID)
             vehicleTextCandidates.removeValue(forKey: trackID)
+        } catch LocalTrackingStoreError.missingTrack {
+            notice = "Vehicle text was not removed: track no longer exists"
         } catch { notice = "Saved vehicle text could not be removed" }
     }
 
@@ -3506,7 +3511,8 @@ final class WallModel: ObservableObject {
         let memEval = ghost.memoryGuard.evaluate()
 
         // Capture fresh CGImages for active cameras only when opt-in features (alerts or memory) are enabled
-        var cameraFramePayloads: [(cameraID: UUID, cameraName: String, cgImage: CGImage, labels: [String], trackIDs: [String])] = []
+        var cameraFramePayloads: [(cameraID: UUID, cameraName: String, cgImage: CGImage, labels: [String], trackIDs: [String], receivedAt: Date, monotonicReceivedAt: TimeInterval)] = []
+        let tickDate = Date()
         if running && !connecting && memEval.allowContextFrames && (alertsEnabled || memoryEnabled) {
             for camera in config.cameras where camera.enabled {
                 guard let tile = tiles[camera.id], !tile.stale,
@@ -3517,7 +3523,8 @@ final class WallModel: ObservableObject {
                 if let cg = imageContext.createCGImage(ciImage, from: ciImage.extent) {
                     let labels = tile.objects.map(\.label)
                     let trkIDs = tile.objects.compactMap { $0.trackID?.uuidString }
-                    cameraFramePayloads.append((camera.id, camera.name, cg, labels, trkIDs))
+                    let receivedAt = tickDate.addingTimeInterval(frame.receivedAt - now)
+                    cameraFramePayloads.append((camera.id, camera.name, cg, labels, trkIDs, receivedAt, frame.receivedAt))
                 }
             }
         }
@@ -3539,12 +3546,16 @@ final class WallModel: ObservableObject {
                         guard let self else { return (false, false) }
                         return (self.featurePreferences.enabledFeatures.contains(.chronologicalMemory),
                                 self.featurePreferences.retainFullFrames)
-                    }
+                    },
+                    now: item.receivedAt,
+                    monotonicTimestamp: item.monotonicReceivedAt
                 )
                 if outcome == .notVerified {
                     self?.notice = ACTANarrativeFlushOutcome.notVerifiedNotice
                 } else if outcome == .backpressure {
                     self?.notice = ACTANarrativeFlushOutcome.backpressureNotice
+                } else if outcome == .staleFrame {
+                    self?.notice = ACTANarrativeFlushOutcome.staleFrameNotice
                 }
             }
             if descriptionsEnabled {

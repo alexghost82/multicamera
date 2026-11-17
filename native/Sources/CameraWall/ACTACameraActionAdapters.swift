@@ -377,6 +377,7 @@ func registerAllWallActions(registry: ACTAActionRegistry, model: WallModel, lang
     for kind in WallSettingsAction.Kind.allCases {
         await registry.register(WallSettingsAction(kind: kind, model: model))
     }
+    await registry.register(WallAIBudgetAction(model: model))
     if let languageSettings {
         await registry.register(ACTASystemLanguageAction(settingsProvider: settings, languageSettings: languageSettings))
     } else {

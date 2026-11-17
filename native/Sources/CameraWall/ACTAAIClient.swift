@@ -453,6 +453,10 @@ public actor ACTAAsyncLaneLimiter {
     private let limit: Int
     private var active: Int = 0
     private var waiters: [CheckedContinuation<Void, Never>] = []
+#if DEBUG
+    private var testWaitHook: (@Sendable () -> Void)?
+    func setTestWaitHook(_ hook: (@Sendable () -> Void)?) { testWaitHook = hook }
+#endif
 
     public init(limit: Int) {
         self.limit = max(1, limit)
@@ -465,6 +469,9 @@ public actor ACTAAsyncLaneLimiter {
         }
         await withCheckedContinuation { continuation in
             waiters.append(continuation)
+#if DEBUG
+            testWaitHook?()
+#endif
         }
     }
 
@@ -758,11 +765,16 @@ public enum ACTAAgentError: Error, Equatable {
     case badResponse
 }
 
+private enum ACTARequestAuthorizationError: Error {
+    case revoked
+}
+
 // MARK: - 6. Hybrid Ghost AI Client (MLX + Local vLLM + OpenAI + Backup Failover)
 
 public final class ACTAAIClient: @unchecked Sendable {
     private let lock = NSLock()
     private var config: ACTAAIConfiguration
+    private var configRevision: UInt64 = 0
     private let localVLM: LocalVLMClient?
     private var cacheStore: LocalTrackingStore?
     public let budgetTracker = ACTABudgetTracker()
@@ -773,18 +785,26 @@ public final class ACTAAIClient: @unchecked Sendable {
     private let backgroundLane = ACTAAsyncLaneLimiter(limit: ACTAAILane.background.maxConcurrentRequests)
     private let agentTrace: (@Sendable (String) -> Void)?
     private let transport: ACTAHTTPTransport
+    private let keyProvider: @Sendable (String) -> String?
+#if DEBUG
+    func setBackgroundLaneTestWaitHook(_ hook: (@Sendable () -> Void)?) async {
+        await backgroundLane.setTestWaitHook(hook)
+    }
+#endif
 
     init(
         config: ACTAAIConfiguration = ACTAAIConfiguration(),
         localVLM: LocalVLMClient? = nil,
         cacheStore: LocalTrackingStore? = nil,
         transport: ACTAHTTPTransport? = nil,
+        keyProvider: @escaping @Sendable (String) -> String? = { ACTAKeychainStore.loadKey(account: $0) },
         agentTrace: (@Sendable (String) -> Void)? = nil
     ) {
         self.config = config
         self.agentTrace = agentTrace
         self.localVLM = localVLM
         self.cacheStore = cacheStore
+        self.keyProvider = keyProvider
         if let transport {
             self.transport = transport
         } else {
@@ -833,7 +853,20 @@ public final class ACTAAIClient: @unchecked Sendable {
     public func updateConfiguration(_ newConfig: ACTAAIConfiguration) {
         lock.lock()
         defer { lock.unlock() }
+        if config != newConfig { configRevision &+= 1 }
         config = newConfig
+    }
+
+    private func configurationSnapshot() -> (ACTAAIConfiguration, UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (config, configRevision)
+    }
+
+    private func isCurrentConfiguration(_ revision: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return configRevision == revision
     }
 
     private func limiter(for lane: ACTAAILane) -> ACTAAsyncLaneLimiter {
@@ -855,10 +888,12 @@ public final class ACTAAIClient: @unchecked Sendable {
         previousResponseID: String? = nil,
         owedOutputs: [ACTAPendingOutputDebt] = [],
         useContentCache: Bool = true,
+        onFailureFallback: (@Sendable () -> Void)? = nil,
+        beforeDispatch: (@Sendable () async -> Bool)? = nil,
         responseType: T.Type,
         fallbackFactory: @Sendable () -> T
     ) async -> T {
-        let currentConfig = configuration()
+        let (currentConfig, revision) = configurationSnapshot()
         let store = currentCacheStore()
         let requestHash = ACTAAIRequestHasher.computeHash(
             taskType: "\(taskType):\(String(describing: T.self))",
@@ -876,6 +911,7 @@ public final class ACTAAIClient: @unchecked Sendable {
         }
 
         if currentConfig.mode == .dryRun {
+            onFailureFallback?()
             budgetTracker.recordUsage(tier: tier, inputTokens: 120, outputTokens: 60, isLocalFree: true)
             circuitBreaker.recordSuccess(latencyMs: 5.0, backend: "dry_run")
             let result = fallbackFactory()
@@ -894,8 +930,19 @@ public final class ACTAAIClient: @unchecked Sendable {
 
         let laneLimiter = limiter(for: lane)
         return await laneLimiter.withPermit {
+            let authorizeDispatch: @Sendable () async throws -> Void = {
+                if let beforeDispatch {
+                    let allowed = await beforeDispatch()
+                    guard allowed, !Task.isCancelled, self.isCurrentConfiguration(revision) else {
+                        throw ACTARequestAuthorizationError.revoked
+                    }
+                } else {
+                    try Task.checkCancellation()
+                }
+            }
             let start = Date()
             do {
+                try await authorizeDispatch()
                 let rawJSON = try await dispatchRawRequest(
                     config: currentConfig,
                     lane: lane,
@@ -903,7 +950,8 @@ public final class ACTAAIClient: @unchecked Sendable {
                     prompt: prompt,
                     jpegImages: jpegImages,
                     previousResponseID: previousResponseID,
-                    owedOutputs: owedOutputs
+                    owedOutputs: owedOutputs,
+                    authorizeDispatch: authorizeDispatch
                 )
                 let cleaned = Self.extractJSONObject(from: rawJSON)
                 if let data = cleaned.data(using: .utf8),
@@ -920,9 +968,16 @@ public final class ACTAAIClient: @unchecked Sendable {
                     }
                     return decoded
                 }
+            } catch is ACTARequestAuthorizationError {
+                onFailureFallback?()
+                return fallbackFactory()
+            } catch is CancellationError {
+                onFailureFallback?()
+                return fallbackFactory()
             } catch {
                 circuitBreaker.recordFailure()
             }
+            onFailureFallback?()
             return fallbackFactory()
         }
     }
@@ -965,15 +1020,18 @@ public final class ACTAAIClient: @unchecked Sendable {
         prompt: String,
         jpegImages: [Data],
         previousResponseID: String? = nil,
-        owedOutputs: [ACTAPendingOutputDebt] = []
+        owedOutputs: [ACTAPendingOutputDebt] = [],
+        authorizeDispatch: @escaping @Sendable () async throws -> Void
     ) async throws -> String {
         switch config.mode {
         case .dryRun:
             return "{}"
         case .mlxInProcess:
+            try await authorizeDispatch()
             return try await callMLX(prompt: prompt, jpegImages: jpegImages, tier: tier)
         case .localVLLM:
-            return try await callLocalVLLM(config: config, prompt: prompt, jpegImages: jpegImages, tier: tier)
+            return try await callLocalVLLM(config: config, prompt: prompt, jpegImages: jpegImages, tier: tier,
+                                           authorizeDispatch: authorizeDispatch)
         case .openAI:
             return try await callOpenAIWithBackup(
                 config: config,
@@ -982,26 +1040,35 @@ public final class ACTAAIClient: @unchecked Sendable {
                 prompt: prompt,
                 jpegImages: jpegImages,
                 previousResponseID: previousResponseID,
-                owedOutputs: owedOutputs
+                owedOutputs: owedOutputs,
+                authorizeDispatch: authorizeDispatch
             )
         case .hybridAuto:
             // Prefer Local vLLM if reachable, else OpenAI if external AI consented + key + budget available, else MLX in-process
-            if circuitBreaker.allowRequest(), let vllmText = try? await callLocalVLLM(config: config, prompt: prompt, jpegImages: jpegImages, tier: tier) {
-                return vllmText
+            if circuitBreaker.allowRequest() {
+                do {
+                    return try await callLocalVLLM(config: config, prompt: prompt, jpegImages: jpegImages,
+                                                   tier: tier, authorizeDispatch: authorizeDispatch)
+                } catch is ACTARequestAuthorizationError {
+                    throw ACTARequestAuthorizationError.revoked
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {}
             }
-            if config.allowExternalAI,
-               budgetTracker.isWithinBudget(config: config),
-               let openAIText = try? await callOpenAIWithBackup(
-                   config: config,
-                   lane: lane,
-                   tier: tier,
-                   prompt: prompt,
-                   jpegImages: jpegImages,
-                   previousResponseID: previousResponseID,
-                   owedOutputs: owedOutputs
-               ) {
-                return openAIText
+            if config.allowExternalAI, budgetTracker.isWithinBudget(config: config) {
+                do {
+                    return try await callOpenAIWithBackup(
+                        config: config, lane: lane, tier: tier, prompt: prompt, jpegImages: jpegImages,
+                            previousResponseID: previousResponseID, owedOutputs: owedOutputs,
+                        authorizeDispatch: authorizeDispatch
+                    )
+                } catch is ACTARequestAuthorizationError {
+                    throw ACTARequestAuthorizationError.revoked
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {}
             }
+            try await authorizeDispatch()
             return try await callMLX(prompt: prompt, jpegImages: jpegImages, tier: tier)
         }
     }
@@ -1024,7 +1091,8 @@ public final class ACTAAIClient: @unchecked Sendable {
         config: ACTAAIConfiguration,
         prompt: String,
         jpegImages: [Data],
-        tier: ACTAAITier
+        tier: ACTAAITier,
+        authorizeDispatch: (@Sendable () async throws -> Void)? = nil
     ) async throws -> String {
         let base = config.vllmBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard let url = URL(string: "\(base)/chat/completions") else {
@@ -1065,6 +1133,7 @@ public final class ACTAAIClient: @unchecked Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
+        try await authorizeDispatch?()
         let (data, http) = try await sendAuthorized(request)
         guard (200..<300).contains(http.statusCode) else {
             throw URLError(.badServerResponse)
@@ -1089,28 +1158,29 @@ public final class ACTAAIClient: @unchecked Sendable {
         prompt: String,
         jpegImages: [Data],
         previousResponseID: String? = nil,
-        owedOutputs: [ACTAPendingOutputDebt] = []
+        owedOutputs: [ACTAPendingOutputDebt] = [],
+        authorizeDispatch: @escaping @Sendable () async throws -> Void
     ) async throws -> String {
         guard config.allowExternalAI else {
             throw URLError(.appTransportSecurityRequiresSecureConnection)
         }
         let outgoingImages = ACTACloudPrivacyRedactor.redactImages(jpegImages, config: config)
         let preferredAccount = (lane == .alert) ? ACTAKeychainStore.alertKeyAccount : ACTAKeychainStore.primaryKeyAccount
-        let apiKey = ACTAKeychainStore.loadKey(account: preferredAccount)
-            ?? ACTAKeychainStore.loadKey(account: ACTAKeychainStore.primaryKeyAccount)
+        let apiKey = keyProvider(preferredAccount) ?? keyProvider(ACTAKeychainStore.primaryKeyAccount)
 
         if let apiKey, let primaryURL = URL(string: config.openAIBaseURL) {
-            if let text = try? await sendResponsesPayload(
-                url: primaryURL,
-                apiKey: apiKey,
-                tier: tier,
-                prompt: prompt,
-                jpegImages: outgoingImages,
-                previousResponseID: previousResponseID,
-                owedOutputs: owedOutputs
-            ) {
-                return text
-            }
+            do {
+                return try await sendResponsesPayload(
+                    url: primaryURL, apiKey: apiKey, tier: tier, prompt: prompt, jpegImages: outgoingImages,
+                    previousResponseID: previousResponseID, owedOutputs: owedOutputs,
+                    modelName: config.tierModelNames[tier.rawValue] ?? tier.rawValue,
+                    authorizeDispatch: authorizeDispatch
+                )
+            } catch is ACTARequestAuthorizationError {
+                throw ACTARequestAuthorizationError.revoked
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {}
         }
 
         // Failover to local backup relay (http://127.0.0.1:8018/api/backup/responses)
@@ -1124,7 +1194,9 @@ public final class ACTAAIClient: @unchecked Sendable {
             prompt: prompt,
             jpegImages: outgoingImages,
             previousResponseID: previousResponseID,
-            owedOutputs: owedOutputs
+            owedOutputs: owedOutputs,
+            modelName: config.tierModelNames[tier.rawValue] ?? tier.rawValue,
+            authorizeDispatch: authorizeDispatch
         )
     }
 
@@ -1181,7 +1253,9 @@ public final class ACTAAIClient: @unchecked Sendable {
         prompt: String,
         jpegImages: [Data],
         previousResponseID: String? = nil,
-        owedOutputs: [ACTAPendingOutputDebt] = []
+        owedOutputs: [ACTAPendingOutputDebt] = [],
+        modelName: String,
+        authorizeDispatch: @escaping @Sendable () async throws -> Void
     ) async throws -> String {
         var body = Self.buildOpenAIResponsesBody(
             tier: tier,
@@ -1191,7 +1265,7 @@ public final class ACTAAIClient: @unchecked Sendable {
             owedOutputs: owedOutputs,
             store: true
         )
-        body["model"] = config.tierModelNames[tier.rawValue] ?? tier.rawValue
+        body["model"] = modelName
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -1199,6 +1273,7 @@ public final class ACTAAIClient: @unchecked Sendable {
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
+        try await authorizeDispatch()
         let (data, http) = try await sendAuthorized(request, requiresExternalConsent: true)
         guard (200..<300).contains(http.statusCode) else {
             throw URLError(.badServerResponse)

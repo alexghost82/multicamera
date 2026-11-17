@@ -17,6 +17,22 @@ This working inventory maps currently identified UI/domain operations to agent a
 - **Baseline legacy mutations:** 3 (`rename_identity`, `merge_identities`, `split_identity`)
 - **Baseline gap estimate:** the old 89 / 82.4% figure depended on the unsupported 108-operation total and is not accepted as a coverage measurement.
 
+### Additional GUI inventory candidates
+
+These are proposed identifiers, not registered action contracts. Their scope,
+authorization policy and agent/GUI parity remain unverified.
+
+| Candidate | GUI operation | Current limitation |
+| :--- | :--- | :--- |
+| `camera.set_all_running` | Start or stop the camera wall | `camera.set_enabled` changes a single configuration flag, not wall lifecycle. |
+| `camera.import_sources` | Import RTSP sources from a file | Import may handle credentials; anonymous disabled `camera.add_network` is not equivalent. |
+| `camera.set_favorite` | Mark or unmark a camera as favorite | No equivalent agent contract confirmed. |
+| `canvas.set_filter` | Filter by status, favorite, events, search or location | Listing cameras does not change the GUI filter. |
+| `canvas.select_cameras` | Select individual cameras, all or none | Expanding a camera does not select a set. |
+| `canvas.set_tile_frame`, `canvas.set_arrange_mode` | Arrange and move camera tiles | Column count and layout reset do not provide full geometry controls. |
+| `chat.select_thread`, `chat.new_thread` | Switch or create a chat thread | Switching cancels an active request; agent parity is not established. |
+| `chat.cancel_request` | Cancel an active chat request | A GUI cancellation test exists, but an agent contract is not established. |
+
 ---
 
 ## 2. Policy & Safety Classifications
@@ -105,7 +121,7 @@ This working inventory maps currently identified UI/domain operations to agent a
 | `identity.undo_merge` | Cross-Camera Identity | `WallModel` | `proposalID: String` | `Reversible` | Confirmation/version policy pending | Not implemented | `GAP — CONSEQUENCES CHANGE IF THE IDENTITY GRAPH CHANGES` |
 | `identity.delete_tracked_object`| `IdentityHistoryView` | `WallModel` | `trackID: String` | `Destructive` | **Confirm** | Not implemented | `GAP — PARTIAL DELETE AND CROP FAILURE RECOVERY REQUIRED` |
 | `identity.read_vehicle_plate` | `IdentityHistoryView` | `WallModel` | `trackID: String` | `ServiceAffecting` | Privacy/persistence policy pending | Not implemented | `GAP — GUI OCR MAY PERSIST EVIDENCE WHEN OPTED IN; SHARED VERIFIED WORKFLOW REQUIRED` |
-| `identity.clear_vehicle_plate` | `IdentityHistoryView` | `WallModel` | `trackID: String` | `Destructive` | Policy pending | Not implemented | `GAP — MISSING TRACK AND STALE SEARCH INDEX MUST BE HANDLED` |
+| `identity.clear_vehicle_plate` | `IdentityHistoryView` | `WallModel` | `trackID: String` | `Destructive` | Policy pending | Not implemented | `GAP — GUI CLEARS TRACK FIELD ONLY WITH WARNING; INDEX COPIES REMAIN` |
 | `reid.calibrate` | `ReIDCalibrationView` | `LocalTrackingStore` / `ReIDThresholdCalibrator` | `target_precision: number (0.90...1.0)` | `Inspect` | Auto | `ACTAReIDCalibrationActionTests`; isolated GUI/store integration | `PARTIAL — AGGREGATE RECOMMENDATION ONLY; DOES NOT APPLY SETTINGS` |
 
 ---
@@ -137,7 +153,7 @@ This working inventory maps currently identified UI/domain operations to agent a
 | `memory.get_chapter` | `CameraMemoryView` | `ACTAAnalyticsCoordinator` | `chapterID: String` | `Inspect` | Auto | `testMemoryGetChapter` | `EXISTING` |
 | `memory.set_chapter_text` | `CameraMemoryView` | `WallModel` | `chapter_id: String, text: String? (<=16000), clear: Bool?` | `Reversible` | **Confirm — operator attribution** | `testNarrativeActionsRequireReviewAndPreserveAISummary` | `IMPLEMENTED — SQL/REVIEW TEST` |
 | `memory.toggle_pin` | `CameraMemoryView` | `WallModel` | `chapterID: String, pinned: Bool` | `Reversible` | **Confirm — operator attribution** | `testNarrativeActionsRequireReviewAndPreserveAISummary` | `IMPLEMENTED — IDEMPOTENT STATE/REVIEW TEST` |
-| `memory.close_chapter_now` | `CameraMemoryView` | `WallModel` | `cameraID: String` | `ServiceAffecting` | Policy pending | Not implemented | `GAP — GUI/AUTOMATIC FLUSH DRAINS BUFFER BEFORE PERSISTENCE; FAILURE RECOVERY NOT PROVEN` |
+| `memory.close_chapter_now` | `CameraMemoryView` | `WallModel` | `cameraID: String` | `ServiceAffecting` | Policy pending | Not implemented | `GAP — IN-PROCESS RETRY ONLY; CRASH DURABILITY AND FULL RECOVERY NOT PROVEN` |
 | `memory.rebuild_knowledge` | `CameraMemoryView` | `WallModel` | `none` | `ServiceAffecting` | Auto | `testMemoryRebuildKnowledge` | `PLANNED` |
 
 ---

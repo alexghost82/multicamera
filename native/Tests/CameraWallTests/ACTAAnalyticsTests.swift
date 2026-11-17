@@ -260,7 +260,7 @@ final class ACTAAnalyticsTests: XCTestCase {
         XCTAssertEqual(objState.sampledFrames.count, 2)
 
         // 3. Test coordinator `forceCloseNarrativeChapter` + operator pin & text edit preserving `aiSummary`
-        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun, preferredLanguage: .ru), cacheStore: store)
+        let client = narrativeFakeClient(store: store)
         let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store)
         let camID = UUID()
 
@@ -302,7 +302,7 @@ final class ACTAAnalyticsTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try LocalTrackingStore(url: root.appendingPathComponent("tracking.sqlite"))
-        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), cacheStore: store)
+        let client = narrativeFakeClient(store: store)
         let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store)
         let image = makeTestImage()
         let cameraID = UUID()
@@ -350,7 +350,7 @@ final class ACTAAnalyticsTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try LocalTrackingStore(url: root.appendingPathComponent("tracking.sqlite"))
-        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), cacheStore: store)
+        let client = narrativeFakeClient(store: store)
         let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store)
         let image = makeTestImage()
         let cameraID = UUID()
@@ -375,9 +375,9 @@ final class ACTAAnalyticsTests: XCTestCase {
                 cameraID: cameraID, cameraName: "sensitive-camera-name", cgImage: image,
                 hasActiveObjects: true, activeTrackIDs: ["saved-\(index)"],
                 evaluateAlerts: false, now: timestamp.addingTimeInterval(Double(index + 30)))
-            XCTAssertEqual(outcome, index == ACTACameraNarrativeState.flushFrameThreshold - 1 ? .saved : .notAttempted)
+            XCTAssertEqual(outcome, index == 0 || index == ACTACameraNarrativeState.flushFrameThreshold - 1 ? .saved : .notAttempted)
         }
-        XCTAssertEqual(try store.loadACTANarrativeChapterRecords(cameraID: cameraID).count, 1)
+        XCTAssertEqual(try store.loadACTANarrativeChapterRecords(cameraID: cameraID).count, 2)
     }
 
     func testSemanticKnowledgeLayerDossiersVisitsRoutesAndRebuild() throws {

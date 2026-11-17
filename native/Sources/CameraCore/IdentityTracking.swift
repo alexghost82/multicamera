@@ -285,6 +285,9 @@ public final class LocalTrackingStore: @unchecked Sendable {
     private let database: OpaquePointer
     private let cropDirectory: URL
     private let lock = NSRecursiveLock()
+#if DEBUG
+    var narrativeJPEGWriteTestHook: ((FileHandle, URL, Data) throws -> Void)?
+#endif
 
     public static var defaultURL: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -940,6 +943,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         defer { sqlite3_finalize(statement) }
         bind(trackID.uuidString, at: 1, to: statement)
         guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseError() }
+        guard sqlite3_changes(database) == 1 else { throw LocalTrackingStoreError.missingTrack(trackID) }
     }
 
     @discardableResult
@@ -1848,6 +1852,9 @@ public final class LocalTrackingStore: @unchecked Sendable {
         _ record: ACTANarrativeChapterRecord,
         collageJPEG: Data? = nil
     ) throws {
+        guard UUID(uuidString: record.chapterID) != nil, record.collagePath == nil else {
+            throw LocalTrackingStoreError.query("Invalid narrative chapter identifier")
+        }
         try writeACTANarrativeChapterRecord(record, collageJPEG: collageJPEG, insertOnly: true)
     }
 
@@ -1886,11 +1893,46 @@ public final class LocalTrackingStore: @unchecked Sendable {
             let url = cropDirectory.appendingPathComponent(name)
             if insertOnly {
                 let descriptor = open(url.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
-                guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-                let file = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
-                defer { try? file.close() }
-                try file.write(contentsOf: collageJPEG)
-                try file.close()
+                if descriptor >= 0 {
+                    let file = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+                    defer { try? file.close() }
+                    var created = stat()
+                    let hasIdentity = fstat(descriptor, &created) == 0
+                    do {
+#if DEBUG
+                        if let hook = narrativeJPEGWriteTestHook {
+                            try hook(file, url, collageJPEG)
+                        } else {
+                            try file.write(contentsOf: collageJPEG)
+                        }
+#else
+                        try file.write(contentsOf: collageJPEG)
+#endif
+                        try file.close()
+                    } catch {
+                        var current = stat()
+                        if hasIdentity, lstat(url.path, &current) == 0,
+                           (current.st_mode & S_IFMT) == S_IFREG,
+                           current.st_dev == created.st_dev, current.st_ino == created.st_ino {
+                            _ = unlink(url.path)
+                        }
+                        throw error
+                    }
+                } else if errno == EEXIST {
+                    let existingDescriptor = open(url.path, O_RDONLY | O_NOFOLLOW)
+                    guard existingDescriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                    let file = FileHandle(fileDescriptor: existingDescriptor, closeOnDealloc: true)
+                    defer { try? file.close() }
+                    var attributes = stat()
+                    guard fstat(existingDescriptor, &attributes) == 0,
+                          (attributes.st_mode & S_IFMT) == S_IFREG,
+                          attributes.st_size == collageJPEG.count,
+                          try file.readToEnd() == collageJPEG else {
+                        throw LocalTrackingStoreError.query("Narrative collage conflict")
+                    }
+                } else {
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
             } else {
                 try collageJPEG.write(to: url, options: [.atomic])
                 try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
@@ -1982,6 +2024,19 @@ public final class LocalTrackingStore: @unchecked Sendable {
 
     public func loadACTANarrativeChapterRecord(chapterID: String) throws -> ACTANarrativeChapterRecord? {
         try loadACTANarrativeChapterRecords(chapterID: chapterID, limit: 1).first
+    }
+
+    public func actaNarrativeChapterExists(chapterID: String) throws -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let statement = try prepare("SELECT 1 FROM ghost_narrative_chapters WHERE chapter_id = ?")
+        defer { sqlite3_finalize(statement) }
+        bind(chapterID, at: 1, to: statement)
+        switch sqlite3_step(statement) {
+        case SQLITE_ROW: return true
+        case SQLITE_DONE: return false
+        default: throw databaseError()
+        }
     }
 
     /// Reads the JPEG collage persisted next to a narrative chapter, if any.

@@ -12,6 +12,12 @@ final class LocalVLMClientTests: XCTestCase {
         }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
+        let previousModels = ModelSelectionPreferences(
+            enabled: Set(LocalModelService.allCases.filter { ModelSelectionRegistry.isEnabled($0) }),
+            paths: Dictionary(uniqueKeysWithValues: LocalModelService.allCases.compactMap { service in
+                ModelSelectionRegistry.path(service).map { (service, $0.path) }
+            }))
+        defer { ModelSelectionRegistry.update(previousModels) }
         let trackingURL = directory.appendingPathComponent("tracking.sqlite3")
         let store = try LocalTrackingStore(url: trackingURL)
         let scan = CameraScanRecord(cameraID: UUID(), cameraName: "Вход",
@@ -19,9 +25,28 @@ final class LocalVLMClientTests: XCTestCase {
         try store.saveAutomaticScan(scan)
         let coordinator = CameraFeatureCoordinator(preferencesURL: directory.appendingPathComponent("features.json"),
             databaseURL: directory.appendingPathComponent("features.sqlite3"))
-        let wall = WallModel(configURL: directory.appendingPathComponent("cameras.json"),
-            trackingStoreURL: trackingURL, featureCoordinator: coordinator, analyticsDirectoryURL: directory)
+        try coordinator.savePreferences(CameraFeaturePreferences(enabledFeatures: []))
+        let configURL = directory.appendingPathComponent("cameras.json")
+        try ConfigurationStore.save(WallConfiguration(), to: configURL)
+        let agentClient = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), transport: { _ in
+            XCTFail("Unexpected network request")
+            throw URLError(.notConnectedToInternet)
+        })
+        let wall = WallModel(configURL: configURL, workerMode: false,
+            trackingStoreURL: trackingURL, featureCoordinator: coordinator,
+            analyticsDirectoryURL: directory.appendingPathComponent("analytics"),
+            agentClient: agentClient,
+            cameraMemoryStore: CameraMemoryStore(url: directory.appendingPathComponent("frames")),
+            operationsWatchURL: directory.appendingPathComponent("watches.json"),
+            missionStoreURL: directory.appendingPathComponent("missions.json"),
+            cameraCredentialStore: ACTAIsolatedCredentials(),
+            operationsPreferencesURL: directory.appendingPathComponent("operations.json"),
+            alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")),
+            languageSettings: LanguageSettings(storage: LocalVLMTestLanguageStorage()),
+            monitorHistoryURL: directory.appendingPathComponent("monitor.json"))
         defer { wall.shutdown() }
+        XCTAssertTrue(wall.config.cameras.isEmpty)
+        XCTAssertTrue(wall.featurePreferences.enabledFeatures.isEmpty)
         wall.vlmPreferences.model = model
         let question = "Какого цвета автомобиль был замечен?"
         XCTAssertFalse(wall.running)
@@ -203,6 +228,13 @@ final class LocalVLMClientTests: XCTestCase {
         XCTAssertEqual(LocalVLMError.emptyResponse.localizedDescription,
                        "The native VLM returned an empty response.")
     }
+}
+
+@MainActor
+private final class LocalVLMTestLanguageStorage: LanguageSettingsStorage {
+    private var values: [String: String] = [:]
+    func string(forKey key: String) -> String? { values[key] }
+    func set(_ value: String, forKey key: String) { values[key] = value }
 }
 
 private actor LoadCounter {

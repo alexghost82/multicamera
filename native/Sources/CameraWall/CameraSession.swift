@@ -9,6 +9,7 @@ struct SessionFrame {
     var pixel: CVPixelBuffer?
     var serial: UInt64 = 0
     var receivedAt: TimeInterval = 0
+    var reconnectEvidence: ReconnectFrameEvidence?
     var message = "Stopped"
     var reconnects = 0
     var frames: UInt64 = 0
@@ -29,6 +30,12 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     private var stopped = false
     private var frame = SessionFrame()
     private let queue = DispatchQueue(label: "CameraWall.decoder", qos: .userInitiated)
+    let attemptID: UUID
+
+    init(attemptID: UUID = UUID()) {
+        self.attemptID = attemptID
+        super.init()
+    }
 
     func start(url: String) { queue.async { [self] in run(url: url) } }
 
@@ -141,6 +148,7 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             captureDevice = nil
             condition.lock()
             frame.pixel = nil
+            frame.reconnectEvidence = nil
             frame.measuredFPS = 0
             condition.unlock()
             if let device = Self.localDevices().first(where: { $0.uniqueID == deviceID }) {
@@ -209,7 +217,7 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         if !shouldStop { setError("Screen capture stopped. Check Screen Recording permission.") }
     }
 
-    private func publish(_ pixel: CVPixelBuffer, message: String) {
+    func publish(_ pixel: CVPixelBuffer, message: String) {
         condition.lock()
         defer { condition.unlock() }
         guard !stopped else { return }
@@ -217,6 +225,8 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         frame.serial &+= 1
         frame.frames &+= 1
         frame.receivedAt = ProcessInfo.processInfo.systemUptime
+        frame.reconnectEvidence = ReconnectFrameEvidence(
+            attemptID: attemptID, sequence: frame.serial, receivedAt: ContinuousClock().now)
         frame.width = CVPixelBufferGetWidth(pixel)
         frame.height = CVPixelBufferGetHeight(pixel)
         fpsFrames += 1
@@ -253,6 +263,8 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
                     frame.serial &+= 1
                     frame.frames &+= 1
                     frame.receivedAt = ProcessInfo.processInfo.systemUptime
+                    frame.reconnectEvidence = ReconnectFrameEvidence(
+                        attemptID: attemptID, sequence: frame.serial, receivedAt: ContinuousClock().now)
                     frame.width = CVPixelBufferGetWidth(pixel)
                     frame.height = CVPixelBufferGetHeight(pixel)
                     windowFrames += 1
@@ -275,6 +287,7 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             cw_error(error, &buffer, Int32(buffer.count))
             if filePlayback {
                 frame.pixel = nil
+                frame.reconnectEvidence = nil
                 frame.measuredFPS = 0
                 frame.message = cw_is_eof(error) != 0 ? "End of video" : String(cString: buffer)
                 condition.unlock()
@@ -282,6 +295,7 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             }
             frame.message = String(cString: buffer)
             frame.pixel = nil
+            frame.reconnectEvidence = nil
             frame.measuredFPS = 0
             frame.reconnects += 1
             failures += 1

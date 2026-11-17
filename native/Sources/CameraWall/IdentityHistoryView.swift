@@ -2,6 +2,16 @@ import AppKit
 import SwiftUI
 import CameraCore
 
+struct VehicleTextRemovalReview {
+    let evidence: VehicleTextEvidence
+
+    func apply(current: VehicleTextEvidence?, remove: (UUID) -> Void) -> Bool {
+        guard current == evidence else { return false }
+        remove(evidence.trackID)
+        return true
+    }
+}
+
 struct IdentityHistoryView: View {
     @ObservedObject var model: WallModel
     @Environment(\.locale) private var locale
@@ -9,6 +19,8 @@ struct IdentityHistoryView: View {
     @State private var confirmGroup = false
     @State private var showReIDValidation = false
     @State private var searchText = ""
+    @State private var pendingTextRemoval: VehicleTextEvidence?
+    @State private var confirmTextRemoval = false
 
     private var appLanguage: AppLanguage { locale.appLanguage }
     private var filteredTracks: [TrackedObjectRecord] {
@@ -158,7 +170,8 @@ struct IdentityHistoryView: View {
                                             .textSelection(.enabled)
                                             .fixedSize(horizontal: false, vertical: true)
                                         Button(role: .destructive) {
-                                            model.clearVehicleTextEvidence(for: record.trackID)
+                                            pendingTextRemoval = saved
+                                            confirmTextRemoval = true
                                         } label: {
                                             Label("Remove saved text", systemImage: "trash")
                                         }
@@ -293,6 +306,23 @@ struct IdentityHistoryView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This records your manual decision only. It does not infer a cross-camera identity.")
+        }
+        .confirmationDialog("Remove saved vehicle text?", isPresented: $confirmTextRemoval,
+                            presenting: pendingTextRemoval) { evidence in
+            Button("Remove saved text", role: .destructive) {
+                let review = VehicleTextRemovalReview(evidence: evidence)
+                guard review.apply(current: model.savedVehicleTextEvidence[evidence.trackID],
+                                   remove: model.clearVehicleTextEvidence(for:)) else {
+                    model.notice = appLanguage.localized("Saved vehicle text changed; review it again before removing.")
+                    pendingTextRemoval = nil
+                    return
+                }
+                pendingTextRemoval = nil
+            }
+            Button("Cancel", role: .cancel) { pendingTextRemoval = nil }
+        } message: { evidence in
+            Text(appLanguage.localized("Track: %@", arguments: [evidence.trackID.uuidString]))
+            Text("This removes saved OCR from the track only. Copies may remain in search indexes and other records.")
         }
     }
 

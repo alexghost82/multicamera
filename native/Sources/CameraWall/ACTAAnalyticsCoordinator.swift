@@ -92,14 +92,17 @@ public struct ACTACameraAlertRingState: Sendable {
     public var ringFrames: [ACTAAlertRingFrame] = []
     public var lookbackFrames: [ACTAAlertRingFrame] = []
     public var lastSampledAt: Date = .distantPast
+    private var lastSampledMonotonic: TimeInterval?
 
     public init() {}
 
-    public mutating func offerFrame(_ image: CGImage, at timestamp: Date) -> Bool {
-        guard timestamp.timeIntervalSince(lastSampledAt) >= Self.sampleIntervalSec else {
+    public mutating func offerFrame(_ image: CGImage, at timestamp: Date, monotonicTimestamp: TimeInterval? = nil) -> Bool {
+        let monotonic = monotonicTimestamp ?? timestamp.timeIntervalSinceReferenceDate
+        guard (lastSampledMonotonic.map { monotonic - $0 } ?? .infinity) >= Self.sampleIntervalSec else {
             return false
         }
         lastSampledAt = timestamp
+        lastSampledMonotonic = monotonic
         let item = ACTAAlertRingFrame(cgImage: image, capturedAt: timestamp)
         ringFrames.append(item)
         if ringFrames.count > Self.ringCapacity {
@@ -130,6 +133,8 @@ public struct ACTACameraNarrativeState: Sendable {
     public var previousHistogram: [Float]?
     public var seenTrackIDsInChapter: Set<String> = []
     public var seenIdentityIDsInChapter: Set<String> = []
+    private var lastSampledMonotonic: TimeInterval?
+    private var chapterStartedMonotonic: TimeInterval?
 
     public init(mode: ACTANarrativeTriggerMode = .object) {
         self.mode = mode
@@ -142,8 +147,10 @@ public struct ACTACameraNarrativeState: Sendable {
         activeIdentityIDs: [String] = [],
         modeOverride: ACTANarrativeTriggerMode? = nil,
         allowFlush: Bool = true,
-        at timestamp: Date
+        at timestamp: Date,
+        monotonicTimestamp: TimeInterval? = nil
     ) -> (frames: [ACTANarrativeSampledFrame], sightingCount: Int, identityCount: Int)? {
+        let monotonic = monotonicTimestamp ?? timestamp.timeIntervalSinceReferenceDate
         let activeMode = modeOverride ?? mode
         let hasStory = ACTANarrativeSamplerRules.hasStoryObject(labels: activeLabels) || !activeTrackIDs.isEmpty
 
@@ -159,12 +166,12 @@ public struct ACTACameraNarrativeState: Sendable {
             if !newTracks.isEmpty {
                 shouldSample = true
                 sampleReason = .newObject
-            } else if hasStory && timestamp.timeIntervalSince(lastSampledAt) >= Self.objectHeartbeatSec {
+            } else if hasStory && (lastSampledMonotonic.map { monotonic - $0 } ?? .infinity) >= Self.objectHeartbeatSec {
                 shouldSample = true
                 sampleReason = sampledFrames.isEmpty ? .firstFrame : .objectHeartbeat
             }
         case .interval:
-            if timestamp.timeIntervalSince(lastSampledAt) >= Self.intervalSampleSec {
+            if (lastSampledMonotonic.map { monotonic - $0 } ?? .infinity) >= Self.intervalSampleSec {
                 let eval = ACTANarrativeSamplerRules.evaluateSceneChange(
                     cgImage: image,
                     previousLuma: previousThumbLuma,
@@ -181,8 +188,10 @@ public struct ACTACameraNarrativeState: Sendable {
 
         if shouldSample {
             lastSampledAt = timestamp
+            lastSampledMonotonic = monotonic
             if chapterStartedAt == nil {
                 chapterStartedAt = timestamp
+                chapterStartedMonotonic = monotonic
             }
             seenTrackIDsInChapter.formUnion(activeTrackIDs)
             seenIdentityIDsInChapter.formUnion(activeIdentityIDs)
@@ -198,7 +207,7 @@ public struct ACTACameraNarrativeState: Sendable {
             )
         }
 
-        let elapsed = timestamp.timeIntervalSince(chapterStartedAt ?? timestamp)
+        let elapsed = monotonic - (chapterStartedMonotonic ?? monotonic)
         if allowFlush && (sampledFrames.count >= Self.flushFrameThreshold || (sampledFrames.count >= 4 && elapsed >= Self.flushTimeoutSec)) {
             return drainForFlush()
         }
@@ -210,12 +219,19 @@ public struct ACTACameraNarrativeState: Sendable {
         return drainForFlush()
     }
 
+    mutating func resetSamplingForClockDiscontinuity() {
+        lastSampledMonotonic = nil
+        previousThumbLuma = nil
+        previousHistogram = nil
+    }
+
     private mutating func drainForFlush() -> (frames: [ACTANarrativeSampledFrame], sightingCount: Int, identityCount: Int) {
         let thinned = ACTANarrativeSamplerRules.thinFrames(sampledFrames, maxFrames: Self.flushFrameThreshold)
         let sCount = seenTrackIDsInChapter.count
         let iCount = seenIdentityIDsInChapter.count
         sampledFrames.removeAll(keepingCapacity: true)
         chapterStartedAt = nil
+        chapterStartedMonotonic = nil
         seenTrackIDsInChapter.removeAll(keepingCapacity: true)
         seenIdentityIDsInChapter.removeAll(keepingCapacity: true)
         return (thinned, sCount, iCount)
@@ -229,11 +245,13 @@ public enum ACTANarrativeFlushOutcome: Sendable, Equatable {
     case saved
     case notVerified
     case backpressure
+    case staleFrame
 
     public static let notVerifiedNotice =
         "A narrative chapter could not be verified as saved. Any pending frames remain in process memory; recovery and crash survival are not guaranteed."
     public static let backpressureNotice =
-        "Narrative sampling is paused because its in-memory buffer is full. New frames are not being accepted; pending chapters are not guaranteed saved."
+        "This narrative frame was not accepted because the buffer is full or a pending chapter prevents a clock-change split. Pending chapters are not guaranteed saved."
+    public static let staleFrameNotice = "A stale or repeated narrative frame was skipped."
 }
 
 private struct ACTAReservedNarrativeBatch {
@@ -244,7 +262,6 @@ private struct ACTAReservedNarrativeBatch {
     let identityCount: Int
     let previousSummary: String?
     var inFlight: Bool
-    var retryAllowed: Bool
     var attemptedRecord: ACTANarrativeChapterRecord? = nil
     var attemptedJPEG: Data? = nil
 }
@@ -253,6 +270,13 @@ private enum ACTANarrativeFlushAttempt {
     case saved(ACTANarrativeChapterRecord)
     case notStarted
     case uncertain
+}
+
+private final class ACTANarrativeGenerationFailure: @unchecked Sendable {
+    private let lock = NSLock()
+    private var failed = false
+    func mark() { lock.withLock { failed = true } }
+    var didFail: Bool { lock.withLock { failed } }
 }
 
 /// A live camera snapshot captured when the operator asks Ghost Chat a question.
@@ -368,9 +392,20 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
 
     private var alertRingsByCamera: [UUID: ACTACameraAlertRingState] = [:]
     private var narrativeStatesByCamera: [UUID: ACTACameraNarrativeState] = [:]
+    private var narrativeFrameWatermarks: [UUID: TimeInterval] = [:]
+    private var narrativeWallClockWatermarks: [UUID: Date] = [:]
     private var reservedNarrativesByCamera: [UUID: ACTAReservedNarrativeBatch] = [:]
-    private var recentAlertTimestamps: [Date] = []
-    private var lastAlertDedupByKey: [String: Date] = [:]
+#if DEBUG
+    var narrativeBeforeGenerationTestHook: (@Sendable () async -> Void)?
+    var narrativeAfterGenerationTestHook: (@Sendable () async -> Void)?
+    var narrativePostCommitTestHook: (@Sendable () throws -> Void)?
+    var alertMonotonicClockForTesting: (@Sendable () -> TimeInterval)?
+    func alertRingFrameCountForTesting(cameraID: UUID) -> Int {
+        lock.withLock { alertRingsByCamera[cameraID]?.ringFrames.count ?? 0 }
+    }
+#endif
+    private var recentAlertTimestamps: [TimeInterval] = []
+    private var lastAlertDedupByKey: [String: TimeInterval] = [:]
 
     private var lastContinuitySweepAt: Date = .distantPast
     private var cropsSinceLastSweep: Int = 0
@@ -925,52 +960,75 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         sampleNarrative: Bool = true,
         retainCollageJPEG: Bool = true,
         narrativePrivacy: (@MainActor @Sendable () -> (enabled: Bool, retain: Bool))? = nil,
-        now: Date = Date()
+        now: Date = Date(),
+        monotonicTimestamp: TimeInterval = ProcessInfo.processInfo.systemUptime
     ) async -> ACTANarrativeFlushOutcome {
         let effectiveLabels = activeLabels.isEmpty ? (hasActiveObjects ? ["person"] : []) : activeLabels
-        let (ringReady, batch, backpressure): ([ACTAAlertRingFrame]?, ACTAReservedNarrativeBatch?, Bool) = lock.withLock {
+        let (ringReady, batch, backpressure, stale): ([ACTAAlertRingFrame]?, ACTAReservedNarrativeBatch?, Bool, Bool) = lock.withLock {
             var rReady: [ACTAAlertRingFrame]?
             var attempt: ACTAReservedNarrativeBatch?
             var full = false
+            let stale = sampleNarrative && (!now.timeIntervalSinceReferenceDate.isFinite ||
+                !monotonicTimestamp.isFinite ||
+                narrativeFrameWatermarks[cameraID].map({ monotonicTimestamp <= $0 }) == true)
 
             if evaluateAlerts {
                 var ringState = alertRingsByCamera[cameraID] ?? ACTACameraAlertRingState()
-                if ringState.offerFrame(cgImage, at: now) {
+                let alertClock = monotonicTimestamp.isFinite ? monotonicTimestamp : ProcessInfo.processInfo.systemUptime
+                if ringState.offerFrame(cgImage, at: now, monotonicTimestamp: alertClock) {
                     rReady = ringState.ringFrames
                 }
                 alertRingsByCamera[cameraID] = ringState
             }
 
-            if sampleNarrative {
+            if sampleNarrative && !stale {
                 var narState = narrativeStatesByCamera[cameraID] ?? ACTACameraNarrativeState()
                 var reserved = reservedNarrativesByCamera[cameraID]
-                if narState.sampledFrames.count >= ACTACameraNarrativeState.flushFrameThreshold {
+                let wallClockRegressed = narrativeWallClockWatermarks[cameraID].map { now < $0 } == true
+                if wallClockRegressed {
+                    if narState.sampledFrames.isEmpty {
+                        narState.resetSamplingForClockDiscontinuity()
+                    } else if reserved == nil, let flushed = narState.forceClose() {
+                        reserved = ACTAReservedNarrativeBatch(
+                            chapterID: UUID().uuidString, cameraName: cameraName, frames: flushed.frames,
+                            sightingCount: flushed.sightingCount, identityCount: flushed.identityCount,
+                            previousSummary: narState.lastChapterSummary, inFlight: false)
+                        narState.resetSamplingForClockDiscontinuity()
+                    } else {
+                        full = true
+                    }
+                }
+                if !full && narState.sampledFrames.count >= ACTACameraNarrativeState.flushFrameThreshold {
                     full = true
                     if reserved == nil, let flushed = narState.forceClose() {
                         reserved = ACTAReservedNarrativeBatch(
                             chapterID: UUID().uuidString, cameraName: cameraName, frames: flushed.frames,
                             sightingCount: flushed.sightingCount, identityCount: flushed.identityCount,
-                            previousSummary: narState.lastChapterSummary, inFlight: false, retryAllowed: true)
+                            previousSummary: narState.lastChapterSummary, inFlight: false)
                     }
-                } else if let flushed = narState.offerFrame(
+                } else if !full, let flushed = narState.offerFrame(
                     cgImage, activeLabels: effectiveLabels, activeTrackIDs: activeTrackIDs,
                     activeIdentityIDs: activeIdentityIDs, modeOverride: narrativeMode,
-                    allowFlush: reserved == nil, at: now
+                    allowFlush: reserved == nil, at: now, monotonicTimestamp: monotonicTimestamp
                 ) {
                     reserved = ACTAReservedNarrativeBatch(
                         chapterID: UUID().uuidString, cameraName: cameraName, frames: flushed.frames,
                         sightingCount: flushed.sightingCount, identityCount: flushed.identityCount,
-                        previousSummary: narState.lastChapterSummary, inFlight: false, retryAllowed: true)
+                        previousSummary: narState.lastChapterSummary, inFlight: false)
                 }
-                if var pending = reserved, !pending.inFlight, pending.retryAllowed {
+                if var pending = reserved, !pending.inFlight {
                     pending.inFlight = true
                     reserved = pending
                     attempt = pending
                 }
                 reservedNarrativesByCamera[cameraID] = reserved
                 narrativeStatesByCamera[cameraID] = narState
+                if !full {
+                    narrativeFrameWatermarks[cameraID] = monotonicTimestamp
+                    narrativeWallClockWatermarks[cameraID] = now
+                }
             }
-            return (rReady, attempt, full)
+            return (rReady, attempt, full, stale)
         }
 
         defer {
@@ -982,7 +1040,7 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
                 }
             }
         }
-        if evaluateAlerts, let ringReady, canDispatchAlertEvaluation(now: now) {
+        if evaluateAlerts, let ringReady, canDispatchAlertEvaluation() {
             await evaluateCriticalAlertRing(
                 cameraID: cameraID,
                 cameraName: cameraName,
@@ -992,6 +1050,7 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
             )
         }
 
+        if stale { return .staleFrame }
         if let batch {
             let result = await flushNarrativeChapter(cameraID: cameraID, batch: batch,
                 retainCollageJPEG: retainCollageJPEG, narrativePrivacy: narrativePrivacy)
@@ -1017,10 +1076,10 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
                 pending = ACTAReservedNarrativeBatch(
                     chapterID: UUID().uuidString, cameraName: cameraName, frames: drained.frames,
                     sightingCount: drained.sightingCount, identityCount: drained.identityCount,
-                    previousSummary: state.lastChapterSummary, inFlight: false, retryAllowed: true)
+                    previousSummary: state.lastChapterSummary, inFlight: false)
                 narrativeStatesByCamera[cameraID] = state
             }
-            guard var pending, !pending.inFlight, pending.retryAllowed else { return nil }
+            guard var pending, !pending.inFlight else { return nil }
             pending.inFlight = true
             reservedNarrativesByCamera[cameraID] = pending
             return pending
@@ -1055,9 +1114,25 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         }
     }
 
-    private func canDispatchAlertEvaluation(now: Date) -> Bool {
+    private func narrativeMatches(_ saved: ACTANarrativeChapterRecord, expected: ACTANarrativeChapterRecord) -> Bool {
+        var comparable = saved
+        comparable.operatorText = expected.operatorText
+        comparable.operatorMarked = expected.operatorMarked
+        comparable.pinned = expected.pinned
+        return comparable == expected
+    }
+
+    private func alertMonotonicNow() -> TimeInterval {
+#if DEBUG
+        if let clock = alertMonotonicClockForTesting { return clock() }
+#endif
+        return ProcessInfo.processInfo.systemUptime
+    }
+
+    private func canDispatchAlertEvaluation() -> Bool {
         lock.withLock {
-            recentAlertTimestamps.removeAll { now.timeIntervalSince($0) > 60.0 }
+            let now = alertMonotonicNow()
+            recentAlertTimestamps.removeAll { now - $0 > 60.0 }
             guard recentAlertTimestamps.count < Self.alertMaxRPM else { return false }
             recentAlertTimestamps.append(now)
             return true
@@ -1096,10 +1171,11 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         for detection in batch.alerts where detection.triggered && detection.confidence >= 0.65 {
             let dedupKey = "\(cameraID.uuidString)|\(detection.ruleCode)"
             let isDuplicate: Bool = lock.withLock {
-                if let prev = lastAlertDedupByKey[dedupKey], now.timeIntervalSince(prev) < Self.alertDedupWindowSec {
+                let monotonicNow = alertMonotonicNow()
+                if let prev = lastAlertDedupByKey[dedupKey], monotonicNow - prev < Self.alertDedupWindowSec {
                     return true
                 }
-                lastAlertDedupByKey[dedupKey] = now
+                lastAlertDedupByKey[dedupKey] = monotonicNow
                 return false
             }
             guard !isDuplicate else { continue }
@@ -1180,15 +1256,35 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         narrativePrivacy: (@MainActor @Sendable () -> (enabled: Bool, retain: Bool))?
     ) async -> ACTANarrativeFlushAttempt {
         guard let trackingStore, !Task.isCancelled else { return .notStarted }
-        if let expected = batch.attemptedRecord {
+        if let attempted = batch.attemptedRecord {
             return await MainActor.run {
                 let policy = narrativePrivacy?() ?? (enabled: true, retain: retainCollageJPEG)
                 guard policy.enabled, !Task.isCancelled else { return .notStarted }
-                guard batch.attemptedJPEG == nil || policy.retain else { return .uncertain }
                 do {
-                    guard let saved = try trackingStore.loadACTANarrativeChapterRecord(chapterID: batch.chapterID),
-                          saved == expected else { return .uncertain }
-                    if let jpeg = batch.attemptedJPEG {
+                    var expected = attempted
+                    var jpeg = batch.attemptedJPEG
+                    var saved = try trackingStore.loadACTANarrativeChapterRecord(chapterID: batch.chapterID)
+                    if saved == nil {
+                        guard try !trackingStore.actaNarrativeChapterExists(chapterID: batch.chapterID) else {
+                            return .uncertain
+                        }
+                        if !policy.retain {
+                            expected.collagePath = nil
+                            jpeg = nil
+                            lock.withLock {
+                                if reservedNarrativesByCamera[cameraID]?.chapterID == batch.chapterID {
+                                    reservedNarrativesByCamera[cameraID]?.attemptedRecord = expected
+                                    reservedNarrativesByCamera[cameraID]?.attemptedJPEG = nil
+                                }
+                            }
+                        }
+                        var insertRecord = expected
+                        insertRecord.collagePath = nil
+                        try trackingStore.insertACTANarrativeChapterRecord(insertRecord, collageJPEG: jpeg)
+                        saved = try trackingStore.loadACTANarrativeChapterRecord(chapterID: batch.chapterID)
+                    }
+                    guard let saved, narrativeMatches(saved, expected: expected) else { return .uncertain }
+                    if let jpeg {
                         guard trackingStore.actaNarrativeCollageData(for: saved) == jpeg else { return .uncertain }
                     }
                     return .saved(saved)
@@ -1202,7 +1298,10 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         let sightingCount = batch.sightingCount
         let identityCount = batch.identityCount
         guard let startedAt = sampledFrames.first?.capturedAt,
-              let endedAt = sampledFrames.last?.capturedAt else { return .notStarted }
+              let endedAt = sampledFrames.last?.capturedAt,
+              zip(sampledFrames, sampledFrames.dropFirst()).allSatisfy({ $0.0.capturedAt <= $0.1.capturedAt }) else {
+            return .notStarted
+        }
         let thinned = ACTANarrativeSamplerRules.thinFrames(sampledFrames, maxFrames: ACTACameraNarrativeState.flushFrameThreshold)
         let cells = thinned.enumerated().map { idx, f in
             ACTACollageCell(badgeIndex: idx + 1, itemID: "N-\(idx + 1)", cgImage: f.cgImage)
@@ -1225,12 +1324,24 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
             language: lang
         )
 
+#if DEBUG
+        await narrativeBeforeGenerationTestHook?()
+#endif
+        guard !Task.isCancelled else { return .notStarted }
+        let enabled = await MainActor.run { narrativePrivacy?().enabled ?? true }
+        guard enabled, !Task.isCancelled else { return .notStarted }
+        let generationFailure = ACTANarrativeGenerationFailure()
         let chapter = await aiClient.generateStructured(
             lane: .background,
             tier: .mini,
             taskType: "narrative_chapter",
             prompt: prompt,
             jpegImages: [collage.jpegData],
+            useContentCache: false,
+            onFailureFallback: { generationFailure.mark() },
+            beforeDispatch: {
+                await MainActor.run { !Task.isCancelled && (narrativePrivacy?().enabled ?? true) }
+            },
             responseType: ACTATemporalNarrativeResult.self,
             fallbackFactory: {
                 let deltaText = effectivePreviousSummary.map { "Без существенных отклонений от предыдущей главы (\($0.prefix(40)))." }
@@ -1244,6 +1355,10 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
             }
         )
 
+#if DEBUG
+        await narrativeAfterGenerationTestHook?()
+#endif
+        guard !generationFailure.didFail else { return .notStarted }
         let record = ACTANarrativeChapterRecord(
             chapterID: batch.chapterID,
             cameraID: cameraID,
@@ -1280,10 +1395,13 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
                     record,
                     collageJPEG: jpeg
                 )
+#if DEBUG
+                try narrativePostCommitTestHook?()
+#endif
                 guard let saved = try trackingStore.loadACTANarrativeChapterRecord(chapterID: record.chapterID) else {
                     return .uncertain
                 }
-                guard saved == expected else { return .uncertain }
+                guard narrativeMatches(saved, expected: expected) else { return .uncertain }
                 if let jpeg {
                     guard trackingStore.actaNarrativeCollageData(for: saved) == jpeg else { return .uncertain }
                 }

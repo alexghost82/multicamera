@@ -19,18 +19,27 @@ final class ACTAServiceAdapterTests: XCTestCase {
     func testLocalAgentDiscoversAndExecutesRegisteredActionWithScriptedTransport() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let model = WallModel(configURL: directory.appendingPathComponent("cameras.json"),
+        let previousModels = actaTestModelPreferences()
+        defer { ModelSelectionRegistry.update(previousModels) }
+        try prepareOfflineWallFixture(at: directory)
+        let model = WallModel(configURL: directory.appendingPathComponent("cameras.json"), workerMode: false,
             trackingStoreURL: directory.appendingPathComponent("model.sqlite"),
             featureCoordinator: CameraFeatureCoordinator(preferencesURL: directory.appendingPathComponent("features.json"),
                 databaseURL: directory.appendingPathComponent("features.sqlite")),
             analyticsDirectoryURL: directory.appendingPathComponent("analytics"),
+            agentClient: offlineWallClient(),
             cameraMemoryStore: CameraMemoryStore(url: directory.appendingPathComponent("frames")),
             operationsWatchURL: directory.appendingPathComponent("watches.json"),
             missionStoreURL: directory.appendingPathComponent("missions.json"),
             cameraCredentialStore: ACTAIsolatedCredentials(),
             operationsPreferencesURL: directory.appendingPathComponent("operations.json"),
-            alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")))
+            alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")),
+            languageSettings: LanguageSettings(storage: ACTAIsolatedLanguageStorage()),
+            monitorHistoryURL: directory.appendingPathComponent("monitor.json"))
         defer { model.shutdown() }
+        XCTAssertTrue(model.config.cameras.isEmpty)
+        XCTAssertTrue(model.featurePreferences.enabledFeatures.isEmpty)
+        XCTAssertFalse(model.running)
         await registerAllWallActions(registry: .shared, model: model)
         let store = try LocalTrackingStore(url: directory.appendingPathComponent("agent.sqlite"))
         let script = ActionTransportScript()
@@ -65,20 +74,29 @@ final class ACTAServiceAdapterTests: XCTestCase {
     func testActionsApplyToLiveModelAndPersistThroughGUIService() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
+        let previousModels = actaTestModelPreferences()
+        defer { ModelSelectionRegistry.update(previousModels) }
+        try prepareOfflineWallFixture(at: directory)
         let configurationURL = directory.appendingPathComponent("cameras.json")
         let preferencesURL = directory.appendingPathComponent("features.json")
-        let model = WallModel(configURL: configurationURL,
+        let model = WallModel(configURL: configurationURL, workerMode: false,
             trackingStoreURL: directory.appendingPathComponent("tracks.sqlite"),
             featureCoordinator: CameraFeatureCoordinator(preferencesURL: preferencesURL,
                 databaseURL: directory.appendingPathComponent("features.sqlite")),
             analyticsDirectoryURL: directory.appendingPathComponent("analytics"),
+            agentClient: offlineWallClient(),
             cameraMemoryStore: CameraMemoryStore(url: directory.appendingPathComponent("frames")),
             operationsWatchURL: directory.appendingPathComponent("watches.json"),
             missionStoreURL: directory.appendingPathComponent("missions.json"),
             cameraCredentialStore: ACTAIsolatedCredentials(),
             operationsPreferencesURL: directory.appendingPathComponent("operations.json"),
-            alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")))
+            alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")),
+            languageSettings: LanguageSettings(storage: ACTAIsolatedLanguageStorage()),
+            monitorHistoryURL: directory.appendingPathComponent("monitor.json"))
         defer { model.shutdown() }
+        XCTAssertTrue(model.config.cameras.isEmpty)
+        XCTAssertTrue(model.featurePreferences.enabledFeatures.isEmpty)
+        XCTAssertFalse(model.running)
         let registry = ACTAActionRegistry()
         let reconnectAction = CameraReconnectAction(model: model)
         let directReconnect = try await reconnectAction.execute(parameters: ["camera_id": UUID().uuidString], context: ACTAActionContext())
@@ -124,6 +142,42 @@ final class ACTAServiceAdapterTests: XCTestCase {
     }
 }
 
+@MainActor
+private func actaTestModelPreferences() -> ModelSelectionPreferences {
+    ModelSelectionPreferences(
+        enabled: Set(LocalModelService.allCases.filter { ModelSelectionRegistry.isEnabled($0) }),
+        paths: Dictionary(uniqueKeysWithValues: LocalModelService.allCases.compactMap { service in
+            ModelSelectionRegistry.path(service).map { (service, $0.path) }
+        }))
+}
+
+@MainActor
+private func prepareOfflineWallFixture(at root: URL) throws {
+    try ConfigurationStore.save(WallConfiguration(), to: root.appendingPathComponent("cameras.json"))
+    try CameraFeaturePreferencesStore.save(CameraFeaturePreferences(enabledFeatures: []),
+        to: root.appendingPathComponent("features.json"))
+    var models = ModelSelectionPreferences()
+    models.enabled = []
+    try models.save(to: root.appendingPathComponent("model-preferences.json"))
+    var ai = VLMPreferences()
+    ai.actaBackendMode = .dryRun
+    try VLMStore.save(ai, to: root.appendingPathComponent("vlm.json"))
+}
+
+private func offlineWallClient() -> ACTAAIClient {
+    ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), transport: { _ in
+        XCTFail("Unexpected network request")
+        throw URLError(.notConnectedToInternet)
+    })
+}
+
+@MainActor
+private final class ACTAIsolatedLanguageStorage: LanguageSettingsStorage {
+    private var values: [String: String] = [:]
+    func string(forKey key: String) -> String? { values[key] }
+    func set(_ value: String, forKey key: String) { values[key] = value }
+}
+
 private actor ActionTransportScript {
     private(set) var requests: [String] = []
     func reply(to request: String) -> String {
@@ -137,7 +191,8 @@ private actor ActionTransportScript {
 }
 
 struct ACTAIsolatedCredentials: CameraCredentialStore {
-    func read(_ id: UUID) throws -> Credentials? { XCTFail("Unexpected credential read"); return nil }
-    func save(_ credentials: Credentials, for id: UUID) throws { XCTFail("Unexpected credential save") }
-    func remove(_ id: UUID) throws { XCTFail("Unexpected credential removal") }
+    private struct UnexpectedAccess: Error {}
+    func read(_ id: UUID) throws -> Credentials? { XCTFail("Unexpected credential read"); throw UnexpectedAccess() }
+    func save(_ credentials: Credentials, for id: UUID) throws { XCTFail("Unexpected credential save"); throw UnexpectedAccess() }
+    func remove(_ id: UUID) throws { XCTFail("Unexpected credential removal"); throw UnexpectedAccess() }
 }

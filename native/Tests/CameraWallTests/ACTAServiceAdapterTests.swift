@@ -9,6 +9,11 @@ final class ACTAServiceAdapterTests: XCTestCase {
         XCTAssertEqual(actaRedactedStreamURL("rtsp://operator:secret@example.test:554/live?token=private#secret"),
             "rtsp://example.test:554/live")
         XCTAssertEqual(actaRedactedStreamURL("invalid private value"), "[redacted stream]")
+        let text = String(repeating: "Reviewed observation ", count: 100)
+        let review = actaAuditArguments(["text": text, "password": "private", "url": "rtsp://user:secret@example.test/live?token=private"])
+        XCTAssertEqual(review["text"], text, "The operator must be able to read the complete annotation before approval")
+        XCTAssertEqual(review["password"], "[redacted]")
+        XCTAssertEqual(review["url"], "rtsp://example.test/live")
     }
 
     func testLocalAgentDiscoversAndExecutesRegisteredActionWithScriptedTransport() async throws {
@@ -39,7 +44,7 @@ final class ACTAServiceAdapterTests: XCTestCase {
         XCTAssertTrue(requests.last?.contains("action_verified") == true)
 
         let tools = try await ACTAAnalyticsCoordinator.registryTools()
-        XCTAssertFalse(tools.contains { $0.name == "acta__watch__create" }, "Disconnected adapters must not be advertised")
+        XCTAssertFalse(tools.contains { $0.name == "acta__memory__clear_all_frames" }, "Disconnected adapters must not be advertised")
         XCTAssertTrue(tools.allSatisfy { !$0.name.contains(".") })
 
         let pending = await coordinator.executeAgentTool(toolName: "acta__settings__update_permissions",

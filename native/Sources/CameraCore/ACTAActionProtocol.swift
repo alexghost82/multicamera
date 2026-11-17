@@ -131,6 +131,7 @@ public protocol ACTAActionProtocol: Sendable {
     var classification: ACTAActionClassification { get }
     var parameters: [ACTAActionParameterSchema] { get }
     func requiresConfirmation(parameters: [String: String]) -> Bool
+    func validate(parameters: [String: String]) throws
 
     func execute(
         parameters: [String: String],
@@ -144,6 +145,8 @@ public protocol ACTAActionProtocol: Sendable {
 }
 
 public extension ACTAActionProtocol {
+    func validate(parameters: [String: String]) throws {}
+
     func requiresConfirmation(parameters: [String: String]) -> Bool {
         [.destructive, .securitySensitive].contains(classification)
     }

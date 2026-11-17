@@ -593,16 +593,32 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
     }
 
     func deleteIncidentEvidence(_ incidentID: UUID) {
-        let bundleID = incidentManager.incident(id: incidentID)?.clipID ?? incidentID
-        do {
-            try evidenceStore.deleteEvidence(for: bundleID)
-            incidentManager.clearEvidenceReferences(incidentID: incidentID)
-            auditLog.record(action: .evidenceDeleted, incidentID: incidentID,
-                summary: "Operator deleted stored evidence bundle for incident \(incidentID.uuidString.prefix(8))")
-        } catch {
-            // Store diagnostics remain visible and references are preserved on failure.
+        do { try deleteIncidentEvidenceChecked(incidentID) }
+        catch { /* Persistence diagnostics remain visible; no successful result is fabricated. */ }
+    }
+
+    func deleteIncidentEvidenceChecked(_ incidentID: UUID) throws {
+        guard let incident = incidentManager.incident(id: incidentID) else {
+            throw ConfigurationError.invalid("Incident does not exist.")
         }
-        refreshIncidentsAndAudit()
+        if let error = persistenceError { throw ConfigurationError.invalid(error) }
+        let bundleID = incident.clipID ?? incidentID
+        defer { refreshIncidentsAndAudit() }
+        try evidenceStore.deleteEvidence(for: bundleID)
+        incidentManager.clearEvidenceReferences(incidentID: incidentID)
+        auditLog.record(action: .evidenceDeleted, incidentID: incidentID,
+            summary: "Operator deleted stored evidence bundle for incident \(incidentID.uuidString.prefix(8))")
+        if let error = incidentManager.lastPersistenceError ?? auditLog.lastPersistenceError {
+            throw ConfigurationError.invalid(error)
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let saved = try decoder.decode([SafetyIncident].self, from: Data(contentsOf: incidentManager.storageURL))
+        guard let persisted = saved.first(where: { $0.id == incidentID }),
+              persisted.clipID == nil, persisted.snapshotRelativePath == nil,
+              !evidenceStore.hasEvidenceBundle(for: bundleID) else {
+            throw ConfigurationError.invalid("Evidence deletion verification failed.")
+        }
     }
 
     func clearResolvedIncidents() {

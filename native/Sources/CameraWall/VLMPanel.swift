@@ -146,13 +146,26 @@ struct VLMPanel: View {
                         .id(msg.messageID)
                     }
                     ForEach(model.actaChatActions, id: \.actionID) { action in
+                        let requiresTokenReview = action.actionID.hasPrefix("CONFIRM-")
                         VStack(alignment: .leading, spacing: 8) {
-                            Label(action.title.isEmpty ? "Proposed Action: \(action.actionType)" : action.title, systemImage: "bolt.shield")
+                            Label(requiresTokenReview ? languageSettings.localized("Review proposed action") : (action.title.isEmpty ? "Proposed Action: \(action.actionType)" : action.title), systemImage: "bolt.shield")
                                 .font(.system(size: ACTAType.caption, weight: .semibold))
                             Text(action.actionType)
                                 .font(.system(size: ACTAType.metadata))
                                 .foregroundStyle(.secondary)
                                 .textSelection(.enabled)
+                            DisclosureGroup {
+                                let values = actaAuditArguments(action.parameters)
+                                ForEach(values.keys.sorted(), id: \.self) { key in
+                                    Text(verbatim: "\(key): \(values[key] ?? "")")
+                                        .font(.system(size: ACTAType.caption))
+                                        .textSelection(.enabled)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            } label: {
+                                Text("Action details")
+                            }
+                            .accessibilityIdentifier("acta-action-details-\(action.actionID)")
                             HStack {
                                 Button {
                                     model.reviewACTAChatAction(action.actionID, confirmed: true)

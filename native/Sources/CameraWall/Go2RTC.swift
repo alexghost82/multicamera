@@ -2,7 +2,7 @@ import Foundation
 import Security
 import CameraCore
 
-struct Credentials: Codable {
+struct Credentials: Codable, Equatable, Sendable {
     var username: String
     var password: String
 }
@@ -36,13 +36,32 @@ enum CameraKeychain {
         }
     }
 
-    static func remove(_ id: UUID) { SecItemDelete(base(id) as CFDictionary) }
+    static func remove(_ id: UUID) { try? removeChecked(id) }
+
+    static func removeChecked(_ id: UUID) throws {
+        let status = SecItemDelete(base(id) as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw ConfigurationError.invalid("Keychain delete failed (\(status)).")
+        }
+    }
 
     private static func base(_ id: UUID) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
          kSecAttrService as String: "CameraWall.RTSP",
          kSecAttrAccount as String: id.uuidString]
     }
+}
+
+protocol CameraCredentialStore: Sendable {
+    func read(_ id: UUID) throws -> Credentials?
+    func save(_ credentials: Credentials, for id: UUID) throws
+    func remove(_ id: UUID) throws
+}
+
+struct SystemCameraCredentialStore: CameraCredentialStore {
+    func read(_ id: UUID) throws -> Credentials? { try CameraKeychain.read(id) }
+    func save(_ credentials: Credentials, for id: UUID) throws { try CameraKeychain.save(credentials, for: id) }
+    func remove(_ id: UUID) throws { try CameraKeychain.removeChecked(id) }
 }
 
 @MainActor

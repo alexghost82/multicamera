@@ -279,69 +279,47 @@ public struct AnalyticsGetSettingsAction: ACTAActionProtocol {
 public struct AnalyticsSetGlobalToggleAction: ACTAActionProtocol {
     public let id = "analytics.set_global_toggle"
     public let title = "Set Video Analytics Toggle"
-    public let description = "Toggles an analytics detector switch (globalEnabled, person, pose, fall, fight, loitering, zone, secondaryVLM)."
+    public let description = "Toggle a named global detector, alert display, sound or evidence recording flag. Evidence recording requires explicit operator confirmation."
     public let classification = ACTAActionClassification.reversible
+    public static let toggles: [String: WritableKeyPath<VideoAnalyticsSettings, Bool>] = [
+        "global": \.globalEnabled, "globalenabled": \.globalEnabled,
+        "person": \.enablePersonDetection, "enablepersondetection": \.enablePersonDetection,
+        "pose": \.enablePoseEstimation, "enableposeestimation": \.enablePoseEstimation,
+        "fall": \.enableFallDetection, "enablefalldetection": \.enableFallDetection,
+        "behavior": \.enableBehaviorAnalysis, "enablebehavioranalysis": \.enableBehaviorAnalysis,
+        "inactivity": \.enableProlongedInactivity, "enableprolongedinactivity": \.enableProlongedInactivity,
+        "loitering": \.enableLoiteringDetection, "enableloiteringdetection": \.enableLoiteringDetection,
+        "zone": \.enableZoneMonitoring, "enablezonemonitoring": \.enableZoneMonitoring,
+        "unusual_movement": \.enableUnusualMovement, "enableunusualmovement": \.enableUnusualMovement,
+        "crowd": \.enableCrowdActivity, "enablecrowdactivity": \.enableCrowdActivity,
+        "fight": \.enableFightDetection, "enablefightdetection": \.enableFightDetection,
+        "secondary_vlm": \.enableSecondaryVLMVerification, "enablesecondaryvlmverification": \.enableSecondaryVLMVerification,
+        "sound": \.enableSoundAlert, "enablesoundalert": \.enableSoundAlert,
+        "banner": \.enableVisualAlertBanner, "enablevisualalertbanner": \.enableVisualAlertBanner,
+        "evidence": \.enableEvidenceRecording, "enableevidencerecording": \.enableEvidenceRecording
+    ]
     public let parameters = [
-        ACTAActionParameterSchema(name: "feature", type: "string", description: "Detector switch name", isRequired: true),
+        ACTAActionParameterSchema(name: "feature", type: "string", description: "Detector/alert flag name", isRequired: true),
         ACTAActionParameterSchema(name: "enabled", type: "boolean", description: "True to enable, false to disable", isRequired: true)
     ]
-
     private let analyticsProvider: ACTAVideoAnalyticsSettingsProvider?
-
-    public init(analyticsProvider: ACTAVideoAnalyticsSettingsProvider? = nil) {
-        self.analyticsProvider = analyticsProvider
+    public init(analyticsProvider: ACTAVideoAnalyticsSettingsProvider? = nil) { self.analyticsProvider = analyticsProvider }
+    public func requiresConfirmation(parameters: [String: String]) -> Bool {
+        ["evidence", "enableevidencerecording"].contains((parameters["feature"] ?? "").lowercased())
     }
-
     public func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
-        guard let feature = parameters["feature"] else {
-            return ACTAActionResult.failed(actionID: id, error: "Missing 'feature' argument.")
-        }
-        let enabled = (parameters["enabled"]?.lowercased() == "true" || parameters["enabled"] == "1")
-
         guard let analyticsProvider else { return .unsupported(actionID: id) }
-        let supported = ["global", "globalenabled", "person", "enablepersondetection", "pose", "enableposeestimation", "fall", "enablefalldetection", "behavior", "enablebehavioranalysis", "loitering", "enableloiteringdetection", "zone", "enablezonemonitoring", "fight", "enablefightdetection", "secondary_vlm", "enablesecondaryvlmverification", "sound", "enablesoundalert", "evidence", "enableevidencerecording"]
-        guard supported.contains(feature.lowercased()) else {
+        guard let key = Self.toggles[(parameters["feature"] ?? "").lowercased()] else {
             return .failed(actionID: id, error: "INVALID_ARGUMENT: Unknown analytics feature.")
         }
-        try await analyticsProvider.updateSettings { settings in
-            switch feature.lowercased() {
-            case "global", "globalenabled": settings.globalEnabled = enabled
-            case "person", "enablepersondetection": settings.enablePersonDetection = enabled
-            case "pose", "enableposeestimation": settings.enablePoseEstimation = enabled
-            case "fall", "enablefalldetection": settings.enableFallDetection = enabled
-            case "behavior", "enablebehavioranalysis": settings.enableBehaviorAnalysis = enabled
-            case "loitering", "enableloiteringdetection": settings.enableLoiteringDetection = enabled
-            case "zone", "enablezonemonitoring": settings.enableZoneMonitoring = enabled
-            case "fight", "enablefightdetection": settings.enableFightDetection = enabled
-            case "secondary_vlm", "enablesecondaryvlmverification": settings.enableSecondaryVLMVerification = enabled
-            case "sound", "enablesoundalert": settings.enableSoundAlert = enabled
-            case "evidence", "enableevidencerecording": settings.enableEvidenceRecording = enabled
-            default: break
-            }
-        }
-
-        let summary = "Analytics feature '\(feature)' set to \(enabled ? "enabled" : "disabled")."
-        return ACTAActionResult(actionID: id, success: true, summary: summary, outputJSON: "{\"feature\": \"\(feature)\", \"enabled\": \(enabled)}")
+        let enabled = parameters["enabled"] == "true" || parameters["enabled"] == "1"
+        try await analyticsProvider.updateSettings { $0[keyPath: key] = enabled }
+        return ACTAActionResult(actionID: id, success: true, summary: "Analytics flag updated.")
     }
-
     public func verify(parameters: [String: String], context: ACTAActionContext) async throws -> Bool {
-        guard let feature = parameters["feature"], let analyticsProvider else { return false }
-        let expected = (parameters["enabled"]?.lowercased() == "true" || parameters["enabled"] == "1")
+        guard let analyticsProvider, let key = Self.toggles[(parameters["feature"] ?? "").lowercased()] else { return false }
         let settings = await analyticsProvider.loadSettings()
-        switch feature.lowercased() {
-        case "global", "globalenabled": return settings.globalEnabled == expected
-        case "person", "enablepersondetection": return settings.enablePersonDetection == expected
-        case "fall", "enablefalldetection": return settings.enableFallDetection == expected
-        case "fight", "enablefightdetection": return settings.enableFightDetection == expected
-        case "pose", "enableposeestimation": return settings.enablePoseEstimation == expected
-        case "behavior", "enablebehavioranalysis": return settings.enableBehaviorAnalysis == expected
-        case "loitering", "enableloiteringdetection": return settings.enableLoiteringDetection == expected
-        case "zone", "enablezonemonitoring": return settings.enableZoneMonitoring == expected
-        case "secondary_vlm", "enablesecondaryvlmverification": return settings.enableSecondaryVLMVerification == expected
-        case "sound", "enablesoundalert": return settings.enableSoundAlert == expected
-        case "evidence", "enableevidencerecording": return settings.enableEvidenceRecording == expected
-        default: return false
-        }
+        return settings[keyPath: key] == (parameters["enabled"] == "true" || parameters["enabled"] == "1")
     }
 }
 
@@ -377,6 +355,10 @@ public struct IncidentTransitionStatusAction: ACTAActionProtocol {
     ]
 
     public init() {}
+
+    public func requiresConfirmation(parameters: [String: String]) -> Bool {
+        parameters["status"] == "false_positive"
+    }
 
     public func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
         return .unsupported(actionID: id)

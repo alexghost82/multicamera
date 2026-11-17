@@ -1424,10 +1424,18 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
     /// Only implemented, explicitly reviewed Phase 1 actions are advertised.
     /// Stable transport names avoid dots, which OpenAI-compatible APIs may reject.
     static func registryTools(registry: ACTAActionRegistry = .shared) async throws -> [ACTAAgentToolSpec] {
-        let enabled: Set<String> = ["camera.list", "camera.get", "camera.set_enabled", "camera.remove",
-            "canvas.set_columns", "settings.get_section", "settings.update_system",
-            "settings.update_feature_toggles", "settings.update_permissions",
-            "analytics.get_settings", "analytics.set_global_toggle"]
+        let enabled: Set<String> = ["camera.list", "camera.get", "camera.set_enabled", "camera.remove", "camera.add_network", "camera.add_local",
+            "camera.add_screen", "camera.add_file", "camera.edit", "camera.set_processing",
+            "canvas.set_columns", "canvas.reset_layout", "camera.toggle_expand", "settings.get_section", "settings.update_system",
+            "settings.update_feature_toggles", "settings.update_permissions", "settings.update_runtime_fall",
+            "settings.update_runtime_storage", "settings.update_runtime_crop", "settings.update_events_alerts",
+            "settings.update_memory_policy", "settings.update_schedules", "settings.save_alert_rule", "settings.remove_alert_rule",
+            "analytics.get_settings", "analytics.set_global_toggle", "analytics.set_threshold",
+            "analytics.set_sampling_fps", "analytics.set_overlay", "analytics.set_camera_override",
+            "analytics.set_restricted_zone", "analytics.remove_restricted_zone", "analytics.update_restricted_zone",
+            "analytics.set_sensitivity_profile", "analytics.remove_camera_override", "incident.list", "incident.transition_status",
+            "watch.list", "watch.create", "watch.cancel", "memory.delete_frame", "incident.delete_evidence", "memory.toggle_pin", "memory.set_chapter_text", "mission.list", "mission.create", "mission.edit",
+            "mission.delete", "mission.history", "mission.clear_consult", "mission.run_now", "mission.ask_consult"]
         return try await registry.allActions().filter { enabled.contains($0.id) }.map { action in
             var properties: [String: Any] = [:]
             for field in action.parameters {

@@ -458,7 +458,12 @@ final class WallModel: ObservableObject {
     private var applicationServicesStarted = false
     private let trackingQueue = DispatchQueue(label: "CameraWall.IdentityHistory", qos: .utility)
     private let featureCoordinator: CameraFeatureCoordinator
-    private let cameraMemoryStore = CameraMemoryStore()
+    let cameraMemoryStore: CameraMemoryStore
+    let operationsPreferencesURL: URL
+    let operationsWatchURL: URL
+    let cameraCredentialStore: any CameraCredentialStore
+    let missionStoreURL: URL
+    private let missionConsultResponder: (@Sendable (String) async throws -> String)?
     private var crowdAlertEvaluator = CrowdAlertEvaluator()
     private var trackingStore: LocalTrackingStore?
     private var reidValidationGeneration = UUID()
@@ -514,7 +519,19 @@ final class WallModel: ObservableObject {
          relayFactory: @escaping @MainActor () -> Go2RTC = { Go2RTC() },
          trackingStoreURL: URL = LocalTrackingStore.defaultURL,
          featureCoordinator: CameraFeatureCoordinator = CameraFeatureCoordinator(),
-         analyticsDirectoryURL: URL? = nil, agentClient: ACTAAIClient? = nil) {
+         analyticsDirectoryURL: URL? = nil, agentClient: ACTAAIClient? = nil,
+         cameraMemoryStore: CameraMemoryStore = CameraMemoryStore(),
+         operationsWatchURL: URL = OperationsWatchStore.defaultURL,
+         missionStoreURL: URL = CameraMissionStore.defaultURL,
+         missionConsultResponder: (@Sendable (String) async throws -> String)? = nil,
+         cameraCredentialStore: any CameraCredentialStore = SystemCameraCredentialStore(),
+         operationsPreferencesURL: URL = OperationsPreferencesStore.defaultURL) {
+        self.operationsPreferencesURL = operationsPreferencesURL
+        self.cameraCredentialStore = cameraCredentialStore
+        self.missionConsultResponder = missionConsultResponder
+        self.missionStoreURL = missionStoreURL
+        self.cameraMemoryStore = cameraMemoryStore
+        self.operationsWatchURL = operationsWatchURL
         self.workerMode = workerMode
         let resolvedPoseURL = workerMode ? poseModelURL : (poseModelURL ?? YOLO26PoseDetector.defaultModelURL)
         let poseDetectorInstance = resolvedPoseURL.map(YOLO26PoseDetector.init(modelURL:))
@@ -570,14 +587,14 @@ final class WallModel: ObservableObject {
         }
         if featurePreferences.enabledFeatures.contains(.scheduledMissions) {
             do {
-                let document = try CameraMissionStore.loadDocument()
+                let document = try CameraMissionStore.loadDocument(from: missionStoreURL)
                 cameraMissions = document.missions
                 cameraMissionRuns = document.runs
                 cameraMissionConsultMessages = document.consults
             }
             catch { notice = "Local scheduled missions could not be loaded" }
         }
-        do { operationsPreferences = try OperationsPreferencesStore.load() }
+        do { operationsPreferences = try OperationsPreferencesStore.load(from: operationsPreferencesURL) }
         catch { notice = "Local operations settings could not be loaded; safe defaults are active" }
         if featurePreferences.enabledFeatures.contains(.historyResearch) {
             do { trackResearchMessages = try TrackResearchStore.load(from: trackResearchURL) }
@@ -587,7 +604,7 @@ final class WallModel: ObservableObject {
             do {
                 operationsAlertAcknowledgements = try featureCoordinator.operationsAlertAcknowledgements()
                 operationsAlertReviews = Dictionary(uniqueKeysWithValues: try featureCoordinator.operationsAlertReviews().map { ($0.alertID, $0) })
-                operationsWatchRules = try OperationsWatchStore.load()
+                operationsWatchRules = try OperationsWatchStore.load(from: operationsWatchURL)
                 _ = try alertClipStore.clips()
             }
             catch { notice = "Local alert acknowledgement state could not be loaded" }
@@ -980,102 +997,88 @@ final class WallModel: ObservableObject {
         start()
     }
 
-    func saveLocalCamera(_ camera: Camera) throws {
+    func cameraConfigurationChecked() throws -> WallConfiguration {
+        if !FileManager.default.fileExists(atPath: configURL.path), config == WallConfiguration() { return config }
+        let saved = try ConfigurationStore.load(from: configURL)
+        guard saved == config else {
+            throw ConfigurationError.invalid("Camera configuration changed on disk; reload it before making changes.")
+        }
+        return saved
+    }
+
+    /// Shared configuration service. Agent additions stay disabled; GUI defaults still start sources.
+    func saveCameraConfigurationChecked(_ camera: Camera, startAfterSave: Bool = false, resumeRunning: Bool = true) throws {
+        _ = try cameraConfigurationChecked()
+        try camera.validate()
         var next = config
-        guard !next.cameras.contains(where: { $0.id != camera.id && $0.localDeviceID == camera.localDeviceID }) else {
-            throw ConfigurationError.invalid("This camera is already in the wall.")
-        }
-        if let index = next.cameras.firstIndex(where: { $0.id == camera.id }) {
-            next.cameras[index] = camera
-        } else {
-            next.cameras.append(camera)
-        }
+        guard !next.cameras.contains(where: { other in
+            other.id != camera.id && ((camera.localDeviceID != nil && other.localDeviceID == camera.localDeviceID)
+                || (camera.screenDisplayID != nil && other.screenDisplayID == camera.screenDisplayID))
+        }) else { throw ConfigurationError.invalid("This camera or display is already in the wall.") }
+        if let index = next.cameras.firstIndex(where: { $0.id == camera.id }) { next.cameras[index] = camera }
+        else { next.cameras.append(camera) }
+        let resume = (resumeRunning && running) || startAfterSave
         try apply(next)
-        start()
+        if resume { start() }
+        guard try ConfigurationStore.load(from: configURL) == next, config == next else {
+            throw ConfigurationError.invalid("Camera configuration persistence verification failed.")
+        }
+    }
+
+    func saveLocalCamera(_ camera: Camera, startAfterSave: Bool = true) throws {
+        guard camera.localDeviceID != nil else { throw ConfigurationError.invalid("Select a local camera without network stream URLs.") }
+        try saveCameraConfigurationChecked(camera, startAfterSave: startAfterSave)
     }
 
     func addScreenCamera(displayID: UInt32, name: String) throws {
-        let camera = Camera(
-            name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Screen" : name,
-            substream: "",
-            screenDisplayID: String(displayID)
-        )
-        try camera.validate()
-        var next = config
-        next.cameras.append(camera)
-        try apply(next)
-        start()
+        let camera = Camera(name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Screen" : name,
+            substream: "", screenDisplayID: String(displayID))
+        try saveScreenCamera(camera)
     }
 
-    func saveScreenCamera(_ camera: Camera) throws {
-        guard camera.screenDisplayID != nil else {
-            throw ConfigurationError.invalid("This is not a screen capture source.")
-        }
-        try camera.validate()
-        var next = config
-        guard !next.cameras.contains(where: {
-            $0.id != camera.id && $0.screenDisplayID == camera.screenDisplayID
-        }) else {
-            throw ConfigurationError.invalid("This display is already in the wall.")
-        }
-        if let index = next.cameras.firstIndex(where: { $0.id == camera.id }) {
-            next.cameras[index] = camera
-        } else {
-            next.cameras.append(camera)
-        }
-        try apply(next)
-        start()
+    func saveScreenCamera(_ camera: Camera, startAfterSave: Bool = true) throws {
+        guard camera.screenDisplayID != nil else { throw ConfigurationError.invalid("This is not a screen capture source.") }
+        try saveCameraConfigurationChecked(camera, startAfterSave: startAfterSave)
     }
 
     func addVideoFile(_ fileURL: URL) {
-        guard fileURL.isFileURL else {
-            error = "Select a readable local video file."
-            return
-        }
+        do { _ = try addVideoFileChecked(fileURL, name: nil, enabled: true, startAfterSave: true) }
+        catch { self.error = safeMessage(error) }
+    }
+
+    func addVideoFileChecked(_ fileURL: URL, name: String?, enabled: Bool = false, startAfterSave: Bool = false) throws -> Camera {
+        guard fileURL.isFileURL else { throw ConfigurationError.invalid("Select a readable local video file.") }
         let startedAccessing = fileURL.startAccessingSecurityScopedResource()
         defer { if startedAccessing { fileURL.stopAccessingSecurityScopedResource() } }
-        do {
-            guard FileManager.default.isReadableFile(atPath: fileURL.path) else {
-                throw ConfigurationError.invalid("The selected video file is not readable.")
-            }
-            let bookmark = try VideoFileBookmark.create(for: fileURL)
-            let camera = Camera(
-                name: fileURL.deletingPathExtension().lastPathComponent,
-                substream: "",
-                fileURL: fileURL.standardizedFileURL,
-                fileBookmarkData: bookmark
-            )
-            try camera.validate()
-            var next = config
-            next.cameras.append(camera)
-            try apply(next)
-            start()
-        } catch {
-            self.error = safeMessage(error)
+        let regular = try fileURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true
+        guard regular, FileManager.default.isReadableFile(atPath: fileURL.path) else {
+            throw ConfigurationError.invalid("The selected video file is not readable.")
         }
+        let camera = Camera(name: name ?? fileURL.deletingPathExtension().lastPathComponent, substream: "", enabled: enabled,
+            fileURL: fileURL.standardizedFileURL, fileBookmarkData: try VideoFileBookmark.create(for: fileURL))
+        try saveCameraConfigurationChecked(camera, startAfterSave: startAfterSave)
+        return camera
     }
 
     func saveVideoFileCamera(_ camera: Camera) throws {
-        guard camera.fileURL != nil else {
-            throw ConfigurationError.invalid("This is not a local video source.")
-        }
-        try camera.validate()
-        var next = config
-        guard let index = next.cameras.firstIndex(where: { $0.id == camera.id }) else {
+        guard camera.fileURL != nil else { throw ConfigurationError.invalid("This is not a local video source.") }
+        guard config.cameras.contains(where: { $0.id == camera.id }) else {
             throw ConfigurationError.invalid("The video source is no longer in the wall.")
         }
-        next.cameras[index] = camera
-        let reconnect = running
-        try apply(next)
-        if reconnect { start() }
+        try saveCameraConfigurationChecked(camera)
+    }
+
+    func setCameraEnabledChecked(_ camera: Camera, enabled: Bool) throws {
+        _ = try cameraConfigurationChecked()
+        guard let current = config.cameras.first(where: { $0.id == camera.id }) else { throw ConfigurationError.invalid("Camera does not exist.") }
+        guard current.enabled != enabled else { return }
+        var updated = current
+        updated.enabled = enabled
+        try saveCameraConfigurationChecked(updated)
     }
 
     func setEnabled(_ camera: Camera, enabled: Bool) {
-        var next = config
-        guard let index = next.cameras.firstIndex(where: { $0.id == camera.id }) else { return }
-        next.cameras[index].enabled = enabled
-        let reconnect = running
-        do { try apply(next); if reconnect { start() } }
+        do { try setCameraEnabledChecked(camera, enabled: enabled) }
         catch { self.error = safeMessage(error) }
     }
 
@@ -1115,6 +1118,8 @@ final class WallModel: ObservableObject {
 
     @discardableResult
     private func updateCameraPreference(_ cameraID: UUID, change: (inout Camera) -> Void) -> Bool {
+        do { _ = try cameraConfigurationChecked() }
+        catch { self.error = safeMessage(error); return false }
         var next = config
         guard let index = next.cameras.firstIndex(where: { $0.id == cameraID }) else { return false }
         var camera = next.cameras[index]
@@ -1132,22 +1137,46 @@ final class WallModel: ObservableObject {
     }
 
     func save(camera: Camera, credentials: Credentials) throws {
+        _ = try cameraConfigurationChecked()
         try camera.validate()
-        var next = config
-        if let index = next.cameras.firstIndex(where: { $0.id == camera.id }) { next.cameras[index] = camera }
-        else { next.cameras.append(camera) }
-        try next.validate()
-        try CameraKeychain.save(credentials, for: camera.id)
-        try apply(next)
+        let previous = try cameraCredentialStore.read(camera.id)
+        try cameraCredentialStore.save(credentials, for: camera.id)
+        do { try saveCameraConfigurationChecked(camera, resumeRunning: false) }
+        catch {
+            let failure = error
+            do {
+                if let previous { try cameraCredentialStore.save(previous, for: camera.id) }
+                else { try cameraCredentialStore.remove(camera.id) }
+            } catch { throw ConfigurationError.invalid("Camera save failed and credential rollback failed.") }
+            throw failure
+        }
     }
 
     func remove(_ camera: Camera) {
+        do { try removeCameraChecked(camera.id) }
+        catch { self.error = safeMessage(error) }
+    }
+
+    func removeCameraChecked(_ cameraID: UUID) throws {
+        _ = try cameraConfigurationChecked()
+        guard config.cameras.contains(where: { $0.id == cameraID }) else { throw ConfigurationError.invalid("Camera does not exist.") }
+        let previous = try cameraCredentialStore.read(cameraID)
+        try cameraCredentialStore.remove(cameraID)
+        guard try cameraCredentialStore.read(cameraID) == nil else {
+            throw ConfigurationError.invalid("Camera credential deletion verification failed.")
+        }
         var next = config
-        next.cameras.removeAll { $0.id == camera.id }
-        do {
-            try apply(next)
-            CameraKeychain.remove(camera.id)
-        } catch { self.error = safeMessage(error) }
+        next.cameras.removeAll { $0.id == cameraID }
+        do { try apply(next) }
+        catch {
+            let failure = error
+            do { if let previous { try cameraCredentialStore.save(previous, for: cameraID) } }
+            catch { throw ConfigurationError.invalid("Camera removal failed and credential rollback failed.") }
+            throw failure
+        }
+        guard try ConfigurationStore.load(from: configURL) == next, config == next else {
+            throw ConfigurationError.invalid("Camera configuration persistence verification failed.")
+        }
     }
 
     func apply(_ next: WallConfiguration) throws {
@@ -1258,7 +1287,7 @@ final class WallModel: ObservableObject {
             guard isapiEventTasks[camera.id] == nil else { continue }
             let credentials: Credentials
             do {
-                credentials = try CameraKeychain.read(camera.id) ?? Credentials(username: "", password: "")
+                credentials = try cameraCredentialStore.read(camera.id) ?? Credentials(username: "", password: "")
             } catch {
                 notice = "ISAPI credentials are unavailable for \(camera.name)"
                 continue
@@ -1309,8 +1338,19 @@ final class WallModel: ObservableObject {
         )
     }
 
+    var runtimePreferencesURL: URL { configURL.deletingLastPathComponent().appendingPathComponent("runtime-preferences.json") }
+
+    func featurePolicySnapshotChecked() throws -> CameraFeaturePreferences {
+        let saved = try featureCoordinator.persistedPreferences()
+        guard saved == featurePreferences else { throw ConfigurationError.invalid("Feature policy changed on disk; reload it before making changes.") }
+        return saved
+    }
+
     func saveRuntimePreferences(_ preferences: AdvancedRuntimePreferences) throws {
-        try preferences.save(to: configURL.deletingLastPathComponent().appendingPathComponent("runtime-preferences.json"))
+        guard try AdvancedRuntimePreferences.load(from: runtimePreferencesURL) == runtimePreferences else {
+            throw ConfigurationError.invalid("Runtime preferences changed on disk; reload them before making changes.")
+        }
+        try preferences.save(to: runtimePreferencesURL)
         runtimePreferences = preferences
         localAnalyticsEngine.configureFallDetector(preferences.fall)
         actaAnalytics.configureRuntime(preferences)
@@ -1353,16 +1393,23 @@ final class WallModel: ObservableObject {
     }
 
     func saveFeaturePolicy(_ preferences: CameraFeaturePreferences) throws {
+        _ = try featurePolicySnapshotChecked()
         // Feature lifecycle changes go through setFeatureEnabled; this method changes only permissions and retention.
         var next = preferences
         next.enabledFeatures = featurePreferences.enabledFeatures
         try featureCoordinator.savePreferences(next)
+        guard try featureCoordinator.persistedPreferences() == next else {
+            throw ConfigurationError.invalid("Feature policy persistence verification failed.")
+        }
         featurePreferences = next
         actaAnalytics?.aiClient.updateConfiguration(Self.makeACTAAIConfiguration(from: vlmPreferences, featurePreferences: next))
         if !next.retainFullFrames { stopMemorySampling() }
     }
 
     func saveVLMPreferences(_ draft: VLMPreferences) throws {
+        guard try VLMStore.loadPreferences(from: vlmPreferencesURL) == vlmPreferences else {
+            throw ConfigurationError.invalid("AI preferences changed on disk; reload them before making changes.")
+        }
         var preferences = draft
         preferences.alertRules.removeAll { $0.condition.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         try VLMStore.save(preferences, to: vlmPreferencesURL)
@@ -1376,7 +1423,10 @@ final class WallModel: ObservableObject {
     }
 
     func saveOperationsPreferences(_ preferences: OperationsPreferences) throws {
-        try OperationsPreferencesStore.save(preferences)
+        guard try OperationsPreferencesStore.load(from: operationsPreferencesURL) == operationsPreferences else {
+            throw ConfigurationError.invalid("Operations preferences changed on disk; reload them before making changes.")
+        }
+        try OperationsPreferencesStore.save(preferences, to: operationsPreferencesURL)
         operationsPreferences = preferences
     }
 
@@ -1397,6 +1447,7 @@ final class WallModel: ObservableObject {
     }
 
     func setFeatureEnabled(_ featureID: CameraFeatureID, enabled: Bool) throws {
+        _ = try featurePolicySnapshotChecked()
         var preferences = featurePreferences
         if enabled { preferences.enabledFeatures.insert(featureID) }
         else { preferences.enabledFeatures.remove(featureID) }
@@ -1438,7 +1489,7 @@ final class WallModel: ObservableObject {
             do {
                 operationsAlertAcknowledgements = try featureCoordinator.operationsAlertAcknowledgements()
                 operationsAlertReviews = Dictionary(uniqueKeysWithValues: try featureCoordinator.operationsAlertReviews().map { ($0.alertID, $0) })
-                operationsWatchRules = try OperationsWatchStore.load()
+                operationsWatchRules = try OperationsWatchStore.load(from: operationsWatchURL)
                 _ = try alertClipStore.clips()
                 lastOperationsWatchCheck = -.infinity
             }
@@ -1456,7 +1507,7 @@ final class WallModel: ObservableObject {
         }
         if enabled, featureID == .scheduledMissions {
             do {
-                let document = try CameraMissionStore.loadDocument()
+                let document = try CameraMissionStore.loadDocument(from: missionStoreURL)
                 cameraMissions = document.missions
                 cameraMissionRuns = document.runs
                 cameraMissionConsultMessages = document.consults
@@ -1481,6 +1532,7 @@ final class WallModel: ObservableObject {
     }
 
     func setMemoryFrameRetentionEnabled(_ enabled: Bool) throws {
+        _ = try featurePolicySnapshotChecked()
         var preferences = featurePreferences
         preferences.retainFullFrames = enabled
         try featureCoordinator.savePreferences(preferences)
@@ -1512,10 +1564,21 @@ final class WallModel: ObservableObject {
 
     func deleteCameraMemoryFrame(_ frame: CameraMemoryFrame) {
         do {
-            try cameraMemoryStore.delete(frame.id)
-            cameraMemoryFrames.removeAll { $0.id == frame.id }
+            try deleteCameraMemoryFrameChecked(frame.id)
         } catch {
             notice = "Local memory frame could not be deleted"
+        }
+    }
+
+    func deleteCameraMemoryFrameChecked(_ id: UUID) throws {
+        guard let frame = try cameraMemoryStore.load().first(where: { $0.id == id }) else {
+            throw ConfigurationError.invalid("Memory frame does not exist.")
+        }
+        try cameraMemoryStore.delete(id)
+        cameraMemoryFrames = try cameraMemoryStore.load()
+        guard !cameraMemoryFrames.contains(where: { $0.id == id }),
+              try !cameraMemoryStore.hasStoredImage(for: frame) else {
+            throw ConfigurationError.invalid("Memory deletion could not be verified on disk.")
         }
     }
 
@@ -1622,11 +1685,34 @@ final class WallModel: ObservableObject {
         return reply.answer
     }
 
+    func missionDocumentChecked() throws -> CameraMissionStoreDocument {
+        let document = try CameraMissionStore.loadDocument(from: missionStoreURL)
+        let runtime = CameraMissionStoreDocument(schemaVersion: CameraMissionStore.schemaVersion,
+            missions: cameraMissions, runs: cameraMissionRuns, consults: cameraMissionConsultMessages)
+        func canonical(_ value: CameraMissionStoreDocument) throws -> Data {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.sortedKeys]
+            let normalized = CameraMissionStoreDocument(schemaVersion: CameraMissionStore.schemaVersion,
+                missions: value.missions, runs: value.runs, consults: value.consults)
+            return try encoder.encode(normalized)
+        }
+        guard Set(document.missions.map(\.id)).count == document.missions.count,
+              try canonical(document) == canonical(runtime) else {
+            throw ConfigurationError.invalid("Mission storage changed or contains duplicate IDs; reload it before making changes.")
+        }
+        return document
+    }
+
     func saveCameraMission(_ mission: CameraMission) throws {
+        _ = try missionDocumentChecked()
         guard featurePreferences.enabledFeatures.contains(.scheduledMissions) else {
             throw CameraFeatureStoreError.featureDisabled(.scheduledMissions)
         }
         try mission.validate()
+        let requestChanged = cameraMissions.first(where: { $0.id == mission.id }).map {
+            !$0.hasSameExecutionRequest(as: mission)
+        } ?? false
         var updated = cameraMissions
         if let index = updated.firstIndex(where: { $0.id == mission.id }) {
             updated[index] = mission
@@ -1638,44 +1724,70 @@ final class WallModel: ObservableObject {
         }
         let validMissionIDs = Set(updated.map(\.id))
         let consults = cameraMissionConsultMessages.filter { validMissionIDs.contains($0.missionID) }
-        try CameraMissionStore.save(updated, runs: cameraMissionRuns, consults: consults)
+        try CameraMissionStore.save(updated, runs: cameraMissionRuns, consults: consults, to: missionStoreURL)
         cameraMissions = updated
         cameraMissionConsultMessages = consults
-        if !mission.enabled, activeMissionID == mission.id {
-            forcedMissionID = nil
+        if !mission.enabled, forcedMissionID == mission.id { forcedMissionID = nil }
+        if activeMissionID == mission.id, requestChanged {
+            // Edited execution inputs invalidate an in-flight request, not historical metadata.
             vlmTask?.cancel()
         }
     }
 
     func deleteCameraMission(_ missionID: UUID) {
-        let updated = cameraMissions.filter { $0.id != missionID }
-        do {
-            let consults = cameraMissionConsultMessages.filter { $0.missionID != missionID }
-            try CameraMissionStore.save(updated, runs: cameraMissionRuns, consults: consults)
-            cameraMissions = updated
-            cameraMissionConsultMessages = consults
-            if activeMissionID == missionID {
-                forcedMissionID = nil
-                vlmTask?.cancel()
-            }
-            if activeMissionConsultID == missionID { missionConsultTask?.cancel() }
-        } catch {
-            notice = "Local mission could not be deleted"
-        }
+        do { try deleteCameraMissionChecked(missionID) }
+        catch { notice = "Local mission could not be deleted" }
     }
 
-    func runCameraMissionNow(_ missionID: UUID) {
+    func deleteCameraMissionChecked(_ missionID: UUID) throws {
+        _ = try missionDocumentChecked()
         guard featurePreferences.enabledFeatures.contains(.scheduledMissions),
-              cameraMissions.contains(where: { $0.id == missionID && $0.enabled }) else {
-            notice = "Enable scheduled missions and this mission before running it"
-            return
+              cameraMissions.contains(where: { $0.id == missionID }) else {
+            throw ConfigurationError.invalid("Enable scheduled missions and select an existing mission.")
+        }
+        let updated = cameraMissions.filter { $0.id != missionID }
+        let consults = cameraMissionConsultMessages.filter { $0.missionID != missionID }
+        try CameraMissionStore.save(updated, runs: cameraMissionRuns, consults: consults, to: missionStoreURL)
+        cameraMissions = updated
+        cameraMissionConsultMessages = consults
+        if forcedMissionID == missionID { forcedMissionID = nil }
+        if activeMissionID == missionID { vlmTask?.cancel() }
+        if activeMissionConsultID == missionID { missionConsultTask?.cancel() }
+    }
+
+    func missionExecutionStatus(_ missionID: UUID) -> String {
+        if activeMissionID == missionID { return "running" }
+        if forcedMissionID == missionID { return "queued" }
+        return "idle"
+    }
+
+    func requestMissionRunChecked(_ missionID: UUID) throws -> String {
+        _ = try missionDocumentChecked()
+        guard featurePreferences.enabledFeatures.contains(.scheduledMissions),
+              let mission = cameraMissions.first(where: { $0.id == missionID && $0.enabled }),
+              config.cameras.contains(where: { $0.id == mission.cameraID && $0.enabled }) else {
+            throw ConfigurationError.invalid("Enable scheduled missions, the mission and its configured camera before requesting a run.")
+        }
+        if activeMissionID == missionID { return "running" }
+        if forcedMissionID == missionID { return "queued" }
+        guard forcedMissionID == nil, activeMissionID == nil else {
+            throw ConfigurationError.invalid("Another mission is already queued or running.")
         }
         forcedMissionID = missionID
         lastMissionCheck = -.infinity
+        // The scheduler may wait for fresh frames or an idle model. This is not a completion receipt.
         scheduleMissions(now: ProcessInfo.processInfo.systemUptime)
+        return missionExecutionStatus(missionID)
     }
 
-    func askMissionConsult(missionID: UUID, question: String) throws {
+    func runCameraMissionNow(_ missionID: UUID) {
+        do { _ = try requestMissionRunChecked(missionID) }
+        catch { notice = error.localizedDescription }
+    }
+
+    @discardableResult
+    func askMissionConsult(missionID: UUID, question: String) throws -> UUID {
+        _ = try missionDocumentChecked()
         guard featurePreferences.enabledFeatures.contains(.scheduledMissions) else {
             throw CameraFeatureStoreError.featureDisabled(.scheduledMissions)
         }
@@ -1686,7 +1798,7 @@ final class WallModel: ObservableObject {
         let operatorMessage = try CameraMissionConsultMessage(missionID: missionID, role: .operatorMessage, text: question)
         let updated = try CameraMissionStore.appendConsult(
             operatorMessage, missions: cameraMissions, runs: cameraMissionRuns,
-            existingConsults: cameraMissionConsultMessages
+            existingConsults: cameraMissionConsultMessages, to: missionStoreURL
         )
         cameraMissionConsultMessages = updated
         let generation = UUID()
@@ -1709,7 +1821,9 @@ final class WallModel: ObservableObject {
                     question: question, mission: mission,
                     runs: self.cameraMissionRuns.filter { $0.missionID == missionID }, priorMessages: prior
                 )
-                let raw = try await client.analyze(text: prompt)
+                let raw: String
+                if let responder = self.missionConsultResponder { raw = try await responder(prompt) }
+                else { raw = try await client.analyze(text: prompt) }
                 try Task.checkCancellation()
                 guard CameraMissionConsultLifecycle.canCommit(
                     featureEnabled: self.featurePreferences.enabledFeatures.contains(.scheduledMissions),
@@ -1725,9 +1839,10 @@ final class WallModel: ObservableObject {
                 let assistantMessage = try CameraMissionConsultMessage(
                     missionID: missionID, role: .assistant, text: answer
                 )
+                _ = try self.missionDocumentChecked()
                 self.cameraMissionConsultMessages = try CameraMissionStore.appendConsult(
                     assistantMessage, missions: self.cameraMissions, runs: self.cameraMissionRuns,
-                    existingConsults: self.cameraMissionConsultMessages
+                    existingConsults: self.cameraMissionConsultMessages, to: self.missionStoreURL
                 )
                 self.missionConsultStatus = "Local mission history answer received"
             } catch is CancellationError {
@@ -1736,15 +1851,17 @@ final class WallModel: ObservableObject {
                 self.missionConsultStatus = "Local mission history query failed: \(error.localizedDescription)"
             }
         }
+        return operatorMessage.id
     }
 
     func clearMissionConsult(missionID: UUID) throws {
+        _ = try missionDocumentChecked()
         guard featurePreferences.enabledFeatures.contains(.scheduledMissions),
               cameraMissions.contains(where: { $0.id == missionID }) else {
             throw CameraFeatureStoreError.featureDisabled(.scheduledMissions)
         }
         let updated = cameraMissionConsultMessages.filter { $0.missionID != missionID }
-        try CameraMissionStore.save(cameraMissions, runs: cameraMissionRuns, consults: updated)
+        try CameraMissionStore.save(cameraMissions, runs: cameraMissionRuns, consults: updated, to: missionStoreURL)
         cameraMissionConsultMessages = updated
         if activeMissionConsultID == missionID { missionConsultTask?.cancel() }
     }
@@ -1971,28 +2088,30 @@ final class WallModel: ObservableObject {
         try alertClipStore.delete(clipID)
     }
 
-    func addOperationsWatch(text: String, cameraIDs: Set<UUID>, ttlMinutes: Int?, forever: Bool) throws {
+    @discardableResult
+    func addOperationsWatch(text: String, cameraIDs: Set<UUID>, ttlMinutes: Int?, forever: Bool) throws -> UUID {
         guard featurePreferences.enabledFeatures.contains(.operationalAlerts) else {
             throw CameraFeatureStoreError.featureDisabled(.operationalAlerts)
         }
-        let current = try OperationsWatchStore.load()
+        let current = try OperationsWatchStore.load(from: operationsWatchURL)
         guard current.count < OperationsWatchRule.maximumRules else {
             throw ConfigurationError.invalid("At most 24 local watch rules can be active.")
         }
         let ttl = forever ? nil : TimeInterval(min(30 * 24 * 60, max(1, ttlMinutes ?? 120)) * 60)
         let rule = try OperationsWatchRule(text: text, cameraIDs: cameraIDs, ttlSeconds: ttl)
         let updated = current + [rule]
-        try OperationsWatchStore.save(updated)
+        try OperationsWatchStore.save(updated, to: operationsWatchURL)
         operationsWatchRules = updated
         lastOperationsWatchCheck = -.infinity
+        return rule.id
     }
 
     func cancelOperationsWatch(_ id: UUID) throws {
         guard featurePreferences.enabledFeatures.contains(.operationalAlerts) else {
             throw CameraFeatureStoreError.featureDisabled(.operationalAlerts)
         }
-        let updated = try OperationsWatchStore.load().filter { $0.id != id }
-        try OperationsWatchStore.save(updated)
+        let updated = try OperationsWatchStore.load(from: operationsWatchURL).filter { $0.id != id }
+        try OperationsWatchStore.save(updated, to: operationsWatchURL)
         operationsWatchRules = updated
     }
 
@@ -2772,9 +2891,10 @@ final class WallModel: ObservableObject {
     private func finishMission(
         _ mission: CameraMission, result: String, completedAt: Date, sceneChangeScore: Double? = nil
     ) throws {
+        _ = try missionDocumentChecked()
         guard featurePreferences.enabledFeatures.contains(.scheduledMissions),
                             let current = cameraMissions.first(where: { $0.id == mission.id }),
-                            current.enabled else { return }
+                            current.enabled, current.hasSameExecutionRequest(as: mission) else { throw CancellationError() }
         let finished = try CameraMissionScheduler.finish(
                         current,
             completedAt: completedAt,
@@ -2795,7 +2915,7 @@ final class WallModel: ObservableObject {
         let updatedRuns = try CameraMissionStore.appendRun(
             run,
             missions: updated,
-            existingRuns: cameraMissionRuns
+            existingRuns: cameraMissionRuns, to: missionStoreURL
         )
         cameraMissions = updated
         cameraMissionRuns = updatedRuns
@@ -3354,15 +3474,41 @@ final class WallModel: ObservableObject {
     }
 
     func toggleACTANarrativePin(_ chapter: ACTANarrativeChapterRecord) {
-        guard let store = trackingStore else { return }
-        try? store.setACTANarrativePinned(chapterID: chapter.chapterID, pinned: !chapter.pinned)
-        actaNarrativeChapters = (try? store.loadACTANarrativeChapterRecords(limit: 50)) ?? actaNarrativeChapters
+        do { _ = try setACTANarrativePinChecked(chapterID: chapter.chapterID, pinned: !chapter.pinned) }
+        catch { notice = "Could not save narrative pin: \(error.localizedDescription)" }
     }
 
     func saveACTANarrativeOperatorText(_ chapter: ACTANarrativeChapterRecord, text: String?) {
-        guard let store = trackingStore else { return }
-        try? store.setACTANarrativeOperatorText(chapterID: chapter.chapterID, operatorText: text)
-        actaNarrativeChapters = (try? store.loadACTANarrativeChapterRecords(limit: 50)) ?? actaNarrativeChapters
+        do { _ = try setACTANarrativeTextChecked(chapterID: chapter.chapterID, text: text) }
+        catch { notice = "Could not save narrative text: \(error.localizedDescription)" }
+    }
+
+    func setACTANarrativePinChecked(chapterID: String, pinned: Bool) throws -> ACTANarrativeChapterRecord {
+        guard let store = trackingStore, let before = try store.loadACTANarrativeChapterRecord(chapterID: chapterID) else {
+            throw ConfigurationError.invalid("Narrative chapter or memory store does not exist.")
+        }
+        try store.setACTANarrativePinned(chapterID: chapterID, pinned: pinned)
+        guard let saved = try store.loadACTANarrativeChapterRecord(chapterID: chapterID), saved.pinned == pinned,
+              saved.aiSummary == before.aiSummary, saved.operatorText == before.operatorText else {
+            throw ConfigurationError.invalid("Narrative pin persistence verification failed.")
+        }
+        actaNarrativeChapters = try store.loadACTANarrativeChapterRecords(limit: 50)
+        return saved
+    }
+
+    func setACTANarrativeTextChecked(chapterID: String, text: String?) throws -> ACTANarrativeChapterRecord {
+        guard let store = trackingStore, let before = try store.loadACTANarrativeChapterRecord(chapterID: chapterID) else {
+            throw ConfigurationError.invalid("Narrative chapter or memory store does not exist.")
+        }
+        let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let expected = trimmed?.isEmpty == false ? trimmed : nil
+        try store.setACTANarrativeOperatorText(chapterID: chapterID, operatorText: text)
+        guard let saved = try store.loadACTANarrativeChapterRecord(chapterID: chapterID), saved.operatorText == expected,
+              saved.aiSummary == before.aiSummary, saved.pinned == before.pinned, saved.operatorMarked else {
+            throw ConfigurationError.invalid("Narrative text persistence verification failed.")
+        }
+        actaNarrativeChapters = try store.loadACTANarrativeChapterRecords(limit: 50)
+        return saved
     }
 
     func forceCloseACTANarrativeChapter(cameraID: UUID) {
@@ -3669,7 +3815,7 @@ final class WallModel: ObservableObject {
         lastOperationsWatchCheck = now
         do {
             let checkedAt = Date()
-            let loadedRules = try OperationsWatchStore.load(at: checkedAt)
+            let loadedRules = try OperationsWatchStore.load(from: operationsWatchURL, at: checkedAt)
             let previousCritical = OperationsAlertQueue.pendingCriticalIDs(
                 alerts: vlmAlerts, reviews: operationsAlertReviews, acknowledgements: operationsAlertAcknowledgements
             )
@@ -3682,7 +3828,7 @@ final class WallModel: ObservableObject {
             )
             guard result.changed || Set(loadedRules.map(\.id)) != Set(operationsWatchRules.map(\.id)) else { return }
             if result.alerts != vlmAlerts { try VLMStore.save(result.alerts, to: vlmAlertsURL) }
-            try OperationsWatchStore.save(result.rules)
+            try OperationsWatchStore.save(result.rules, to: operationsWatchURL)
             vlmAlerts = result.alerts
             operationsWatchRules = result.rules
             soundForNewCriticalAlerts(previous: previousCritical)

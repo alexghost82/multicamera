@@ -21,7 +21,7 @@ func actaRedactedStreamURL(_ value: String) -> String {
 }
 
 @MainActor
-private func actaResolveCamera(_ value: String, model: WallModel) -> Camera? {
+func actaResolveCamera(_ value: String, model: WallModel) -> Camera? {
     if let uuid = UUID(uuidString: value) { return model.config.cameras.first { $0.id == uuid } }
     let exact = model.config.cameras.filter { $0.name.caseInsensitiveCompare(value) == .orderedSame }
     guard exact.count <= 1 else { return nil }
@@ -35,7 +35,7 @@ private func actaResolveCamera(_ value: String, model: WallModel) -> Camera? {
 public struct CameraListAction: ACTAActionProtocol {
     public let id = "camera.list"
     public let title = "List Cameras"
-    public let description = "Returns a list of all configured cameras, their status, streams, and types."
+    public let description = "Read configured cameras, enabled flags, redacted streams and source types. Does not certify connection or hardware readiness."
     public let classification = ACTAActionClassification.inspect
     public let parameters = [
         ACTAActionParameterSchema(name: "include_disabled", type: "boolean", description: "Include disabled cameras (default: true)")
@@ -98,7 +98,7 @@ public struct CameraGetAction: ACTAActionProtocol {
         }
 
         guard let cam = found else {
-            return ACTAActionResult.failed(actionID: id, error: "Camera '\(idOrName)' not found or name is ambiguous; specify its UUID.")
+            return ACTAActionResult.failed(actionID: id, error: "Camera does not exist or its name is ambiguous; specify a UUID.")
         }
 
         let dict: [String: Any] = [
@@ -109,7 +109,10 @@ public struct CameraGetAction: ACTAActionProtocol {
             "mainstream": cam.mainstream.map(actaRedactedStreamURL) ?? "",
             "enabled": cam.enabled,
             "yolo_enabled": cam.yoloEnabled,
-            "ai_chat_enabled": cam.aiChatEnabled
+            "ai_chat_enabled": cam.aiChatEnabled,
+            "device_id": cam.localDeviceID ?? "", "display_id": cam.screenDisplayID ?? "",
+            "file_path": cam.fileURL?.path ?? "", "isapi_events_enabled": cam.isapiEventsEnabled,
+            "isapi_https": cam.isapiHTTPS, "isapi_port": cam.isapiPort
         ]
         let data = try JSONSerialization.data(withJSONObject: dict)
         let json = String(data: data, encoding: .utf8) ?? "{}"
@@ -120,8 +123,8 @@ public struct CameraGetAction: ACTAActionProtocol {
 public struct CameraSetEnabledAction: ACTAActionProtocol {
     public let id = "camera.set_enabled"
     public let title = "Enable or Disable Camera"
-    public let description = "Toggles live streaming and processing for a camera."
-    public let classification = ACTAActionClassification.reversible
+    public let description = "Set the persisted camera enabled flag. May reconnect an already running wall; does not start a stopped wall or certify stream readiness. Enabling requires operator review."
+    public let classification = ACTAActionClassification.serviceAffecting
     public let parameters = [
         ACTAActionParameterSchema(name: "camera_id", type: "string", description: "Camera UUID or name", isRequired: true),
         ACTAActionParameterSchema(name: "enabled", type: "boolean", description: "True to enable, false to disable", isRequired: true)
@@ -133,36 +136,22 @@ public struct CameraSetEnabledAction: ACTAActionProtocol {
         self.model = model
     }
 
+    public func requiresConfirmation(parameters: [String: String]) -> Bool { parameters["enabled"] == "true" || parameters["enabled"] == "1" }
+
     public func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
-        guard let idOrName = parameters["camera_id"] else {
-            return ACTAActionResult.failed(actionID: id, error: "Missing 'camera_id'.")
-        }
-        let enabled = (parameters["enabled"]?.lowercased() == "true" || parameters["enabled"] == "1")
-
-        let targetCamera = await MainActor.run {
-            actaResolveCamera(idOrName, model: model)
-        }
-
-        guard let cam = targetCamera else {
-            return ACTAActionResult.failed(actionID: id, error: "Camera '\(idOrName)' not found or name is ambiguous; specify its UUID.")
-        }
-
-        await MainActor.run {
-            model.setEnabled(cam, enabled: enabled)
-        }
-
-        let summary = "Camera '\(cam.name)' is now \(enabled ? "enabled" : "disabled")."
-        return ACTAActionResult(actionID: id, success: true, summary: summary, outputJSON: "{\"camera_id\": \"\(cam.id.uuidString)\", \"enabled\": \(enabled)}")
-    }
-
-    public func verify(parameters: [String: String], context: ACTAActionContext) async throws -> Bool {
-        guard let idOrName = parameters["camera_id"] else { return false }
-        let expected = (parameters["enabled"]?.lowercased() == "true" || parameters["enabled"] == "1")
-        return await MainActor.run {
-            guard let cam = model.config.cameras.first(where: { $0.id.uuidString == idOrName || $0.name.localizedCaseInsensitiveContains(idOrName) }) else { return false }
-            return cam.enabled == expected
+        try await MainActor.run {
+            try Task.checkCancellation()
+            guard let value = parameters["camera_id"], let camera = actaResolveCamera(value, model: model) else {
+                return .failed(actionID: id, error: "Camera does not exist or its name is ambiguous; specify a UUID.")
+            }
+            let enabled = parameters["enabled"] == "true"
+            try model.setCameraEnabledChecked(camera, enabled: enabled)
+            return ACTAActionResult(actionID: id, success: true, summary: "Camera enabled configuration saved and verified; stream readiness is not certified.",
+                outputJSON: String(decoding: try JSONSerialization.data(withJSONObject: ["camera_id": camera.id.uuidString, "enabled": enabled, "connection_verified": false] as [String: Any]), as: UTF8.self))
         }
     }
+    public func verify(parameters: [String: String], context: ACTAActionContext) async throws -> Bool { true }
+
 }
 
 public struct CameraRemoveAction: ACTAActionProtocol {
@@ -181,32 +170,18 @@ public struct CameraRemoveAction: ACTAActionProtocol {
     }
 
     public func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
-        guard let idOrName = parameters["camera_id"] else {
-            return ACTAActionResult.failed(actionID: id, error: "Missing 'camera_id'.")
-        }
-
-        let targetCamera = await MainActor.run {
-            actaResolveCamera(idOrName, model: model)
-        }
-
-        guard let cam = targetCamera else {
-            return ACTAActionResult.failed(actionID: id, error: "Camera '\(idOrName)' not found or name is ambiguous; specify its UUID.")
-        }
-
-        await MainActor.run {
-            model.remove(cam)
-        }
-
-        let summary = "Camera '\(cam.name)' [\(cam.id.uuidString)] has been permanently removed."
-        return ACTAActionResult(actionID: id, success: true, summary: summary, outputJSON: "{\"removed_id\": \"\(cam.id.uuidString)\"}")
-    }
-
-    public func verify(parameters: [String: String], context: ACTAActionContext) async throws -> Bool {
-        guard let idOrName = parameters["camera_id"] else { return false }
-        return await MainActor.run {
-            !model.config.cameras.contains(where: { $0.id.uuidString == idOrName || $0.name.localizedCaseInsensitiveContains(idOrName) })
+        try await MainActor.run {
+            try Task.checkCancellation()
+            guard let value = parameters["camera_id"], let camera = actaResolveCamera(value, model: model) else {
+                return .failed(actionID: id, error: "Camera does not exist or its name is ambiguous; specify a UUID.")
+            }
+            try model.removeCameraChecked(camera.id)
+            return ACTAActionResult(actionID: id, success: true, summary: "Camera configuration and credentials removed and verified.",
+                outputJSON: String(decoding: try JSONEncoder().encode(["removed_id": camera.id.uuidString]), as: UTF8.self))
         }
     }
+    public func verify(parameters: [String: String], context: ACTAActionContext) async throws -> Bool { true }
+
 }
 
 public struct CameraReconnectAction: ACTAActionProtocol {
@@ -234,7 +209,7 @@ public struct CameraReconnectAction: ACTAActionProtocol {
         }
 
         guard let cam = targetCamera else {
-            return ACTAActionResult.failed(actionID: id, error: "Camera '\(idOrName)' not found or name is ambiguous; specify its UUID.")
+            return ACTAActionResult.failed(actionID: id, error: "Camera does not exist or its name is ambiguous; specify a UUID.")
         }
 
         await MainActor.run {
@@ -242,6 +217,34 @@ public struct CameraReconnectAction: ACTAActionProtocol {
         }
 
         return ACTAActionResult(actionID: id, success: true, summary: "Reconnecting camera '\(cam.name)'.", outputJSON: "{\"status\": \"reconnecting\"}")
+    }
+}
+
+struct CameraToggleExpandAction: ACTAActionProtocol {
+    let id = "camera.toggle_expand"
+    let title = "Toggle expanded camera"
+    let description = "Toggle the selected camera's expanded canvas state. Verifies UI selection, not video connection completion."
+    let classification = ACTAActionClassification.reversible
+    let parameters = [ACTAActionParameterSchema(name: "camera_id", type: "string", description: "Camera UUID or unique name", isRequired: true)]
+    unowned let model: WallModel
+
+    func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
+        try await MainActor.run {
+            guard !model.connecting else { return .failed(actionID: id, error: "ACTION_BUSY: Camera connection is in progress.") }
+            guard let value = parameters["camera_id"], let camera = actaResolveCamera(value, model: model) else {
+                return .failed(actionID: id, error: "Camera does not exist or its name is ambiguous; specify a UUID.")
+            }
+            let expected: UUID? = model.expanded == camera.id ? nil : camera.id
+            model.toggleExpanded(camera)
+            guard model.expanded == expected else { return .failed(actionID: id, error: "Canvas expansion verification failed.") }
+            let data = try JSONEncoder().encode(["expanded_camera_id": model.expanded?.uuidString ?? ""])
+            return ACTAActionResult(actionID: id, success: true, summary: "Canvas expansion state updated and verified.",
+                outputJSON: String(decoding: data, as: UTF8.self))
+        }
+    }
+    func verify(parameters: [String: String], context: ACTAActionContext) async throws -> Bool {
+        // UI selection was verified in execute without an intervening suspension.
+        true
     }
 }
 
@@ -355,11 +358,15 @@ struct WallAnalyticsSettingsProvider: ACTAVideoAnalyticsSettingsProvider {
 
 @MainActor
 func registerAllWallActions(registry: ACTAActionRegistry, model: WallModel) async {
+    for kind in WallCameraConfigurationAction.Kind.allCases {
+        await registry.register(WallCameraConfigurationAction(kind: kind, model: model))
+    }
     await registry.register(CameraListAction(model: model))
     await registry.register(CameraGetAction(model: model))
     await registry.register(CameraSetEnabledAction(model: model))
     await registry.register(CameraRemoveAction(model: model))
     await registry.register(CameraReconnectAction(model: model))
+    await registry.register(CameraToggleExpandAction(model: model))
     await registry.register(CanvasSetColumnsAction(model: model))
     await registry.register(CanvasResetLayoutAction(model: model))
 
@@ -368,26 +375,37 @@ func registerAllWallActions(registry: ACTAActionRegistry, model: WallModel) asyn
     let analytics = WallAnalyticsSettingsProvider(model: model)
 
     // Core Settings Actions
-    await registry.register(SettingsGetSectionAction(settingsProvider: settings, featureProvider: features))
+    for kind in WallSettingsAction.Kind.allCases {
+        await registry.register(WallSettingsAction(kind: kind, model: model))
+    }
     await registry.register(SettingsUpdateSystemAction(settingsProvider: settings))
     await registry.register(SettingsUpdateFeatureTogglesAction(featureProvider: features))
     await registry.register(SettingsUpdatePermissionsAction(featureProvider: features))
 
     // Core Analytics Actions
-    await registry.register(AnalyticsGetSettingsAction(analyticsProvider: analytics))
+    for kind in WallAnalyticsAction.Kind.allCases {
+        await registry.register(WallAnalyticsAction(kind: kind, model: model))
+    }
     await registry.register(AnalyticsSetGlobalToggleAction(analyticsProvider: analytics))
 
     // Core Incident Actions
-    await registry.register(IncidentListAction())
-    await registry.register(IncidentTransitionStatusAction())
-    await registry.register(IncidentDeleteEvidenceAction())
+    await registry.register(WallOperationalAction(specification: IncidentListAction(), model: model))
+    await registry.register(WallOperationalAction(specification: IncidentTransitionStatusAction(), model: model))
+    await registry.register(WallOperationalAction(specification: IncidentDeleteEvidenceAction(), model: model))
+
+    await registry.register(WallNarrativeAction(pin: true, model: model))
+    await registry.register(WallNarrativeAction(pin: false, model: model))
+
+    for kind in WallMissionAction.Kind.allCases {
+        await registry.register(WallMissionAction(kind: kind, model: model))
+    }
 
     // Core Memory Actions
-    await registry.register(MemoryDeleteFrameAction())
+    await registry.register(WallOperationalAction(specification: MemoryDeleteFrameAction(), model: model))
     await registry.register(MemoryClearAllFramesAction())
 
     // Core Watch Actions
-    await registry.register(WatchListAction())
-    await registry.register(WatchCreateAction())
-    await registry.register(WatchCancelAction())
+    await registry.register(WallOperationalAction(specification: WatchListAction(), model: model))
+    await registry.register(WallOperationalAction(specification: WatchCreateAction(), model: model))
+    await registry.register(WallOperationalAction(specification: WatchCancelAction(), model: model))
 }

@@ -113,6 +113,8 @@ public actor ACTAActionRegistry {
                 parameters[field.name] = (value == "true" || value == "1") ? "true" : "false"
             }
         }
+        do { try action.validate(parameters: parameters) }
+        catch { return .failed(actionID: actionID, error: error.localizedDescription) }
         try Task.checkCancellation()
 
         // 1. Check Destructive / Security Confirmation Gate

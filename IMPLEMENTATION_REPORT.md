@@ -42,7 +42,7 @@ Mac: Apple M5, 24 ГБ RAM, macOS 27.2, Xcode 27.2, Swift 6.4.2.
 
 ## Осталось до завершения Phase 1
 
-1. Подключить реальные сервисы вместо отключённых incident/memory/watch adapters; добавить остальные операции из инвентаря (создание/редактирование камер, thresholds/overrides, missions, остальные разделы настроек).
+1. Завершить остальные операции из инвентаря и массовую очистку памяти (создание/редактирование камер, thresholds/overrides, missions, остальные разделы настроек).
 2. Завершить авторизацию, единый audit для прямых GUI/domain вызовов, idempotency keys, deadlines, recovery/compensation. ACTION_BUSY предотвращает одновременные записи через реестр, но не является очередью или долговременной дедупликацией.
 3. Проверить поведение настоящего Qwen с каталогом и подтверждениями; измерить влияние дополнительных шагов модели на задержку. Скриптовый transport этого не доказывает.
 4. После перезапуска pending tokens в памяти отсутствуют: операция не исполняется, требуется новое предложение. Долговременное восстановление токенов не реализовано.
@@ -53,4 +53,253 @@ Phase 2–4, TTS, vLLM Metal, выбор checkpoint и нагрузочные и
 
 ## Рекомендуемая точка продолжения
 
-Продолжать Phase 1 с реальных incident/memory/watch service adapters и их parity tests, затем расширять каталог только проверенными действиями. До этого не переходить к заявлению полного управления или завершению Phase 1. Настоящий Qwen, vLLM Metal, TTS и hardware/performance gates остаются следующими отдельными этапами с исходными ограничениями prompt.
+Продолжать Phase 1 с оставшихся camera/analytics/settings/mission действий и их parity tests; массовую очистку памяти проектировать отдельно с recovery/compensation. До этого не переходить к заявлению полного управления или завершению Phase 1. Настоящий Qwen, vLLM Metal, TTS и hardware/performance gates остаются следующими отдельными этапами с исходными ограничениями prompt.
+
+
+## Следующий участок Phase 1 — operational adapters
+
+Исходный HEAD этого участка: `ad95a8c` (предыдущий checkpoint сохранён пользователем).
+Рабочее дерево перед началом чистое. Миграций и изменения стандартных путей нет.
+
+Изменения:
+
+- Новый `ACTAOperationalActionAdapters.swift`: семь runtime adapters для списка/статуса инцидентов, удаления evidence, списка/создания/отмены watch rules и удаления одного кадра памяти. Используются существующие GUI/domain методы; после мутации проверяются сохранённые данные.
+- `WallModel`: injectable memory store и URL watch rules для временных тестов; стандартные значения прежние. Все watch lifecycle paths используют один URL. Создание watch возвращает UUID. Общий GUI/agent метод удаления кадра проверяет отсутствие записи и физического файла.
+- `LocalVideoAnalyticsEngine`: общий checked-метод удаления evidence проверяет сохранённые ссылки инцидента и отсутствие каталога; GUI оборачивает его прежним интерфейсом. Ошибки не превращаются в успешный agent result.
+- `CameraMemoryStore` и `SafetyEvidenceStore`: безопасные проверки наличия физических файлов/каталогов; форматы данных не менялись.
+- `IncidentTransitionStatusAction`: false_positive требует подтверждения, согласно исходной coverage policy.
+- Каталог расширен с 11 до 18 действий; массовая очистка кадров остаётся UNSUPPORTED и не рекламируется.
+- Новый `ACTAOperationalAdapterTests`: пять интеграционных сценариев на временных данных. Проверяются запись/перечитывание watch rules, отмена и неизвестные UUID, невалидный TTL, выключенная feature, сохранение повреждённого файла при ошибке, статус/заметка инцидента, подтверждение и физическое удаление кадра/evidence с сохранением записи инцидента.
+
+Проверки до финального регрессионного прогона: `/tmp/acta-phase1-evidence-tests.log`, exit code 0; 37 XCTest без ошибок, 15 Swift Testing без ошибок.
+
+Финальная команда:
+
+```sh
+swift test --package-path native --disable-automatic-resolution --jobs 2 --filter 'ACTAOperationalAdapterTests|ACTAServiceAdapterTests|ACTAActionRegistryTests|CameraMemoryStoreTests|IncidentReliabilityTests|EvidenceReliabilityTests|OperationsPreferencesTests|SafetyIncidentCenterTests|SettingsHubTests|UnifiedAgentHistoryTests|ACTAAnalyticsTests|ACTATransportSecurityTests'
+```
+
+Лог: `/tmp/acta-phase1-domain-acceptance.log`. Exit code 0: 64 XCTest, из них 2 пропущены (настоящий Qwen и приватная копия истории), 0 ошибок; 15 Swift Testing tests, 0 ошибок. Итого 62 XCTest и 15 Swift Testing прошли. Сборка приложения и тестов прошла; `git diff --check` — exit code 0.
+
+Оставшиеся ограничения этого участка: массовая очистка памяти не реализована; query text/custom suppression duration инцидентов не реализованы; транзакционный rollback между evidence-файлами и incident JSON при частичном сбое/падении процесса не добавлен. Такой сбой возвращает ошибку, а не успешную верификацию. Настоящие камеры, Qwen и GUI не проверялись. Полное покрытие приложения и завершение Phase 1 не заявляются.
+
+Откат участка: просмотреть diff относительно `ad95a8c` и отменить только его изменения, сохранив любые новые пользовательские правки. Пользовательские хранилища при тестах не менялись, новых миграций нет. Реальное удаление пользователем evidence/кадров после запуска приложения необратимо и требует собственной резервной копии; откат кода удалённые файлы не восстанавливает.
+
+
+## Analytics/canvas follow-up — Phase 1
+
+Предыдущий operational checkpoint в начале этого участка ещё не закоммичен; его изменения сохранены. Новый участок не меняет persistent formats, Keychain, зависимости или пути хранения. Используются прежние `updateSettings`, `toggleExpanded` и `resetLayout`.
+
+Добавлено:
+
+- `ACTAAnalyticsActionAdapters.swift`: шесть новых мутаций (порог, FPS, overlay, camera override, создание/обновление и удаление прямоугольной зоны); заменён runtime read adapter для camera-specific/global settings.
+- Все 12 advanced numeric settings имеют конечный список имён и проверку service limits. Не-целые значения integer thresholds и параметры, которые runtime изменил бы clamping-ом, отклоняются до записи.
+- Все 15 глобальных switches сведены к общей таблице ключей для выполнения и проверки; добавлены ранее пропущенные inactivity/unusual movement/crowd/banner. Изменения evidence recording требуют подтверждения. Evidence buffers/quota тоже защищены подтверждением.
+- Все восемь overlay switches доступны агенту.
+- Per-camera enabled/FPS/inherit, rectangular zone lifecycle и camera-specific чтение полного effective config доступны через существующий settings service. Геометрическое редактирование сохраняет ID/политику существующей зоны, неоднозначные имена отклоняются.
+- `EffectiveCameraAnalyticsConfig` получил Codable для полного typed JSON результата; persistent schemas не изменены.
+- `CameraToggleExpandAction` и публикация `canvas.reset_layout`; проверяются UI state и сохранённый layout соответственно, а не реальная готовность видеопотока.
+- Каталог вырос с 18 до 26 действий.
+- Новый `ACTAAnalyticsActionAdapterTests`: четыре сценария, проверяющие весь набор numeric/overlay/global fields, invalid inputs без записи, camera override, lifecycle zones с сохранением policy/ID, canvas state и ошибку сохранения layout.
+
+Первый build gate: exit code 1 (`/tmp/acta-phase1-analytics-build.log`), новая локальная функция проверки камеры нуждалась в явном MainActor. Ошибка исправлена в этом же участке. Повторный gate `/tmp/acta-phase1-analytics-tests.log`: exit code 0.
+
+Финальная команда:
+
+```sh
+swift test --package-path native --disable-automatic-resolution --jobs 2 --filter 'ACTAAnalyticsActionAdapterTests|ACTAOperationalAdapterTests|ACTAServiceAdapterTests|ACTAActionRegistryTests|CameraMemoryStoreTests|IncidentReliabilityTests|EvidenceReliabilityTests|OperationsPreferencesTests|SafetyIncidentCenterTests|SettingsHubTests|UnifiedAgentHistoryTests|ACTAAnalyticsTests|ACTATransportSecurityTests|LocalAnalyticsEngineCoreTests|VideoLayoutTests|VideoInteractionTests'
+```
+
+Лог `/tmp/acta-phase1-analytics-acceptance.log`: exit code 0. 84 XCTest, 2 пропущены (настоящий Qwen и приватная копия истории), 0 ошибок: 82 XCTest прошли. Дополнительно 15 Swift Testing tests прошли. Сборка приложения/тестов прошла. `git diff --check`: exit code 0.
+
+Ограничения: не реализованы sensitivity profile actions, execution-mode changes, удаление всего camera override, остальные per-camera detector switches/cooldown, polygon/policy редактирование зон. Это обнаруженные дополнительные GUI gaps; их следует добавить в полный инвентарь перед заявлением паритета. Реальные камеры, inference hardware и GUI interactions не проверялись. Массовая очистка памяти остаётся неподключённой.
+
+Откат: отменить только analytics/canvas изменения текущего diff после просмотра; сохранить предыдущий operational checkpoint и пользовательские правки. Изменённые агентом во время будущего использования настройки сохраняются в прежнем JSON; откат кода сам по себе их не отменяет, для отката значений нужна копия settings/layout. В этом прогоне использовались только временные тестовые хранилища.
+
+Следующая точка продолжения: расширенные поля camera override и зоны/профили, затем оставшиеся camera/settings/mission операции; Phase 1 не завершена.
+
+
+## Profiles / advanced overrides / narrative review — Phase 1
+
+Предыдущие незакоммиченные участки сохранены. В этом участке нет миграций, новых зависимостей, изменений Keychain, инфраструктуры или стандартных путей хранения.
+
+Реализация:
+
+- Глобальный профиль: выбор отдельно от применения preset (`apply_values=false` повторяет GUI picker, значение по умолчанию применяет preset).
+- Camera override: все девять дополнительных detector switches, профиль камеры, FPS/cooldown и явный сброс обоих custom values. Конфликтующие set/clear или inherit=true с изменением dormant fields отклоняются до записи. Полное удаление override проходит подтверждение и проверку JSON.
+- Зона по UUID: переименование, enabled/hold/severity, перемещение, добавление и удаление отдельных точек полигона. Проверяются индексы, нормализованные координаты и диапазон 3...64 точек. ID зоны сохраняется.
+- Главы памяти: `memory.set_chapter_text` и `memory.toggle_pin` используют общие checked-методы с GUI, перечитывают SQLite и сохраняют исходный aiSummary. Pin задаёт состояние, а не инвертирует его. Оба действия требуют review перед созданием операторской отметки. У текста агента лимит 16000 символов и явный clear=true; этот лимит не ограничивает прежний GUI workflow.
+- Карточка подтверждения: раскрываемые полные параметры с text selection, native DisclosureGroup и accessibility identifier; секретные поля/URL credentials редактируются. Новые подписи переведены RU/EN. Полный текст аннотации не обрезается до 256 символов описания.
+- Каталог: 31 действие. Матрица дополнена четырьмя обнаруженными analytics contracts: теперь 101 строка (97 baseline + 4). Execution mode остаётся явно не реализованным scope gap, не одобренным исключением из полного покрытия.
+
+Проверки:
+
+```sh
+swift test --package-path native --disable-automatic-resolution --jobs 2 --filter 'ACTAAnalyticsActionAdapterTests|ACTAOperationalAdapterTests|ACTAServiceAdapterTests|ACTAActionRegistryTests|CameraMemoryStoreTests|IncidentReliabilityTests|EvidenceReliabilityTests|OperationsPreferencesTests|SafetyIncidentCenterTests|SettingsHubTests|UnifiedAgentHistoryTests|ACTAAnalyticsTests|ACTATransportSecurityTests|LocalAnalyticsEngineCoreTests|VideoLayoutTests|VideoInteractionTests|AgentMemoryReliabilityTests|AgentRetrievalTests|LanguageSettingsTests'
+make -C native localization-audit
+swift build --package-path native --disable-automatic-resolution --jobs 2
+```
+
+Тесты: `/tmp/acta-phase1-final-reviewed-acceptance.log`, exit code 0. 105 XCTest: 103 прошли, два пропущены (настоящий Qwen и приватная копия истории), 0 ошибок. Дополнительно 15 Swift Testing tests прошли. Новые тесты покрывают все profiles/camera flags, clear FPS/cooldown, confirmed override removal, zone policy/points/invalid inputs, reviewed annotations и сохранение AI provenance в SQLite.
+
+Localization gate сначала завершился с exit code 2: 73 непереведённых вхождения из добавленных action adapters/ошибок, включая предыдущие участки. Добавлены RU/EN переводы без потери placeholders. Повторный промежуточный gate нашёл CONFIRM- внутри выражения Label как UI string; проверка ID вынесена в локальную переменную, правило audit не ослаблялось. Финальный `/tmp/acta-phase1-final-localization.log`: exit code 0, untranslated source occurrences 0, plutil OK.
+
+Финальная компиляция последнего UI refactor: `/tmp/acta-phase1-final-reviewed-build.log`, exit code 0, Build complete (3.62 secs). Сохраняется существующее предупреждение SwiftPM о Cmlx bundle; ошибок компиляции нет. `git diff --check`: exit code 0.
+
+Не проверены вручную клавиатура/VoiceOver/экранная компоновка запущенного приложения. Использованы native SwiftUI controls и автоматические проверки, это не доказательство полной accessibility conformance. Новые действия не проверены настоящим Qwen; runtime/performance gates остаются открытыми. Polygon validation соответствует существующему service contract (количество/диапазон), отдельная геометрическая проверка самопересечений не добавлена.
+
+Откат: отменить только изменения этого участка после просмотра diff, сохранив предыдущие незакоммиченные участки. Persistent schemas не менялись; для восстановления значений, изменённых при будущем использовании приложения, нужна копия прежнего settings JSON/SQLite. В тестах изменялись только временные хранилища.
+
+Следующий участок: оставшиеся camera lifecycle/settings/mission действия, затем завершение авторизации/idempotency/recovery и проверка настоящим Qwen. Phase 1, full GUI parity и release acceptance не завершены.
+
+
+## Mission lifecycle / history / consultation — Phase 1
+
+Предыдущие незакоммиченные участки сохранены. Добавлены восемь mission actions: list,
+create, edit, delete, history, clear_consult, run_now, ask_consult. Каталог: **39 действий**.
+В матрице 102 строки: добавлен отдельный контракт mission.history. Phase 1 не завершена.
+
+Изменения:
+
+- Новый `ACTAMissionActionAdapters.swift`: конечные схемы аргументов, проверка UUID,
+  interval/clock schedules, CSV clock times/weekdays, явного IANA time zone для новых
+  clock schedules, limits и запрет пустых/конфликтующих изменений. Миссия создаётся
+  выключенной по умолчанию; enabled меняется тем же edit action.
+- `WallModel` использует injectable `missionStoreURL` во всех lifecycle/consult/run
+  paths; стандартный путь `CameraWall/missions.json` сохранён. Существующая JSON
+  schemaVersion 3 и поддержка предыдущих форматов не менялись.
+- Общая проверка runtime/диск до записи: unreadable/corrupt/duplicate-ID/stale data
+  не перезаписываются. Сравнение нормализует существующую ISO-8601 точность дат, не
+  меняя сам формат. Это проверка снимка, не межпроцессная блокировка или CAS-файл.
+- CRUD использует GUI domain methods и post-write read-back. Удаление и очистка
+  консультации требуют подтверждения. Run history сохраняется, включая историю уже
+  удалённой миссии; при редактировании сохраняются runs и consults.
+- Ручной run возвращает только verified queued/running admission с completed=false.
+  Один слот не перезаписывается другой миссией; повторный запрос того же ID не создаёт
+  второй слот. Disconnect/restart очищает очередь; durable queue recovery не добавлена.
+- Consultation использует прежний локальный workflow. Вопрос сохраняется, tool
+  возвращает accepted=true/completion_verified=false; ответ читается через history.
+  Добавлена optional dependency injection для теста ответчика, default runtime прежний.
+  Тестовый ответчик не является проверкой настоящего Qwen и не включён в продуктовый UI.
+- Execution inputs миссии сравниваются перед commit; изменение brief/camera/schedule
+  отменяет старый запрос. Исторические поля и точность дат не считаются новым запросом.
+  Отвергнутый late commit бросает CancellationError, а не порождает статус complete без
+  сохранённого результата. Полный runtime сценарий с реальными кадрами ещё не проверен.
+- Mission list/history JSON дополняется явными mission_id/run_id/event_id, camera_id,
+  временем и типом источника. Общий AgentEvidenceLedger получает проверяемые ссылки;
+  вопросы консультации и ответы отмечены отдельно от mission_run. Persistent JSON
+  не менялся. Embedded JSON в текстах не декодируется в ссылки.
+- Новый `ACTAMissionActionAdapterTests`: шесть сценариев на временных хранилищах:
+  CRUD/history preservation, clock/timezone validation, corrupt/stale file preservation,
+  idempotent queue receipt, execution-request identity, scripted consultation + ledger.
+
+Проверки:
+
+Первый `/tmp/acta-phase1-mission-tests.log` завершился с exit code 1: тест после проверки
+corrupt storage попытался создать новую фикстуру через save в том же повреждённом файле;
+store правильно отказал в перезаписи. Тест исправлен явным удалением временной broken
+фикстуры перед независимым сценарием. Повторный gate exit code 0.
+
+```sh
+swift test --package-path native --disable-automatic-resolution --jobs 2 --filter 'ACTAMissionActionAdapterTests|CameraMissionTests|ACTAAnalyticsActionAdapterTests|ACTAOperationalAdapterTests|ACTAServiceAdapterTests|ACTAActionRegistryTests|CameraMemoryStoreTests|IncidentReliabilityTests|EvidenceReliabilityTests|OperationsPreferencesTests|SafetyIncidentCenterTests|SettingsHubTests|UnifiedAgentHistoryTests|ACTAAnalyticsTests|ACTATransportSecurityTests|LocalAnalyticsEngineCoreTests|VideoLayoutTests|VideoInteractionTests|AgentMemoryReliabilityTests|AgentRetrievalTests|LanguageSettingsTests'
+make -C native localization-audit
+```
+
+Финальный лог `/tmp/acta-phase1-missions-provenance-final.log`, exit code 0: 129 XCTest,
+из них 127 прошли и 2 пропущены (настоящий Qwen и приватная копия истории), 0 ошибок.
+Дополнительно прошли 15 Swift Testing tests. Приложение и test targets собраны успешно.
+
+Localization первоначально нашла 15 непереведённых вхождений в новом mission layer;
+переводы добавлены. `/tmp/acta-phase1-missions-provenance-localization.log`: exit code 0,
+untranslated source occurrences 0, plutil OK. `git diff --check`: exit code 0.
+
+Ограничения: admission не доказывает завершение inference; реальные кадры/Qwen,
+производительность и восстановление активной очереди после перезапуска не проверены.
+Cross-process atomic update/rollback между файловыми хранилищами не реализован.
+Новые тесты используют временные хранилища; стандарты запуска приложения/моделей и
+локальные production defaults не менялись, пакеты не устанавливались.
+
+Откат: просмотреть diff и отменить только mission checkpoint, сохранив предыдущую
+незакоммиченную работу. Новых миграций нет. Восстановление удалённой консультации при
+будущем использовании приложения требует копии прежнего missions.json; откат кода её
+не восстанавливает. Следующий участок: оставшиеся camera lifecycle/settings действия,
+затем recovery/idempotency/security и реальная model/hardware приёмка.
+
+
+## Camera configuration / credential safety — Phase 1
+
+Предыдущий незакоммиченный diff сохранён. В каталог добавлены шесть действий:
+camera.add_network, camera.add_local, camera.add_screen, camera.add_file, camera.edit,
+camera.set_processing. Итого **45 действий**, в матрице 103 строки (добавлен контракт
+camera.set_processing). Полный паритет функций камеры не заявляется.
+
+Изменения:
+
+- Новый `ACTACameraConfigurationActions.swift`: регистрация источников DISABLED,
+  метаданные/безопасные URL, YOLO/AI switches, полная проверка сохранённого Camera в
+  конфигурации. Успех означает configured=true, connection_verified=false. Регистрация
+  USB/display ID не доказывает существование устройства; bookmark не доказывает decoder
+  readiness. Реальные capture/network/permissions gate не пройдены.
+- Новый общий `saveCameraConfigurationChecked` используется GUI и агентом. Прежние GUI
+  defaults продолжают запускать добавленные источники. Агент не запускает остановленную
+  стену при сохранении выключенного источника; уже работающая стена может переподключиться.
+  Избежан двойной start в существующем GUI network-save workflow.
+- Перед мутацией checked-сервисы сравнивают config/runtime с cameras.json; corrupt/stale
+  файлы не перезаписываются. Это не межпроцессный CAS. Идентификаторы камер/форматы/пути
+  хранения сохраняются. Изменение enabled по старому GUI объекту меняет только актуальный
+  флаг и не восстанавливает устаревшие метаданные.
+- camera.set_enabled вызывает checked-сервис, enabling требует подтверждения; receipt не
+  утверждает готовность потока. AI flag и URL changes также защищены review.
+- Network additions пока только anonymous RTSP/RTSPS/ONVIF без query/fragment/credentials.
+  Пароли не принимаются как tool arguments. Нативный secure editor остаётся для credentials,
+  URL других форм и discovery. У existing camera agent edit не переносит сохранённые
+  credentials на другой scheme/host/port даже после подтверждения; нужен secure GUI.
+- CameraCredentialStore/SystemCameraCredentialStore добавлены как test seam к прежнему
+  CameraKeychain; service `CameraWall.RTSP` и account UUID не переименованы. Checked delete
+  проверяет OSStatus/отсутствие credentials; camera remove проверяет JSON и runtime.
+  При ошибке config commit предпринимается компенсация credentials. Это не атомарная
+  транзакция Keychain+файл и не доказательство recovery при падении процесса.
+- Новый validate hook протокола вызывается реестром до confirmation token. URL с raw
+  credentials/query и oversized/conflicting narrative arguments не могут стать durable
+  approval proposals. Operational wrapper делегирует hook спецификации. Ошибки поиска
+  камеры не повторяют исходный входной URL; streams/arguments redacted как прежде.
+- camera.list/get теперь проверены на временной конфигурации; get включает локальные
+  source IDs/file path и ISAPI flags, не bookmark/credentials. ISAPI editing, credential
+  provisioning, snapshot, verified reconnect и изменение device/file identity ещё не
+  реализованы. Дополнительные импорты/экспорты GUI тоже требуют полного инвентаря.
+- Новый `ACTACameraConfigurationActionTests`: пять сценариев с временными config/bookmark
+  и fake credentials, без обращения этих сценариев к live Keychain. Проверяются source
+  registration/filter/get, flags/metadata/URL preservation, stale GUI merge, invalid inputs
+  до proposals, endpoint reuse denial, reviewed removal и credential compensation на
+  детерминированном config-write failure, сохранение corrupt JSON.
+
+Проверки:
+
+Первый `/tmp/acta-phase1-camera-build.log`: exit code 1, ошибки нового кода — shadowed
+error в catch и порядок параметра enabled. Исправлены. Повторный build/test gate прошёл.
+Localization первоначально нашла непереведённые новые ошибки; RU/EN строки добавлены.
+
+```sh
+swift test --package-path native --disable-automatic-resolution --jobs 2 --filter 'ACTACameraConfigurationActionTests|ACTAMissionActionAdapterTests|CameraMissionTests|ACTAAnalyticsActionAdapterTests|ACTAOperationalAdapterTests|ACTAServiceAdapterTests|ACTAActionRegistryTests|CameraMemoryStoreTests|IncidentReliabilityTests|EvidenceReliabilityTests|OperationsPreferencesTests|SafetyIncidentCenterTests|SettingsHubTests|SettingsTests|UnifiedAgentHistoryTests|ACTAAnalyticsTests|ACTATransportSecurityTests|LocalAnalyticsEngineCoreTests|VideoLayoutTests|VideoInteractionTests|AgentMemoryReliabilityTests|AgentRetrievalTests|LanguageSettingsTests|ConfigurationTests|LocalCameraTests|LocalCameraStartupTests|VideoFileSourceConfigurationTests'
+make -C native localization-audit
+swift build --package-path native --disable-automatic-resolution --jobs 2
+```
+
+Финальные tests `/tmp/acta-phase1-camera-validated-final.log`: exit code 0; 156 XCTest,
+154 прошли, два пропущены (настоящий Qwen и приватная копия истории), 0 ошибок.
+Swift Testing: 18 tests в двух suites, все прошли. Localization:
+`/tmp/acta-phase1-camera-validated-localization.log`, exit code 0, untranslated source
+occurrences 0, plutil OK. `git diff --check`: exit code 0.
+
+После уточнения tool descriptions выполнена отдельная финальная компиляция:
+`/tmp/acta-phase1-camera-final-build.log`, exit code 0, Build complete (4.12 secs).
+
+Откат: просмотреть diff и вернуть только camera checkpoint, сохранив все предыдущие
+незакоммиченные участки. Новых миграций/зависимостей нет, модели не устанавливались.
+Откат кода не восстанавливает удалённые пользователем credentials/config автоматически;
+для реальной эксплуатации нужны штатные резервные копии и отдельная recovery приёмка.
+Новые camera-тесты не запускали реальные камеры и не меняли пользовательский Keychain.
+
+Следующий участок: оставшиеся настройки/ISAPI/snapshot/reconnect и безопасный credential
+workflow, затем закрытие idempotency/audit/recovery и реальные Qwen/vLLM Metal gates.
+Phase 1 и production acceptance остаются незавершёнными.

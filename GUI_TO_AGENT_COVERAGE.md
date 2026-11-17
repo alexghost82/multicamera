@@ -8,12 +8,14 @@ Version: 1.0.0-baseline
 
 ## 1. Executive Summary
 
-This inventory maps **every existing user-accessible SwiftUI control, persistent setting, and domain service operation** in ACTA to a typed agent action specification.
+Current implementation checkpoint: **45 advertised actions**, with row-specific limitations below. The original baseline inventory is not proof of exhaustive UI coverage.
 
-- **Action rows in this baseline:** 97 (the previous claim of 108 was not supported by the table; exhaustive UI coverage remains unverified)
-- **Existing Agent Tools in Code:** 16 read-only query tools + 1 terminal tool (`present_answer`)
-- **Existing Agent Mutations in Code:** 3 (`rename_identity`, `merge_identities`, `split_identity`)
-- **Uncovered Operations Prior to Audit:** 89 (82.4% gap across Camera lifecycle, Layout, Analytics toggles/thresholds, Incident management, Missions, Watch rules, SettingsHub, and Local Voice TTS)
+This working inventory maps currently identified UI/domain operations to agent action contracts. Exhaustive control-by-control parity has not been established.
+
+- **Action rows:** 103 (97 baseline rows, 4 analytics contracts, mission.history and camera.set_processing; exhaustive UI coverage remains unverified)
+- **Baseline legacy tools:** 16 read-only query tools + 1 terminal tool (`present_answer`)
+- **Baseline legacy mutations:** 3 (`rename_identity`, `merge_identities`, `split_identity`)
+- **Baseline gap estimate:** the old 89 / 82.4% figure depended on the unsupported 108-operation total and is not accepted as a coverage measurement.
 
 ---
 
@@ -32,20 +34,21 @@ This inventory maps **every existing user-accessible SwiftUI control, persistent
 
 | Action ID | UI Route / Screen | Service Owner | Typed Arguments | Action Type | Policy | Unit / Parity Test | State |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `camera.list` | `WallView` / `CameraManager` | `WallModel` | `includeDisabled: Bool?` | `Inspect` | Auto | `testCameraList` | `PARTIAL — NO PARITY TEST` |
-| `camera.get` | `CameraEditor` | `WallModel` | `cameraID: String` | `Inspect` | Auto | `testCameraGet` | `PARTIAL — NO PARITY TEST` |
-| `camera.add_network` | `CameraEditor` sheet | `WallModel` | `name: String, url: String, substream: String?, username: String?, password: String?` | `Reversible` | Auto | `testCameraAddNetwork` | `PLANNED` |
-| `camera.add_local` | `LocalCameraEditor` sheet | `WallModel` | `deviceID: String, name: String` | `Reversible` | Auto | `testCameraAddLocal` | `PLANNED` |
-| `camera.add_screen` | `ScreenCaptureCameraEditor` | `WallModel` | `displayID: UInt32, name: String` | `Reversible` | Auto | `testCameraAddScreen` | `PLANNED` |
-| `camera.add_file` | `VideoFileCameraEditor` | `WallModel` | `filePath: String, name: String?` | `Reversible` | Auto | `testCameraAddFile` | `PLANNED` |
-| `camera.edit` | `CameraEditor` sheet | `WallModel` | `cameraID: String, name: String?, url: String?, substream: String?, enabled: Bool?` | `Reversible` | Auto | `testCameraEdit` | `PLANNED` |
-| `camera.set_enabled` | `CameraManager` toggle | `WallModel` | `cameraID: String, enabled: Bool` | `Reversible` | Auto | `testCameraSetEnabled` | `PARTIAL — NO PARITY TEST` |
-| `camera.remove` | `WallView` remove alert | `WallModel` | `cameraID: String` | `Destructive` | **Confirm** | `testCameraRemove` | `PARTIAL — NO PARITY TEST` |
+| `camera.list` | `WallView` / `CameraManager` | `WallModel` | `includeDisabled: Bool?` | `Inspect` | Auto | `testDisabledSourceRegistrationAndInspectionDoNotStartCaptureOrWriteCredentials` | `IMPLEMENTED — CONFIGURATION INSPECTION` |
+| `camera.get` | `CameraEditor` | `WallModel` | `cameraID: String` | `Inspect` | Auto | `testDisabledSourceRegistrationAndInspectionDoNotStartCaptureOrWriteCredentials` | `IMPLEMENTED — CONFIGURATION; NOT HARDWARE INVENTORY` |
+| `camera.add_network` | `CameraEditor` sheet | `WallModel` | `name, url, mainstream?; no credentials/query/fragment; always disabled` | `ServiceAffecting` | Auto | `testDisabledSourceRegistrationAndInspectionDoNotStartCaptureOrWriteCredentials` | `PARTIAL — ANONYMOUS/DISABLED; DISCOVERY UNVERIFIED` |
+| `camera.add_local` | `LocalCameraEditor` sheet | `WallModel` | `device_id, name; always disabled` | `ServiceAffecting` | Auto | `testDisabledSourceRegistrationAndInspectionDoNotStartCaptureOrWriteCredentials` | `PARTIAL — DISABLED CONFIG; CAPTURE UNVERIFIED` |
+| `camera.add_screen` | `ScreenCaptureCameraEditor` | `WallModel` | `display_id (>0), name; always disabled` | `ServiceAffecting` | Auto | `testDisabledSourceRegistrationAndInspectionDoNotStartCaptureOrWriteCredentials` | `PARTIAL — DISABLED CONFIG; CAPTURE UNVERIFIED` |
+| `camera.add_file` | `VideoFileCameraEditor` | `WallModel` | `file_path (absolute regular readable file), name?; always disabled` | `ServiceAffecting` | Auto | `testDisabledSourceRegistrationAndInspectionDoNotStartCaptureOrWriteCredentials` | `PARTIAL — BOOKMARK/CONFIG; DECODING UNVERIFIED` |
+| `camera.edit` | `CameraEditor` sheet | `WallModel` | `camera_id, name?, location?, clear_location?, url?, mainstream?, clear_mainstream?` | `ServiceAffecting` | **Confirm URL changes** | `testMetadataProcessingAndURLChangesPreserveCredentialAndSourceIdentity` | `PARTIAL — METADATA/SAFE URLS; CREDENTIAL UI REMAINS` |
+| `camera.set_processing` | Camera context settings | WallModel | `camera_id, feature: yolo/ai_chat, enabled: Bool` | `Reversible` | **Confirm AI flag change** | `testMetadataProcessingAndURLChangesPreserveCredentialAndSourceIdentity` | `IMPLEMENTED — CONFIG/GUI SERVICE TEST` |
+| `camera.set_enabled` | `CameraManager` toggle | `WallModel` | `cameraID: String, enabled: Bool` | `ServiceAffecting` | **Confirm on enable** | `testMetadataProcessingAndURLChangesPreserveCredentialAndSourceIdentity` | `IMPLEMENTED — CONFIG FLAG; STREAM UNVERIFIED` |
+| `camera.remove` | `WallView` remove alert | `WallModel` | `cameraID: String` | `Destructive` | **Confirm** | `testRemovalRequiresReviewAndChecksCredentialDeletion` | `IMPLEMENTED — CONFIG/FAKE CREDENTIAL STORE; LIVE KEYCHAIN UNVERIFIED` |
 | `camera.reconnect` | Camera context menu | `WallModel` | `cameraID: String` | `ServiceAffecting` | Auto | `testCameraReconnect` | `PLANNED` |
 | `camera.snapshot` | Camera action bar | `WallModel` | `cameraID: String` | `Inspect` | Auto | `testCameraSnapshot` | `PLANNED` |
-| `camera.toggle_expand` | Video canvas double-click | `WallModel` | `cameraID: String` | `Reversible` | Auto | `testCameraToggleExpand` | `PLANNED` |
+| `camera.toggle_expand` | Video canvas double-click | `WallModel` | `cameraID: String` | `Reversible` | Auto | `testCanvasActionsShareGUIStateAndVerifySavedLayout` | `IMPLEMENTED — UI STATE; STREAM UNVERIFIED` |
 | `canvas.set_columns` | SystemSettings / Canvas | `WallModel` | `columns: Int (1...16)` | `Reversible` | Auto | `testCanvasSetColumns` | `IMPLEMENTED — SERVICE TEST` |
-| `canvas.reset_layout` | Window menu / Toolbar | `WallModel` | `none` | `Reversible` | Auto | `testCanvasResetLayout` | `PLANNED` |
+| `canvas.reset_layout` | Window menu / Toolbar | `WallModel` | `none` | `Reversible` | Auto | `testCanvasActionsShareGUIStateAndVerifySavedLayout` | `IMPLEMENTED — DISK/FAILURE TEST` |
 
 ---
 
@@ -53,14 +56,19 @@ This inventory maps **every existing user-accessible SwiftUI control, persistent
 
 | Action ID | UI Route / Screen | Service Owner | Typed Arguments | Action Type | Policy | Unit / Parity Test | State |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `analytics.get_settings` | `AnalyticsSettingsEditor` | `LocalVideoAnalyticsEngine` | `cameraID: String?` | `Inspect` | Auto | `testAnalyticsGetSettings` | `PARTIAL — GLOBAL SETTINGS ONLY` |
-| `analytics.set_global_toggle` | `AnalyticsSettingsEditor` | `LocalVideoAnalyticsEngine` | `feature: String, enabled: Bool` | `Reversible` | Auto | `testAnalyticsSetGlobalToggle` | `PARTIAL — LIVE PROVIDER / FALL TEST` |
-| `analytics.set_threshold` | `AnalyticsSettingsEditor` | `LocalVideoAnalyticsEngine` | `parameter: String, value: Double` | `Reversible` | Auto | `testAnalyticsSetThreshold` | `PLANNED` |
-| `analytics.set_sampling_fps` | `AnalyticsSettingsEditor` | `LocalVideoAnalyticsEngine` | `fps: Double, idleFPS: Double?, boostFPS: Double?` | `Reversible` | Auto | `testAnalyticsSetSamplingFPS` | `PLANNED` |
-| `analytics.set_overlay` | `AnalyticsSettingsEditor` | `LocalVideoAnalyticsEngine` | `layer: String, enabled: Bool` | `Reversible` | Auto | `testAnalyticsSetOverlay` | `PLANNED` |
-| `analytics.set_camera_override` | `AnalyticsSettingsEditor` | `LocalVideoAnalyticsEngine` | `cameraID: String, enabled: Bool?, fps: Double?, inherit: Bool?` | `Reversible` | Auto | `testAnalyticsSetCameraOverride` | `PLANNED` |
-| `analytics.set_restricted_zone` | `AnalyticsSettingsEditor` | `LocalVideoAnalyticsEngine` | `cameraID: String, name: String, x: Double, y: Double, width: Double, height: Double` | `Reversible` | Auto | `testAnalyticsSetRestrictedZone` | `PLANNED` |
-| `analytics.remove_restricted_zone` | `AnalyticsSettingsEditor` | `LocalVideoAnalyticsEngine` | `cameraID: String, name: String` | `Reversible` | Auto | `testAnalyticsRemoveZone` | `PLANNED` |
+| `analytics.get_settings` | `AnalyticsSettingsEditor` | `LocalVideoAnalyticsEngine` | `cameraID: String?` | `Inspect` | Auto | `testCameraOverrideAndZoneLifecyclePreservePolicyAndIDs` | `IMPLEMENTED — GLOBAL/OVERRIDE/EFFECTIVE READ` |
+| `analytics.set_global_toggle` | `AnalyticsSettingsEditor` | `LocalVideoAnalyticsEngine` | `feature: String, enabled: Bool` | `Reversible` | Auto | `testAllOverlaysAndGlobalFlagsUseActualService` | `IMPLEMENTED — 15 GLOBAL FLAGS` |
+| `analytics.set_threshold` | `AnalyticsSettingsEditor` | `LocalVideoAnalyticsEngine` | `parameter: String, value: Double` | `Reversible` | Auto | `testNumericSettingsRoundTripAndRejectInvalidValuesBeforeWriting` | `IMPLEMENTED — 12 NUMERIC PARAMETERS` |
+| `analytics.set_sampling_fps` | `AnalyticsSettingsEditor` | `LocalVideoAnalyticsEngine` | `fps: Double, idleFPS: Double?, boostFPS: Double?` | `Reversible` | Auto | `testNumericSettingsRoundTripAndRejectInvalidValuesBeforeWriting` | `IMPLEMENTED — RATE VALIDATION / DISK TEST` |
+| `analytics.set_overlay` | `AnalyticsSettingsEditor` | `LocalVideoAnalyticsEngine` | `layer: String, enabled: Bool` | `Reversible` | Auto | `testAllOverlaysAndGlobalFlagsUseActualService` | `IMPLEMENTED — 8 OVERLAYS` |
+| `analytics.set_camera_override` | `AnalyticsSettingsEditor` | `LocalVideoAnalyticsEngine` | `camera_id, enabled?, inherit?, fps?, clear_fps?, cooldown_seconds?, clear_cooldown?, sensitivity_profile?, 9 detector switches?` | `Reversible` | Auto | `testAdvancedCameraOverridesAndConfirmedRemoval` | `IMPLEMENTED — SWITCHES/PROFILE/FPS/COOLDOWN` |
+| `analytics.set_restricted_zone` | `AnalyticsSettingsEditor` | `LocalVideoAnalyticsEngine` | `cameraID: String, name: String, x: Double, y: Double, width: Double, height: Double` | `Reversible` | Auto | `testCameraOverrideAndZoneLifecyclePreservePolicyAndIDs` | `PARTIAL — RECTANGLE GEOMETRY ONLY` |
+| `analytics.remove_restricted_zone` | `AnalyticsSettingsEditor` | `LocalVideoAnalyticsEngine` | `cameraID: String, name: String` | `Reversible` | Auto | `testCameraOverrideAndZoneLifecyclePreservePolicyAndIDs` | `IMPLEMENTED — UNIQUE NAME` |
+
+| `analytics.set_sensitivity_profile` | AnalyticsSettingsEditor / profile + apply | LocalVideoAnalyticsEngine | `profile: enum, apply_values: Bool?` | `Reversible` | Auto | `testSensitivityProfilesMatchGUIAndSelectionDoesNotApplyPreset` | `IMPLEMENTED — ALL PROFILES` |
+| `analytics.remove_camera_override` | AnalyticsSettingsEditor / remove override | LocalVideoAnalyticsEngine | `camera_id: UUID` | `Destructive` | **Confirm** | `testAdvancedCameraOverridesAndConfirmedRemoval` | `IMPLEMENTED — DISK/CONFIRMATION TEST` |
+| `analytics.update_restricted_zone` | RestrictedZoneSettingsEditor / policy + polygon | LocalVideoAnalyticsEngine | `camera_id, zone_id, new_name?, enabled?, hold_seconds?, severity?, point_index?, point_x?, point_y?, append_point?, remove_point?` | `Reversible` | Auto | `testPolygonAndZonePolicyEditsPreserveIdentityAndRejectInvalidOperations` | `IMPLEMENTED — POLICY/POINT OPERATIONS` |
+| `analytics.set_execution_mode` | AnalyticsSettingsEditor / execution mode | LocalVideoAnalyticsEngine | `mode: LOCAL / DISTRIBUTED` | `ServiceAffecting` | Scope decision pending | Not implemented | `GAP — DISTRIBUTED OUTSIDE CURRENT LOCAL TARGET` |
 
 ---
 
@@ -68,11 +76,11 @@ This inventory maps **every existing user-accessible SwiftUI control, persistent
 
 | Action ID | UI Route / Screen | Service Owner | Typed Arguments | Action Type | Policy | Unit / Parity Test | State |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `incident.list` | `SafetyIncidentCenterView` | `LocalVideoAnalyticsEngine` | `openOnly: Bool?, cameraID: String?, query: String?, limit: Int?` | `Inspect` | Auto | `testIncidentList` | `PLANNED` |
+| `incident.list` | `SafetyIncidentCenterView` | `LocalVideoAnalyticsEngine` | `openOnly: Bool?, cameraID: String?, query: String?, limit: Int?` | `Inspect` | Auto | `testIncidentTransitionAndQueryUsePersistentDomainService` | `PARTIAL — FILTERS/STATUS TESTED; QUERY PENDING` |
 | `incident.get` | `SafetyIncidentDetailView` | `LocalVideoAnalyticsEngine` | `incidentID: String` | `Inspect` | Auto | `testIncidentGet` | `PLANNED` |
-| `incident.transition_status` | `SafetyIncidentDetailView` | `LocalVideoAnalyticsEngine` | `incidentID: String, status: String ("acknowledged", "confirmed", "resolved", "false_positive", "suppressed", "active"), note: String?, suppressDurationSec: Int?` | `Reversible` | Auto (Confirm for `false_positive`) | `testIncidentTransition` | `PLANNED` |
+| `incident.transition_status` | `SafetyIncidentDetailView` | `LocalVideoAnalyticsEngine` | `incidentID: String, status: String ("acknowledged", "confirmed", "resolved", "false_positive", "suppressed", "active"), note: String?, suppressDurationSec: Int?` | `Reversible` | Auto (Confirm for `false_positive`) | `testIncidentTransitionAndQueryUsePersistentDomainService` | `PARTIAL — STATUS/NOTE; CUSTOM SUPPRESSION PENDING` |
 | `incident.update_note` | `SafetyIncidentDetailView` | `LocalVideoAnalyticsEngine` | `incidentID: String, note: String` | `Reversible` | Auto | `testIncidentUpdateNote` | `PLANNED` |
-| `incident.delete_evidence` | `SafetyIncidentDetailView` | `LocalVideoAnalyticsEngine` | `incidentID: String` | `Destructive` | **Confirm** | `testIncidentDeleteEvidence` | `PLANNED` |
+| `incident.delete_evidence` | `SafetyIncidentDetailView` | `LocalVideoAnalyticsEngine` | `incidentID: String` | `Destructive` | **Confirm** | `testEvidenceDeletionRequiresApprovalAndPreservesIncidentRecord` | `IMPLEMENTED — SERVICE/CONFIRMATION TEST` |
 | `alert.vlm_list` | Events / Timeline | `WallModel` | `cameraID: String?, unacknowledgedOnly: Bool?` | `Inspect` | Auto | `testAlertVLMList` | `PLANNED` |
 | `alert.vlm_acknowledge` | Events / Alerts Queue | `WallModel` | `alertID: String, acknowledged: Bool` | `Reversible` | Auto | `testAlertVLMAcknowledge` | `PLANNED` |
 | `alert.vlm_review` | Events / Alerts Queue | `WallModel` | `alertID: String, status: String, priority: String?, note: String?` | `Reversible` | Auto | `testAlertVLMReview` | `PLANNED` |
@@ -105,13 +113,14 @@ This inventory maps **every existing user-accessible SwiftUI control, persistent
 
 | Action ID | UI Route / Screen | Service Owner | Typed Arguments | Action Type | Policy | Unit / Parity Test | State |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `mission.list` | `CameraMissionsPanel` | `WallModel` | `none` | `Inspect` | Auto | `testMissionList` | `PLANNED` |
-| `mission.create` | `CameraMissionsPanel` | `WallModel` | `cameraID: String, name: String, brief: String, intervalSeconds: Int?, clockTime: String?, weekdays: [Int]?` | `Reversible` | Auto | `testMissionCreate` | `PLANNED` |
-| `mission.edit` | `CameraMissionsPanel` | `WallModel` | `missionID: String, name: String?, brief: String?, intervalSeconds: Int?, enabled: Bool?` | `Reversible` | Auto | `testMissionEdit` | `PLANNED` |
-| `mission.delete` | `CameraMissionsPanel` | `WallModel` | `missionID: String` | `Destructive` | **Confirm** | `testMissionDelete` | `PLANNED` |
-| `mission.run_now` | `CameraMissionsPanel` | `WallModel` | `missionID: String` | `ServiceAffecting` | Auto | `testMissionRunNow` | `PLANNED` |
-| `mission.ask_consult` | `CameraMissionsPanel` | `WallModel` | `missionID: String, question: String` | `Inspect` | Auto | `testMissionAskConsult` | `PLANNED` |
-| `mission.clear_consult` | `CameraMissionsPanel` | `WallModel` | `missionID: String` | `Reversible` | Auto | `testMissionClearConsult` | `PLANNED` |
+| `mission.list` | `CameraMissionsPanel` | `WallModel` | `none` | `Inspect` | Auto | `testMissionLifecyclePreservesHistoryAndUsesInjectedGUIStore` | `IMPLEMENTED — SAVED MISSIONS / RUNTIME STATE` |
+| `mission.create` | `CameraMissionsPanel` | `WallModel` | `mission_id (edit), camera_id, name, brief, interval_seconds?, schedule_kind?, clock_times CSV?, weekdays CSV (0=Sunday)?, time_zone?, enabled?` | `Reversible` | Auto | `testClockScheduleValidationAndScheduleRecalculation` | `IMPLEMENTED — INTERVAL/CLOCK / DISK TEST` |
+| `mission.edit` | `CameraMissionsPanel` | `WallModel` | `mission_id (edit), camera_id, name, brief, interval_seconds?, schedule_kind?, clock_times CSV?, weekdays CSV (0=Sunday)?, time_zone?, enabled?` | `Reversible` | Auto | `testMissionLifecyclePreservesHistoryAndUsesInjectedGUIStore` | `IMPLEMENTED — PRESERVES HISTORY` |
+| `mission.delete` | `CameraMissionsPanel` | `WallModel` | `mission_id: UUID` | `Destructive` | **Confirm** | `testMissionLifecyclePreservesHistoryAndUsesInjectedGUIStore` | `IMPLEMENTED — CONFIRMED / RUNS PRESERVED` |
+| `mission.run_now` | `CameraMissionsPanel` | `WallModel` | `mission_id: UUID` | `ServiceAffecting` | Auto | `testManualRunIsAnIdempotentQueueReceiptNotACompletedAnalysis` | `PARTIAL — QUEUE RECEIPT; REAL INFERENCE UNVERIFIED` |
+| `mission.history` | CameraMissionsPanel / saved results | WallModel / CameraMissionStore | `mission_id: UUID, limit: Int? (1...100)` | `Inspect` | Auto | `testMissionLifecyclePreservesHistoryAndUsesInjectedGUIStore` | `IMPLEMENTED — SAVED RUN/CONSULT PROVENANCE` |
+| `mission.ask_consult` | `CameraMissionsPanel` | `WallModel` | `mission_id: UUID, question: String (<=2000)` | `ServiceAffecting` | Auto | `testConsultationReceiptAndSavedReplyUseLocalDomainWorkflow` | `PARTIAL — ADMISSION/SCRIPTED REPLY; REAL MODEL UNVERIFIED` |
+| `mission.clear_consult` | `CameraMissionsPanel` | `WallModel` | `mission_id: UUID` | `Destructive` | **Confirm** | `testMissionLifecyclePreservesHistoryAndUsesInjectedGUIStore` | `IMPLEMENTED — CONFIRMED / RUNS PRESERVED` |
 
 ---
 
@@ -121,12 +130,12 @@ This inventory maps **every existing user-accessible SwiftUI control, persistent
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `memory.list_frames` | `CameraMemoryView` | `ACTAAnalyticsCoordinator` | `cameraID: String?, since: String?, until: String?, limit: Int?` | `Inspect` | Auto | `testMemoryListFrames` | `EXISTING` |
 | `memory.view_frame` | `CameraMemoryView` | `ACTAAnalyticsCoordinator` | `frameID: String` | `Inspect` | Auto | `testMemoryViewFrame` | `EXISTING` |
-| `memory.delete_frame` | `CameraMemoryView` | `WallModel` | `frameID: String` | `Destructive` | **Confirm** | `testMemoryDeleteFrame` | `PLANNED` |
+| `memory.delete_frame` | `CameraMemoryView` | `WallModel` | `frameID: String` | `Destructive` | **Confirm** | `testMemoryDeletionRequiresApprovalAndRemovesActualImage` | `IMPLEMENTED — SERVICE/CONFIRMATION TEST` |
 | `memory.clear_all_frames` | `CameraMemoryView` | `WallModel` | `none` | `Destructive` | **Confirm** | `testMemoryClearAllFrames` | `PLANNED` |
 | `memory.list_chapters` | `CameraMemoryView` | `ACTAAnalyticsCoordinator` | `cameraID: String?, pinnedOnly: Bool?, limit: Int?` | `Inspect` | Auto | `testMemoryListChapters` | `EXISTING` |
 | `memory.get_chapter` | `CameraMemoryView` | `ACTAAnalyticsCoordinator` | `chapterID: String` | `Inspect` | Auto | `testMemoryGetChapter` | `EXISTING` |
-| `memory.set_chapter_text` | `CameraMemoryView` | `WallModel` | `chapterID: String, text: String?` | `Reversible` | Auto | `testMemorySetChapterText` | `PLANNED` |
-| `memory.toggle_pin` | `CameraMemoryView` | `WallModel` | `chapterID: String, pinned: Bool` | `Reversible` | Auto | `testMemoryTogglePin` | `PLANNED` |
+| `memory.set_chapter_text` | `CameraMemoryView` | `WallModel` | `chapter_id: String, text: String? (<=16000), clear: Bool?` | `Reversible` | **Confirm — operator attribution** | `testNarrativeActionsRequireReviewAndPreserveAISummary` | `IMPLEMENTED — SQL/REVIEW TEST` |
+| `memory.toggle_pin` | `CameraMemoryView` | `WallModel` | `chapterID: String, pinned: Bool` | `Reversible` | **Confirm — operator attribution** | `testNarrativeActionsRequireReviewAndPreserveAISummary` | `IMPLEMENTED — IDEMPOTENT STATE/REVIEW TEST` |
 | `memory.close_chapter_now` | `CameraMemoryView` | `WallModel` | `cameraID: String` | `Reversible` | Auto | `testMemoryCloseChapterNow` | `PLANNED` |
 | `memory.rebuild_knowledge` | `CameraMemoryView` | `WallModel` | `none` | `ServiceAffecting` | Auto | `testMemoryRebuildKnowledge` | `PLANNED` |
 
@@ -136,9 +145,9 @@ This inventory maps **every existing user-accessible SwiftUI control, persistent
 
 | Action ID | UI Route / Screen | Service Owner | Typed Arguments | Action Type | Policy | Unit / Parity Test | State |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `watch.list` | EventsSettings / WatchRules | `WallModel` | `none` | `Inspect` | Auto | `testWatchList` | `PLANNED` |
-| `watch.create` | EventsSettings / WatchRules | `WallModel` | `text: String, cameraIDs: [String]?, ttlMinutes: Int?, forever: Bool?` | `Reversible` | Auto | `testWatchCreate` | `PLANNED` |
-| `watch.cancel` | EventsSettings / WatchRules | `WallModel` | `watchID: String` | `Reversible` | Auto | `testWatchCancel` | `PLANNED` |
+| `watch.list` | EventsSettings / WatchRules | `WallModel` | `none` | `Inspect` | Auto | `testWatchActionsShareGUIServiceAndVerifyDisk` | `IMPLEMENTED — SERVICE TEST` |
+| `watch.create` | EventsSettings / WatchRules | `WallModel` | `text: String, cameraIDs: [String]?, ttlMinutes: Int?, forever: Bool?` | `Reversible` | Auto | `testWatchActionsShareGUIServiceAndVerifyDisk` | `IMPLEMENTED — SERVICE/VALIDATION TEST` |
+| `watch.cancel` | EventsSettings / WatchRules | `WallModel` | `watchID: String` | `Reversible` | Auto | `testWatchActionsShareGUIServiceAndVerifyDisk` | `IMPLEMENTED — SERVICE TEST` |
 | `monitor.get_isapi_events` | `ISAPIEventMonitor` | `WallModel` | `cameraID: String?, limit: Int?` | `Inspect` | Auto | `testMonitorGetISAPIEvents` | `PLANNED` |
 | `monitor.clear_isapi_events`| `ISAPIEventMonitor` | `WallModel` | `none` | `Destructive` | Auto | `testMonitorClearISAPIEvents` | `PLANNED` |
 | `monitor.get_operational_events`| Unified Timeline | `ACTAAnalyticsCoordinator` | `cameraID: String?, kind: String?, limit: Int?` | `Inspect` | Auto | `testMonitorGetOperationalEvents` | `EXISTING` |
@@ -218,3 +227,99 @@ Selected table states are updated conservatively below the full-parity threshold
 - Concurrent registry writes return `ACTION_BUSY`; mutation verification defaults to failure unless explicitly implemented. Token expiry and replay are tested.
 
 Protected feature switches (`publicShowcase`, `accessControl`, `independentWatcher`, `chronologicalMemory`, `crossCameraIdentity`, `plateRecognition`, `operatorActions`) require explicit confirmation. General feature switches retain their reversible policy.
+
+## Phase 1 operational services checkpoint
+
+Runtime registration wraps the existing incident/watch/memory action specifications in
+`WallOperationalAction`, calling the same domain methods as GUI controls. The default
+unconnected core specifications still fail with UNSUPPORTED when used alone.
+
+Seven additional runtime actions are advertised (18 total): incident.list,
+incident.transition_status, incident.delete_evidence, watch.list, watch.create,
+watch.cancel, memory.delete_frame. Incident query text and custom suppression duration
+are not implemented and are not accepted in the runtime schema. Destructive deletion
+requires a token; marking an incident false-positive also requires confirmation.
+
+Tests use temporary configuration, SQLite, watch files and physical memory/evidence
+files. Corrupt watch storage is preserved on error, invalid camera UUID/TTL is rejected,
+and disabled operationalAlerts blocks watch operations. memory.clear_all_frames remains
+UNSUPPORTED and is not advertised. Read IMPLEMENTATION_REPORT.md for commands/results.
+
+## Phase 1 analytics/canvas checkpoint
+
+The advertised catalogue now contains 26 actions. Six previously planned analytics
+mutations and two canvas actions were added to the model catalogue. Global analytics
+flags cover all 15 UI switches, overlays cover all eight UI layers, and set_threshold
+covers all 12 advanced numeric settings. Evidence recording and evidence buffer/quota
+changes require operator confirmation. Invalid arguments are rejected before writing;
+service clamping is not represented as exact execution of a different requested value.
+
+Camera-specific reads include the stored override and complete effective configuration.
+set_camera_override currently changes enabled/FPS/inherit only. Restricted-zone edits
+currently support rectangles by unique name and preserve existing ID, enabled state,
+hold time and severity; polygon/policy editing is still absent. Profile selection,
+execution-mode changes, removal of an entire override, and remaining per-camera detector
+fields still require inventory rows/implementation. This checkpoint does not establish
+complete GUI control coverage.
+
+Canvas expand verifies selection only; it does not certify live stream switching.
+Layout reset verifies both runtime state and the persisted layout file, including a
+negative test for a failed save. Read IMPLEMENTATION_REPORT.md for validation evidence.
+
+## Phase 1 profiles, complete camera overrides and narrative annotations
+
+The catalogue now contains 31 actions. All global sensitivity profile selections and
+preset applications, all nine additional per-camera detector flags, per-camera profile,
+custom FPS/cooldown and clearing those custom values are implemented and tested.
+Complete override removal requires confirmation. Zone UUID editing supports rename,
+enabled, hold time, severity and individual polygon point move/append/remove operations
+with 3...64 point limits. Rectangle creation remains a separate existing action.
+
+Narrative pin/text actions share checked GUI methods, read back SQLite, preserve the
+original AI summary and require review before creating operator attribution. Pin is a
+desired state, so repeated approved pin=true never toggles it back off. Missing/conflicting
+text arguments are rejected; clear=true explicitly clears a note. execution_mode remains
+a documented gap; no distributed resources were modified. Full GUI coverage is not claimed.
+
+## Phase 1 mission actions checkpoint
+
+The catalogue now contains 39 actions. Mission CRUD uses the same GUI services and an
+injectable store URL with the unchanged default. Read/write consistency checks reject
+corrupt JSON and runtime/disk mismatches before mutation; this is not a cross-process
+file lock. Interval and clock schedules are validated, clock creation requires an
+explicit IANA time zone, and mission edits preserve run/consult history.
+
+Delete and clear_consult require confirmation and preserve saved run summaries.
+mission.history supports retained runs after mission deletion and emits stable source
+IDs for the shared evidence ledger, distinguishing mission runs from consult questions
+and responses. run_now verifies only queued/running admission, never completion; its
+one-slot queue is in memory and cleared by disconnect/restart. ask_consult persists the
+question and returns admission only; the local response is read later from history.
+
+Tests use temporary mission stores and a scripted consult responder. No real camera
+mission, Qwen inference or hardware throughput is claimed. Active mission execution
+inputs are compared before committing a result; changes invalidate the old request.
+Existing JSON version/migration paths and production defaults remain unchanged.
+
+## Phase 1 camera configuration checkpoint
+
+The catalogue now contains 45 actions. Source registration always starts DISABLED and
+returns configured=true/connection_verified=false. Local/display IDs and file bookmarks
+are persisted without claiming hardware availability, permissions or decoder readiness.
+New network registrations accept anonymous URLs without query/fragment/credentials;
+secure credential entry, credential-bearing URLs and discovery stay in the existing
+native GUI workflow. Moving existing stored credentials to a different scheme/host/port
+is blocked in the agent edit path, even after approval; use the secure editor instead.
+
+Metadata edits and YOLO/AI flags share GUI services; enabling a source and AI flag/URL
+changes require review. Config/disk checks reject corrupt/stale snapshots before writes.
+Camera removal verifies both configuration and credential deletion through the injected
+store and attempts credential compensation when config commit fails. Tests use a fake
+credential store, not the user's live Keychain. The System store retains CameraWall.RTSP
+and UUID account identifiers; live Keychain failure/recovery still needs runtime QA.
+
+The registry now calls action-specific validation before generating confirmation tokens.
+Malformed/secret-bearing URLs and oversized/conflicting narrative annotations cannot
+become durable approval proposals. Camera get/not-found errors do not echo supplied URLs.
+ISAPI editing, capture snapshot, stream-recovery verification and secure voice/text
+credential provisioning remain gaps. No complete camera GUI parity is claimed.

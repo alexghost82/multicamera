@@ -210,6 +210,14 @@ struct CameraMission: Codable, Equatable, Identifiable {
         try validate()
     }
 
+    /// Compare the execution contract, ignoring persisted history and timestamp precision.
+    func hasSameExecutionRequest(as other: CameraMission) -> Bool {
+        id == other.id && cameraID == other.cameraID && name == other.name && brief == other.brief
+            && intervalSeconds == other.intervalSeconds && scheduleKind == other.scheduleKind
+            && clockTimes == other.clockTimes && weekdays == other.weekdays
+            && timeZoneIdentifier == other.timeZoneIdentifier && enabled == other.enabled
+    }
+
     private enum CodingKeys: String, CodingKey {
         case id, cameraID, name, brief, intervalSeconds, scheduleKind, clockTimes, weekdays
         case timeZoneIdentifier, enabled, createdAt, nextRunAt, lastRunAt, lastResult

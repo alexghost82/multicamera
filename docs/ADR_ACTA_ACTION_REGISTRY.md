@@ -189,3 +189,34 @@ durable idempotency, deadline/cancellation policy, transactional compensation ac
 files and SQLite, recovery of pending tokens after restart, and universal GUI audit.
 Read IMPLEMENTATION_REPORT.md for exact validation evidence and limitations. The
 positive consequences above are design goals, not verified completion claims.
+
+Operational follow-up on baseline ad95a8c: seven additional runtime adapters now call
+shared incident, watch and memory services (18 advertised actions total). Tests verify
+persistent status/notes, watch lifecycle, operator-gated physical deletion and disabled/
+corrupt-storage failures. Bulk memory deletion and cross-store crash compensation
+remain unimplemented. See the operational checkpoint in IMPLEMENTATION_REPORT.md.
+
+Analytics/canvas follow-up: 26 advertised actions, complete advanced numeric/global
+flag/overlay tables, strict rejection before writes, camera-specific effective reads,
+rectangle-zone lifecycle and verified canvas state/layout. Profiles, full per-camera
+fields and polygon/policy edits remain missing; no full-GUI-parity claim is made.
+
+Further Phase 1 checkpoint: 31 advertised actions with global profile selection/apply,
+complete per-camera detector/profile/rate fields, zone UUID policy/point editing and
+reviewed narrative pin/text mutations preserving aiSummary. The operator can expand
+full redacted parameters before approval. Localization gate now covers the action
+layer; no full hardware/model/accessibility coverage is claimed.
+
+Mission checkpoint: 39 advertised actions; mission CRUD/history and asynchronous
+run/consult admission share GUI services and preserve default JSON paths. Corrupt/stale
+mission snapshots are rejected before writes; delete/consult clear require review.
+Saved runs survive mission deletion and are attributable through the evidence ledger.
+Queue admission is not inference completion; real model/camera and restart recovery
+remain open acceptance gates.
+
+Camera checkpoint: 45 advertised actions with disabled source registration, metadata
+editing and per-camera processing flags. Receipts certify configuration, not capture.
+Specific validation runs before proposals; secret-bearing URL arguments are rejected.
+Keychain identifiers are unchanged; a testable credential store supports checked delete
+and best-effort compensation on config failure. Cross-endpoint credential reuse requires
+the secure native editor. Real discovery/capture/Keychain/reconnect remain runtime gates.

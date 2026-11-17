@@ -160,6 +160,15 @@ public final class CameraMemoryStore: @unchecked Sendable {
         return try Data(contentsOf: directoryURL.appendingPathComponent(frame.fileName))
     }
 
+    /// Checks physical deletion separately from removal of the index entry.
+    public func hasStoredImage(for frame: CameraMemoryFrame) throws -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard URL(fileURLWithPath: frame.fileName).lastPathComponent == frame.fileName,
+              frame.fileName.hasSuffix(".jpg") else { throw CameraMemoryStoreError.invalidImage }
+        return FileManager.default.fileExists(atPath: directoryURL.appendingPathComponent(frame.fileName).path)
+    }
+
     public func delete(_ frameID: UUID) throws {
         lock.lock()
         defer { lock.unlock() }

@@ -280,6 +280,12 @@ public final class SafetyEvidenceStore: @unchecked Sendable {
         return try? decoder.decode(SafetyEvidenceBundleManifest.self, from: data)
     }
 
+    public func hasEvidenceBundle(for incidentID: UUID) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return FileManager.default.fileExists(atPath: bundleDirectoryURL(for: incidentID).path)
+    }
+
     public func deleteEvidence(for incidentID: UUID) throws {
         lock.lock()
         defer { lock.unlock() }

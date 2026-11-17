@@ -22,6 +22,11 @@ public final class CameraFeatureCoordinator: @unchecked Sendable {
         try locked { try loadPreferences() }
     }
 
+    /// Read disk independently of the runtime cache for mutation verification.
+    public func persistedPreferences() throws -> CameraFeaturePreferences {
+        try locked { try CameraFeaturePreferencesStore.load(from: preferencesURL) }
+    }
+
     public func savePreferences(_ preferences: CameraFeaturePreferences) throws {
         try locked {
             try CameraFeaturePreferencesStore.save(preferences, to: preferencesURL)

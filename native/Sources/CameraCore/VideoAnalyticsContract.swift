@@ -343,7 +343,7 @@ public struct CameraAnalyticsOverride: Codable, Equatable, Identifiable, Sendabl
     }
 }
 
-public struct EffectiveCameraAnalyticsConfig: Equatable, Sendable {
+public struct EffectiveCameraAnalyticsConfig: Codable, Equatable, Sendable {
     public let cameraID: UUID
     public let analyticsEnabled: Bool
     public let personDetectionEnabled: Bool

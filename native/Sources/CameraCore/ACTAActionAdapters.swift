@@ -328,11 +328,12 @@ public struct AnalyticsSetGlobalToggleAction: ACTAActionProtocol {
 public struct IncidentListAction: ACTAActionProtocol {
     public let id = "incident.list"
     public let title = "List Safety Incidents"
-    public let description = "Lists safety incidents recorded by fall/fight/zone analytics, optionally filtered by camera or status."
+    public let description = "Lists safety incidents recorded by fall/fight/zone analytics, optionally filtered by camera, status or text."
     public let classification = ACTAActionClassification.inspect
     public let parameters = [
         ACTAActionParameterSchema(name: "camera_id", type: "string", description: "Camera UUID to filter"),
         ACTAActionParameterSchema(name: "open_only", type: "boolean", description: "Only show open / active incidents"),
+        ACTAActionParameterSchema(name: "query", type: "string", description: "Case-insensitive text in camera name, localized title, explanation or operator notes"),
         ACTAActionParameterSchema(name: "limit", type: "integer", description: "Max incidents to return (1...100)")
     ]
 
@@ -360,6 +361,31 @@ public struct IncidentTransitionStatusAction: ACTAActionProtocol {
         parameters["status"] == "false_positive"
     }
 
+    public func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
+        return .unsupported(actionID: id)
+    }
+}
+
+public struct IncidentUpdateNoteAction: ACTAActionProtocol {
+    public let id = "incident.update_note"
+    public let title = "Update Incident Note"
+    public let description = "Replace or clear the operator note after explicit operator review, without changing incident status."
+    public let classification = ACTAActionClassification.reversible
+    public let parameters = [
+        ACTAActionParameterSchema(name: "incident_id", type: "string", description: "Incident UUID", isRequired: true),
+        ACTAActionParameterSchema(name: "note", type: "string", description: "Required replacement note, at most 4000 characters after trimming; empty clears it")
+    ]
+
+    public init() {}
+    public func requiresConfirmation(parameters: [String: String]) -> Bool { true }
+    public func validate(parameters: [String: String]) throws {
+        guard Set(parameters.keys) == Set(["incident_id", "note"]),
+              let value = parameters["incident_id"], UUID(uuidString: value) != nil,
+              let note = parameters["note"],
+              note.trimmingCharacters(in: .whitespacesAndNewlines).count <= 4000 else {
+            throw ConfigurationError.invalid("INVALID_ARGUMENT: Provide an incident UUID and a note of at most 4000 characters.")
+        }
+    }
     public func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
         return .unsupported(actionID: id)
     }

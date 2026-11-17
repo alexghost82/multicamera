@@ -1836,3 +1836,16 @@
 "INVALID_ARGUMENT: Unknown parameter." = "INVALID_ARGUMENT: Неизвестный параметр.";
 "INVALID_ARGUMENT: camera_id must be a UUID." = "INVALID_ARGUMENT: camera_id должен быть UUID.";
 "INVALID_ARGUMENT: limit must be an integer in 1...100." = "INVALID_ARGUMENT: limit должен быть целым числом от 1 до 100.";
+"INVALID_ARGUMENT: Invalid alert mutation parameters." = "INVALID_ARGUMENT: Неверные параметры изменения оповещения.";
+"Acknowledge VLM alert" = "Подтвердить получение оповещения VLM";
+"Review VLM alert" = "Проверить оповещение VLM";
+"This proposal cannot be confirmed safely. Recreate the action request for a new confirmation." = "Это предложение нельзя безопасно подтвердить. Создайте запрос действия заново для повторного подтверждения.";
+"This confirmation expired or no longer matches the displayed action. Recreate the action request." = "Срок подтверждения истёк или оно больше не соответствует отображаемому действию. Создайте запрос заново.";
+"This proposal changed or was already reviewed. Refresh and review it again." = "Предложение изменилось или уже рассмотрено. Обновите список и проверьте его снова.";
+"Update Incident Note" = "Изменить заметку об инциденте";
+"INVALID_ARGUMENT: Provide an incident UUID and a note of at most 4000 characters." = "INVALID_ARGUMENT: Укажите UUID инцидента и заметку не длиннее 4000 символов.";
+"Operator confirmation is required." = "Требуется подтверждение оператора.";
+"INVALID_ARGUMENT: Incident note is required." = "INVALID_ARGUMENT: Необходимо указать заметку об инциденте.";
+"Incident missing or incident state is inconsistent." = "Инцидент не найден или его состояние несогласованно.";
+"Incident audit state is inconsistent." = "Состояние журнала инцидента несогласованно.";
+"Incident note audit verification failed." = "Не удалось проверить журнал заметки об инциденте.";

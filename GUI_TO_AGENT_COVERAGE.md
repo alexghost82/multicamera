@@ -8,7 +8,7 @@ Version: 1.0.0-baseline
 
 ## 1. Executive Summary
 
-Current implementation checkpoint: **56 advertised actions**, with row-specific limitations below. The original baseline inventory is not proof of exhaustive UI coverage.
+Current implementation checkpoint: **59 advertised actions**, with row-specific limitations below. The original baseline inventory is not proof of exhaustive UI coverage.
 
 This working inventory maps currently identified UI/domain operations to agent action contracts. Exhaustive control-by-control parity has not been established.
 
@@ -44,7 +44,7 @@ This working inventory maps currently identified UI/domain operations to agent a
 | `camera.set_processing` | Camera context settings | WallModel | `camera_id, feature: yolo/ai_chat, enabled: Bool` | `Reversible` | **Confirm AI flag change** | `testMetadataProcessingAndURLChangesPreserveCredentialAndSourceIdentity` | `IMPLEMENTED — CONFIG/GUI SERVICE TEST` |
 | `camera.set_enabled` | `CameraManager` toggle | `WallModel` | `cameraID: String, enabled: Bool` | `ServiceAffecting` | **Confirm on enable** | `testMetadataProcessingAndURLChangesPreserveCredentialAndSourceIdentity` | `IMPLEMENTED — CONFIG FLAG; STREAM UNVERIFIED` |
 | `camera.remove` | `WallView` remove alert | `WallModel` | `cameraID: String` | `Destructive` | **Confirm** | `testRemovalRequiresReviewAndChecksCredentialDeletion` | `IMPLEMENTED — CONFIG/FAKE CREDENTIAL STORE; LIVE KEYCHAIN UNVERIFIED` |
-| `camera.reconnect` | Camera context menu | `WallModel` | `cameraID: String` | `ServiceAffecting` | Auto | `testCameraReconnect` | `PLANNED` |
+| `camera.reconnect` | Camera context menu | `WallModel` | `cameraID: String` | `ServiceAffecting` | Auto | `ACTAServiceAdapterTests.testActionsApplyToLiveModelAndPersistThroughGUIService` | `PLANNED — REGISTRY RETURNS UNSUPPORTED UNTIL STREAM RECOVERY IS VERIFIED` |
 | `camera.snapshot` | Camera action bar | `WallModel` | `cameraID: String` | `Inspect` | Auto | `testCameraSnapshot` | `PLANNED` |
 | `camera.toggle_expand` | Video canvas double-click | `WallModel` | `cameraID: String` | `Reversible` | Auto | `testCanvasActionsShareGUIStateAndVerifySavedLayout` | `IMPLEMENTED — UI STATE; STREAM UNVERIFIED` |
 | `canvas.set_columns` | SystemSettings / Canvas | `WallModel` | `columns: Int (1...16)` | `Reversible` | Auto | `testCanvasSetColumns` | `IMPLEMENTED — SERVICE TEST` |
@@ -76,14 +76,14 @@ This working inventory maps currently identified UI/domain operations to agent a
 
 | Action ID | UI Route / Screen | Service Owner | Typed Arguments | Action Type | Policy | Unit / Parity Test | State |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `incident.list` | `SafetyIncidentCenterView` | `LocalVideoAnalyticsEngine` | `openOnly: Bool?, cameraID: String?, query: String?, limit: Int?` | `Inspect` | Auto | `testIncidentTransitionAndQueryUsePersistentDomainService` | `PARTIAL — FILTERS/STATUS TESTED; QUERY PENDING` |
+| `incident.list` | `SafetyIncidentCenterView` | `LocalVideoAnalyticsEngine` | `open_only: Bool?, camera_id: UUID?, query: String?, limit: Int?` | `Inspect` | Auto | `ACTAIncidentSearchTests`, `testIncidentTransitionAndQueryUsePersistentDomainService` | `PARTIAL — QUERY/SERVICE TESTED; FULL RECORDS ARE SENSITIVE` |
 | `incident.get` | `SafetyIncidentDetailView` | `LocalVideoAnalyticsEngine` | `incident_id: UUID` | `Inspect` | Auto | `ACTAIncidentReadActionsTests`, `testIncidentTransitionAndQueryUsePersistentDomainService` | `PARTIAL — MINIMAL METADATA; GUI DETAIL FIELDS NOT EXPOSED` |
 | `incident.transition_status` | `SafetyIncidentDetailView` | `LocalVideoAnalyticsEngine` | `incidentID: String, status: String ("acknowledged", "confirmed", "resolved", "false_positive", "suppressed", "active"), note: String?, suppressDurationSec: Int?` | `Reversible` | Auto (Confirm for `false_positive`) | `testIncidentTransitionAndQueryUsePersistentDomainService` | `PARTIAL — STATUS/NOTE; CUSTOM SUPPRESSION PENDING` |
-| `incident.update_note` | `SafetyIncidentDetailView` | `LocalVideoAnalyticsEngine` | `incidentID: String, note: String` | `Reversible` | Auto | `testIncidentUpdateNote` | `PLANNED` |
+| `incident.update_note` | `SafetyIncidentDetailView` | `LocalVideoAnalyticsEngine` | `incident_id: UUID, note: String (empty clears)` | `Reversible` | **Confirm — operator attribution** | `ACTAIncidentNoteActionTests` | `PARTIAL — GUI SERVICE/PERSISTENCE TESTED; RAW NOTE IN EXISTING OPERATOR AUDIT` |
 | `incident.delete_evidence` | `SafetyIncidentDetailView` | `LocalVideoAnalyticsEngine` | `incidentID: String` | `Destructive` | **Confirm** | `testEvidenceDeletionRequiresApprovalAndPreservesIncidentRecord` | `IMPLEMENTED — SERVICE/CONFIRMATION TEST` |
 | `alert.vlm_list` | Events / Timeline | `WallModel` | `camera_id: UUID?, unacknowledged_only: Bool?, limit: Int? (1...100)` | `Inspect` | Auto | `ACTAAlertReadActionsTests`, `testAlertAndISAPIReadsUseVerifiedGUIState` | `PARTIAL — MINIMAL METADATA; SOURCE MUST MATCH GUI` |
-| `alert.vlm_acknowledge` | Events / Alerts Queue | `WallModel` | `alertID: String, acknowledged: Bool` | `Reversible` | Auto | `testAlertVLMAcknowledge` | `PLANNED` |
-| `alert.vlm_review` | Events / Alerts Queue | `WallModel` | `alertID: String, status: String, priority: String?, note: String?` | `Reversible` | Auto | `testAlertVLMReview` | `PLANNED` |
+| `alert.vlm_acknowledge` | Events / Alerts Queue | `WallModel` | `alert_id: UUID, acknowledged: Bool` | `Reversible` | Auto | `ACTAAlertMutationActionsTests` | `PARTIAL — GUI SERVICE/SQL/LOCK TESTED; NO SWIFTUI OR FAILURE RECOVERY TEST` |
+| `alert.vlm_review` | Events / Alerts Queue | `WallModel` | `alert_id: UUID, status: String, priority: String?, note: String?` | `Reversible` | **Confirm — operator review** | `ACTAAlertMutationActionsTests` | `PARTIAL — GUI SERVICE/SQL/LOCK TESTED; NO SWIFTUI OR FAILURE RECOVERY TEST` |
 | `alert.clear_all` | Events / Alerts Queue | `WallModel` | `none` | `Destructive` | **Confirm** | `testAlertClearAll` | `PLANNED` |
 
 ---
@@ -178,7 +178,7 @@ This working inventory maps currently identified UI/domain operations to agent a
 | `settings.update_feature_toggles`| Sec 11: Features & Access | `WallModel` | `feature: String, enabled: Bool` | `Reversible` | Auto | `testSettingsUpdateFeatureToggles`| `PARTIAL — UNIT TESTS / LIVE PROVIDER` |
 | `settings.update_permissions` | Sec 11: Features & Access | `WallModel` | `allowExternalAI: Bool?, allowVoiceInput: Bool?, allowPlateRegistryLookup: Bool?` | `Reversible` | Auto | `testSettingsUpdatePermissions`| `IMPLEMENTED — CONFIRMATION / SERVICE TEST` |
 | `settings.toggle_showcase` | Sec 12: Local Showcase | `WallModel` | `running: Bool, port: Int?` | `ServiceAffecting` | Auto | `testSettingsToggleShowcase` | `PLANNED` |
-| `settings.update_reid_calibration`| Sec 13: ReID Calibration | `WallModel` | `personDistanceThreshold: Double?, vehicleDistanceThreshold: Double?, metricWeight: Double?` | `Reversible` | Auto | `testSettingsUpdateReID` | `PLANNED` |
+| `settings.update_reid_calibration` | Sec 13: ReID Calibration | `ReIDCalibrationView` / `ReIDThresholdCalibrator` | GUI has transient `targetPrecision`, not the previously listed persistent settings | `Reversible` | Scope decision pending | Not implemented | `GAP — GUI COMPUTES A RECOMMENDATION; NO SETTINGS PERSISTENCE` |
 | `settings.export_diagnostics` | Sec 14: System Diagnostics | `WallModel` | `none` | `Inspect` | Auto | `testSettingsExportDiagnostics`| `PLANNED` |
 | `settings.run_health_check` | Sec 14: System Diagnostics | `WallModel` | `none` | `Inspect` | Auto | `testSettingsRunHealthCheck` | `PLANNED` |
 | `settings.reload_models` | Sec 14: System Diagnostics | `WallModel` | `none` | `ServiceAffecting` | Auto | `testSettingsReloadModels` | `PLANNED` |

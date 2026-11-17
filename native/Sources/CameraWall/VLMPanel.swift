@@ -155,7 +155,7 @@ struct VLMPanel: View {
                                 .foregroundStyle(.secondary)
                                 .textSelection(.enabled)
                             DisclosureGroup {
-                                let values = actaAuditArguments(action.parameters)
+                                let values = actaReviewArguments(action.actionType, action.parameters)
                                 ForEach(values.keys.sorted(), id: \.self) { key in
                                     Text(verbatim: "\(key): \(values[key] ?? "")")
                                         .font(.system(size: ACTAType.caption))
@@ -168,12 +168,12 @@ struct VLMPanel: View {
                             .accessibilityIdentifier("acta-action-details-\(action.actionID)")
                             HStack {
                                 Button {
-                                    model.reviewACTAChatAction(action.actionID, confirmed: true)
+                                    model.reviewACTAChatAction(action, confirmed: true)
                                 } label: {
                                     Label("Confirm", systemImage: "checkmark")
                                 }
                                 Button(role: .destructive) {
-                                    model.reviewACTAChatAction(action.actionID, confirmed: false)
+                                    model.reviewACTAChatAction(action, confirmed: false)
                                 } label: {
                                     Label("Reject", systemImage: "xmark")
                                 }

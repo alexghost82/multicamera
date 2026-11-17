@@ -18,7 +18,11 @@ final class ACTAAnalyticsActionAdapterTests: XCTestCase {
                 databaseURL: root.appendingPathComponent("features.sqlite")),
             analyticsDirectoryURL: root.appendingPathComponent("analytics"),
             cameraMemoryStore: CameraMemoryStore(url: root.appendingPathComponent("frames")),
-            operationsWatchURL: root.appendingPathComponent("watches.json"))
+            operationsWatchURL: root.appendingPathComponent("watches.json"),
+            missionStoreURL: root.appendingPathComponent("missions.json"),
+            cameraCredentialStore: ACTAIsolatedCredentials(),
+            operationsPreferencesURL: root.appendingPathComponent("operations.json"),
+            alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")))
         return (root, model, camera.id)
     }
 

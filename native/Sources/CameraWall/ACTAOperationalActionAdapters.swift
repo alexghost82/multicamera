@@ -15,6 +15,30 @@ struct WallOperationalAction: ACTAActionProtocol {
     }
     func validate(parameters: [String: String]) throws { try specification.validate(parameters: parameters) }
 
+    @MainActor
+    static func listIncidents(parameters: [String: String], manager: UnifiedIncidentManager,
+                              persistenceError: String?,
+                              localizeTitle: (String) -> String) throws -> [SafetyIncident] {
+        if let error = persistenceError { throw ConfigurationError.invalid(error) }
+        var incidents = manager.allIncidents()
+        if let value = parameters["camera_id"] {
+            guard let cameraID = UUID(uuidString: value) else {
+                throw ConfigurationError.invalid("INVALID_ARGUMENT: camera_id must be a UUID.")
+            }
+            incidents = incidents.filter { $0.cameraID == cameraID }
+        }
+        if parameters["open_only"] == "true" { incidents = incidents.filter { $0.status.isOpen } }
+        if let query = parameters["query"], !query.isEmpty {
+            incidents = incidents.filter {
+                [$0.cameraName, localizeTitle($0.title), $0.explanation, $0.operatorNotes]
+                    .contains { $0.localizedCaseInsensitiveContains(query) }
+            }
+        }
+        let limit = Int(parameters["limit"] ?? "50") ?? 50
+        guard (1...100).contains(limit) else { throw ConfigurationError.invalid("Limit must be 1...100.") }
+        return Array(incidents.prefix(limit))
+    }
+
     func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
         try await MainActor.run {
             func uuid(_ name: String) throws -> UUID {
@@ -34,20 +58,92 @@ struct WallOperationalAction: ACTAActionProtocol {
             let engine = model.localAnalyticsEngine
             switch id {
             case "incident.list":
-                if let error = engine.persistenceError { throw ConfigurationError.invalid(error) }
-                var incidents = engine.incidentManager.allIncidents()
-                if parameters["camera_id"] != nil {
-                    let cameraID = try uuid("camera_id")
-                    incidents = incidents.filter { $0.cameraID == cameraID }
-                }
-                if parameters["open_only"] == "true" { incidents = incidents.filter { $0.status.isOpen } }
-                let limit = Int(parameters["limit"] ?? "50") ?? 50
-                guard (1...100).contains(limit) else { throw ConfigurationError.invalid("Limit must be 1...100.") }
-                return success("Listed recorded safety incidents.", "{\"incidents\":\(try encoded(Array(incidents.prefix(limit))))}")
+                let language = parameters["query"].flatMap { $0.isEmpty ? nil : AppLanguage.current }
+                let incidents = try Self.listIncidents(parameters: parameters, manager: engine.incidentManager,
+                                                       persistenceError: engine.persistenceError,
+                                                       localizeTitle: { language?.localizedMessage($0) ?? $0 })
+                return success("Listed recorded safety incidents.", "{\"incidents\":\(try encoded(incidents))}")
 
             case "incident.delete_evidence":
                 try engine.deleteIncidentEvidenceChecked(uuid("incident_id"))
                 return success("Evidence directory and incident references deleted and verified.", "{\"deleted\":true}")
+
+            case "incident.update_note":
+                try specification.validate(parameters: parameters)
+                guard context.isConfirmed else {
+                    throw ConfigurationError.invalid("Operator confirmation is required.")
+                }
+                try Task.checkCancellation()
+                let incidentID = try uuid("incident_id")
+                guard let rawNote = parameters["note"] else {
+                    throw ConfigurationError.invalid("INVALID_ARGUMENT: Incident note is required.")
+                }
+                let note = rawNote.trimmingCharacters(in: .whitespacesAndNewlines)
+                let manager = engine.incidentManager
+                let audit = engine.auditLog
+                @MainActor func checkErrors() throws {
+                    if let error = manager.lastPersistenceError ?? audit.lastPersistenceError ?? engine.persistenceError {
+                        throw ConfigurationError.invalid(error)
+                    }
+                }
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                let encoder = JSONEncoder()
+                encoder.dateEncodingStrategy = .iso8601
+                func normalized(_ incident: SafetyIncident) throws -> SafetyIncident {
+                    try decoder.decode(SafetyIncident.self, from: encoder.encode(incident))
+                }
+                func diskIncidents() throws -> [SafetyIncident] {
+                    try decoder.decode([SafetyIncident].self, from: Data(contentsOf: manager.storageURL))
+                }
+                func diskAudit() throws -> [OperatorAuditEntry] {
+                    guard FileManager.default.fileExists(atPath: audit.url.path) else { return [] }
+                    return try decoder.decode([OperatorAuditEntry].self, from: Data(contentsOf: audit.url))
+                }
+                func normalizedAudit(_ entries: [OperatorAuditEntry]) throws -> [OperatorAuditEntry] {
+                    try decoder.decode([OperatorAuditEntry].self, from: encoder.encode(entries))
+                }
+                try checkErrors()
+                let beforeDisk = try diskIncidents().filter { $0.id == incidentID }
+                guard beforeDisk.count == 1, let before = beforeDisk.first,
+                      let runtime = manager.incident(id: incidentID),
+                      let gui = engine.incidents.first(where: { $0.id == incidentID }),
+                      try normalized(runtime) == before, try normalized(gui) == before else {
+                    throw ConfigurationError.invalid("Incident missing or incident state is inconsistent.")
+                }
+                let previousAudit = try diskAudit()
+                guard try normalizedAudit(audit.recentEntries(limit: audit.maxEntries)) == previousAudit,
+                      try normalizedAudit(engine.auditEntries) == Array(previousAudit.prefix(200)) else {
+                    throw ConfigurationError.invalid("Incident audit state is inconsistent.")
+                }
+                let previousIDs = Set(previousAudit.map(\.id))
+                engine.updateIncidentNote(incidentID, note: note)
+                try checkErrors()
+                let afterDisk = try diskIncidents().filter { $0.id == incidentID }
+                guard afterDisk.count == 1, let saved = afterDisk.first,
+                      let current = manager.incident(id: incidentID),
+                      let displayed = engine.incidents.first(where: { $0.id == incidentID }) else {
+                    throw ConfigurationError.invalid("Incident note persistence verification failed.")
+                }
+                var expected = before
+                expected.operatorNotes = note
+                expected.updatedAt = saved.updatedAt
+                guard saved == expected, try normalized(current) == saved,
+                      try normalized(displayed) == saved else {
+                    throw ConfigurationError.invalid("Incident note persistence verification failed.")
+                }
+                let writtenAudit = try diskAudit()
+                guard let entry = writtenAudit.first,
+                      !previousIDs.contains(entry.id), entry.action == .incidentNoteUpdated,
+                      entry.incidentID == incidentID, entry.cameraID == saved.cameraID,
+                      entry.details == note,
+                      Array(writtenAudit.dropFirst()) == Array(previousAudit.prefix(audit.maxEntries - 1)),
+                      try normalizedAudit(audit.recentEntries(limit: audit.maxEntries)) == writtenAudit,
+                      try normalizedAudit(engine.auditEntries) == Array(writtenAudit.prefix(200)) else {
+                    throw ConfigurationError.invalid("Incident note audit verification failed.")
+                }
+                try checkErrors()
+                return success("Reviewed incident note saved and verified.")
 
             case "incident.transition_status":
                 let incidentID = try uuid("incident_id")

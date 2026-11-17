@@ -504,7 +504,7 @@ final class WallModel: ObservableObject {
     private var localShowcaseServer: LocalShowcaseServer?
     private var localShowcaseGeneration = UUID()
     private let imageContext = CIContext(options: [.cacheIntermediates: false])
-    private let alertClipStore = CriticalAlertClipStore()
+    private let alertClipStore: CriticalAlertClipStore
     private var alertLookbackBuffer = AlertLookbackBuffer()
     private var alertLookbackLastSubmittedAt: [UUID: TimeInterval] = [:]
     private var alertLookbackLastSerial: [UUID: UInt64] = [:]
@@ -529,7 +529,9 @@ final class WallModel: ObservableObject {
          missionStoreURL: URL = CameraMissionStore.defaultURL,
          missionConsultResponder: (@Sendable (String) async throws -> String)? = nil,
          cameraCredentialStore: any CameraCredentialStore = SystemCameraCredentialStore(),
-         operationsPreferencesURL: URL = OperationsPreferencesStore.defaultURL) {
+         operationsPreferencesURL: URL = OperationsPreferencesStore.defaultURL,
+         alertClipStore: CriticalAlertClipStore = CriticalAlertClipStore()) {
+        self.alertClipStore = alertClipStore
         self.operationsPreferencesURL = operationsPreferencesURL
         self.cameraCredentialStore = cameraCredentialStore
         self.missionConsultResponder = missionConsultResponder
@@ -3614,52 +3616,58 @@ final class WallModel: ObservableObject {
         actaChatActions = (try? store.listACTAChatActions(threadID: targetID, status: "proposed")) ?? []
     }
 
-    func reviewACTAChatAction(_ actionID: String, confirmed: Bool) {
+    func reviewACTAChatAction(_ reviewed: ACTAChatActionRecord, confirmed: Bool) {
+        guard reviewed.threadID == activeACTAThreadID else { return }
+        let actionID = reviewed.actionID
         if actionID.hasPrefix("CONFIRM-") {
             Task { @MainActor [weak self] in
-                guard let self, let store = self.trackingStore else { return }
-                do {
-                    guard let proposal = try store.loadACTAChatAction(actionID: actionID),
-                          proposal.threadID == self.activeACTAThreadID,
-                          proposal.status == "proposed",
-                          try store.applyACTAChatAction(proposal, confirmed: confirmed, changes: { _ in }) != nil else { return }
-                    // Claim the durable proposal before awaiting so a second click cannot replay it.
-                    let result = try await ACTAActionRegistry.shared.confirmAndExecute(token: actionID, confirmed: confirmed)
-                    try store.recordACTAToolCallAudit(ACTAToolCallAuditRecord(threadID: proposal.threadID,
-                        toolName: proposal.actionType, argsJSON: String(decoding: try JSONEncoder().encode(actaAuditArguments(proposal.parameters)), as: UTF8.self),
-                        resultRows: result.success ? 1 : 0, durationMs: 0, ok: result.success && result.verified,
-                        error: result.error))
-                    self.actaAgentStatus = result.summary
-                    if confirmed && !result.success { self.notice = result.summary }
-                } catch {
-                    self.notice = "ACTA action review failed: \(error.localizedDescription)"
-                }
-                self.actaChatActions = (try? store.listACTAChatActions(threadID: self.activeACTAThreadID, status: "proposed")) ?? []
+                await self?.reviewACTATokenAction(reviewed, confirmed: confirmed)
             }
             return
         }
         guard let ghost = actaAnalytics else { return }
-        if ghost.reviewAndExecuteChatAction(actionID: actionID, confirmed: confirmed) == nil {
-            Task { @MainActor [weak self] in
-                guard let self, let store = self.trackingStore,
-                      let proposal = try? store.loadACTAChatAction(actionID: actionID),
-                      proposal.status == "proposed" else { return }
-                if !confirmed {
-                    _ = try? store.applyACTAChatAction(proposal, confirmed: false) { _ in }
-                } else {
-                    let result = try? await ACTAActionRegistry.shared.execute(
-                        actionID: proposal.actionType,
-                        parameters: proposal.parameters,
-                        context: ACTAActionContext(threadID: proposal.threadID, initiator: "operator_review", isConfirmed: true)
-                    )
-                    _ = try? store.applyACTAChatAction(proposal, confirmed: result?.success ?? false) { _ in }
-                }
-                self.actaChatActions = (try? store.listACTAChatActions(threadID: self.activeACTAThreadID, status: "proposed")) ?? []
+        if ghost.reviewAndExecuteChatAction(actionID: actionID, confirmed: confirmed, expectedAction: reviewed) == nil {
+            if confirmed, let store = trackingStore,
+               let proposal = try? store.loadACTAChatAction(actionID: actionID),
+               proposal.threadID == activeACTAThreadID, proposal.status == "proposed" {
+                // Legacy records have no registry token bound to the displayed arguments.
+                // Leave the record intact; creating a fresh request must go through the registry.
+                notice = "This proposal cannot be confirmed safely. Recreate the action request for a new confirmation."
             }
         }
         if let store = trackingStore {
             actaChatActions = (try? store.listACTAChatActions(threadID: activeACTAThreadID, status: "proposed")) ?? []
         }
+    }
+
+    func reviewACTATokenAction(_ reviewed: ACTAChatActionRecord, confirmed: Bool) async {
+        guard let store = trackingStore else { return }
+        do {
+            guard reviewed.threadID == activeACTAThreadID, reviewed.status == "proposed" else { return }
+            let registry = ACTAActionRegistry.shared
+            guard await registry.confirmationMatches(token: reviewed.actionID, actionID: reviewed.actionType,
+                    parameters: reviewed.parameters, threadID: reviewed.threadID) else {
+                notice = "This confirmation expired or no longer matches the displayed action. Recreate the action request."
+                return
+            }
+            guard reviewed.threadID == activeACTAThreadID else { return }
+            guard try store.applyACTAChatAction(reviewed, confirmed: confirmed, changes: { _ in }) != nil else {
+                notice = "This proposal changed or was already reviewed. Refresh and review it again."
+                return
+            }
+            // Claim the durable proposal before awaiting so a second click cannot replay it.
+            let result = try await registry.confirmAndExecute(token: reviewed.actionID, confirmed: confirmed,
+                expectedActionID: reviewed.actionType, expectedParameters: reviewed.parameters, expectedThreadID: reviewed.threadID)
+            try store.recordACTAToolCallAudit(ACTAToolCallAuditRecord(threadID: reviewed.threadID,
+                toolName: reviewed.actionType, argsJSON: String(decoding: try JSONEncoder().encode(actaActionAuditArguments(reviewed.actionType, reviewed.parameters)), as: UTF8.self),
+                resultRows: result.success ? 1 : 0, durationMs: 0, ok: result.success && result.verified,
+                error: result.error))
+            actaAgentStatus = result.summary
+            if confirmed && !result.success { notice = result.summary }
+        } catch {
+            notice = "ACTA action review failed: \(error.localizedDescription)"
+        }
+        actaChatActions = (try? store.listACTAChatActions(threadID: activeACTAThreadID, status: "proposed")) ?? []
     }
 
     func pushACTAFocus(identityID: String, label: String? = nil) {

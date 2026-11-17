@@ -23,8 +23,14 @@ final class ACTAServiceAdapterTests: XCTestCase {
             trackingStoreURL: directory.appendingPathComponent("model.sqlite"),
             featureCoordinator: CameraFeatureCoordinator(preferencesURL: directory.appendingPathComponent("features.json"),
                 databaseURL: directory.appendingPathComponent("features.sqlite")),
-            analyticsDirectoryURL: directory.appendingPathComponent("analytics"))
-        defer { model.stop() }
+            analyticsDirectoryURL: directory.appendingPathComponent("analytics"),
+            cameraMemoryStore: CameraMemoryStore(url: directory.appendingPathComponent("frames")),
+            operationsWatchURL: directory.appendingPathComponent("watches.json"),
+            missionStoreURL: directory.appendingPathComponent("missions.json"),
+            cameraCredentialStore: ACTAIsolatedCredentials(),
+            operationsPreferencesURL: directory.appendingPathComponent("operations.json"),
+            alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")))
+        defer { model.shutdown() }
         await registerAllWallActions(registry: .shared, model: model)
         let store = try LocalTrackingStore(url: directory.appendingPathComponent("agent.sqlite"))
         let script = ActionTransportScript()
@@ -65,10 +71,25 @@ final class ACTAServiceAdapterTests: XCTestCase {
             trackingStoreURL: directory.appendingPathComponent("tracks.sqlite"),
             featureCoordinator: CameraFeatureCoordinator(preferencesURL: preferencesURL,
                 databaseURL: directory.appendingPathComponent("features.sqlite")),
-            analyticsDirectoryURL: directory.appendingPathComponent("analytics"))
-        defer { model.stop() }
+            analyticsDirectoryURL: directory.appendingPathComponent("analytics"),
+            cameraMemoryStore: CameraMemoryStore(url: directory.appendingPathComponent("frames")),
+            operationsWatchURL: directory.appendingPathComponent("watches.json"),
+            missionStoreURL: directory.appendingPathComponent("missions.json"),
+            cameraCredentialStore: ACTAIsolatedCredentials(),
+            operationsPreferencesURL: directory.appendingPathComponent("operations.json"),
+            alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")))
+        defer { model.shutdown() }
         let registry = ACTAActionRegistry()
+        let reconnectAction = CameraReconnectAction(model: model)
+        let directReconnect = try await reconnectAction.execute(parameters: ["camera_id": UUID().uuidString], context: ACTAActionContext())
+        XCTAssertFalse(directReconnect.success)
+        XCTAssertTrue(directReconnect.error?.hasPrefix("UNSUPPORTED:") == true)
+        await registry.register(reconnectAction)
         await registerAllWallActions(registry: registry, model: model)
+
+        let reconnect = try await registry.execute(actionID: "camera.reconnect", parameters: ["camera_id": UUID().uuidString])
+        XCTAssertFalse(reconnect.success)
+        XCTAssertTrue(reconnect.error?.hasPrefix("UNSUPPORTED:") == true)
 
         let settings = try await registry.execute(actionID: "settings.update_system",
             parameters: ["columns": "7", "detection_fps": "3"])
@@ -110,6 +131,13 @@ private actor ActionTransportScript {
         if requests.count == 1 {
             return "{\"tool_calls\":[{\"name\":\"acta__canvas__set_columns\",\"arguments\":{\"columns\":7}}]}"
         }
+
         return "{\"answerMarkdown\":\"Установлено семь колонок.\",\"citedRecordIDs\":[],\"confidence\":1}"
     }
+}
+
+struct ACTAIsolatedCredentials: CameraCredentialStore {
+    func read(_ id: UUID) throws -> Credentials? { XCTFail("Unexpected credential read"); return nil }
+    func save(_ credentials: Credentials, for id: UUID) throws { XCTFail("Unexpected credential save") }
+    func remove(_ id: UUID) throws { XCTFail("Unexpected credential removal") }
 }

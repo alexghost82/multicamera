@@ -9,6 +9,25 @@ func actaAuditArguments(_ arguments: [String: String]) -> [String: String] {
     })
 }
 
+func actaActionAuditArguments(_ actionID: String, _ arguments: [String: String]) -> [String: String] {
+    var result = actaAuditArguments(arguments)
+    if actionID == "incident.list", arguments["query"] != nil {
+        result["query"] = "[redacted]"
+    }
+    if ["alert.vlm_review", "incident.update_note"].contains(actionID), arguments["note"] != nil {
+        result["note"] = "[redacted]"
+    }
+    return result
+}
+
+func actaReviewArguments(_ actionID: String, _ arguments: [String: String]) -> [String: String] {
+    var result = actaAuditArguments(arguments)
+    if ["alert.vlm_review", "incident.update_note"].contains(actionID), let note = arguments["note"] {
+        result["note"] = note
+    }
+    return result
+}
+
 /// Credentials and query tokens must never enter tool output or model context.
 func actaRedactedStreamURL(_ value: String) -> String {
     guard var components = URLComponents(string: value), components.scheme != nil,
@@ -193,30 +212,10 @@ public struct CameraReconnectAction: ACTAActionProtocol {
         ACTAActionParameterSchema(name: "camera_id", type: "string", description: "Camera UUID or name", isRequired: true)
     ]
 
-    private unowned let model: WallModel
-
-    init(model: WallModel) {
-        self.model = model
-    }
+    init(model: WallModel) {}
 
     public func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
-        guard let idOrName = parameters["camera_id"] else {
-            return ACTAActionResult.failed(actionID: id, error: "Missing 'camera_id'.")
-        }
-
-        let targetCamera = await MainActor.run {
-            actaResolveCamera(idOrName, model: model)
-        }
-
-        guard let cam = targetCamera else {
-            return ACTAActionResult.failed(actionID: id, error: "Camera does not exist or its name is ambiguous; specify a UUID.")
-        }
-
-        await MainActor.run {
-            model.reconnect(cam)
-        }
-
-        return ACTAActionResult(actionID: id, success: true, summary: "Reconnecting camera '\(cam.name)'.", outputJSON: "{\"status\": \"reconnecting\"}")
+        .failed(actionID: id, error: "UNSUPPORTED: Camera reconnection cannot yet be verified.")
     }
 }
 
@@ -358,6 +357,7 @@ struct WallAnalyticsSettingsProvider: ACTAVideoAnalyticsSettingsProvider {
 
 @MainActor
 func registerAllWallActions(registry: ACTAActionRegistry, model: WallModel) async {
+    await registry.unregister(actionID: "camera.reconnect")
     for kind in WallCameraConfigurationAction.Kind.allCases {
         await registry.register(WallCameraConfigurationAction(kind: kind, model: model))
     }
@@ -365,7 +365,6 @@ func registerAllWallActions(registry: ACTAActionRegistry, model: WallModel) asyn
     await registry.register(CameraGetAction(model: model))
     await registry.register(CameraSetEnabledAction(model: model))
     await registry.register(CameraRemoveAction(model: model))
-    await registry.register(CameraReconnectAction(model: model))
     await registry.register(CameraToggleExpandAction(model: model))
     await registry.register(CanvasSetColumnsAction(model: model))
     await registry.register(CanvasResetLayoutAction(model: model))
@@ -392,8 +391,12 @@ func registerAllWallActions(registry: ACTAActionRegistry, model: WallModel) asyn
     await registry.register(WallOperationalAction(specification: IncidentListAction(), model: model))
     await registry.register(ACTAIncidentGetAction(provider: ACTAEngineIncidentReadProvider(engine: model.localAnalyticsEngine)))
     await registry.register(WallOperationalAction(specification: IncidentTransitionStatusAction(), model: model))
+    await registry.register(WallOperationalAction(specification: IncidentUpdateNoteAction(), model: model))
     await registry.register(WallOperationalAction(specification: IncidentDeleteEvidenceAction(), model: model))
     await registry.register(ACTAAlertListAction(provider: ACTAWallAlertReadProvider(model: model)))
+    let alertMutations = ACTAWallAlertMutationProvider(model: model)
+    await registry.register(ACTAAlertMutationAction(kind: .acknowledge, provider: alertMutations))
+    await registry.register(ACTAAlertMutationAction(kind: .review, provider: alertMutations))
     await registry.register(ACTAISAPIReadAction(provider: ACTAWallISAPIReadProvider(model: model)))
 
     await registry.register(WallNarrativeAction(pin: true, model: model))

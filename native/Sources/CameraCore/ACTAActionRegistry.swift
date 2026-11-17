@@ -16,16 +16,25 @@ public actor ACTAActionRegistry {
     private var mutationInProgress = false
     private var actions: [String: any ACTAActionProtocol] = [:]
     private var pendingConfirmations: [String: PendingConfirmation] = [:]
+    private let confirmationNow: @Sendable () -> Date
 
-    public init() {}
+    public init() {
+        confirmationNow = { Date() }
+    }
+
+    init(confirmationNow: @escaping @Sendable () -> Date) {
+        self.confirmationNow = confirmationNow
+    }
 
     // MARK: - Registration
 
     public func register(_ action: any ACTAActionProtocol) {
+        pendingConfirmations = pendingConfirmations.filter { $0.value.actionID != action.id }
         actions[action.id] = action
     }
 
     public func unregister(actionID: String) {
+        pendingConfirmations = pendingConfirmations.filter { $0.value.actionID != actionID }
         actions.removeValue(forKey: actionID)
     }
 
@@ -80,6 +89,24 @@ public actor ACTAActionRegistry {
         parameters: [String: String],
         context: ACTAActionContext = ACTAActionContext()
     ) async throws -> ACTAActionResult {
+        let unconfirmedContext = ACTAActionContext(
+            threadID: context.threadID,
+            initiator: context.initiator,
+            now: context.now,
+            trackingStore: context.trackingStore,
+            isConfirmed: false
+        )
+        return try await executeValidated(
+            actionID: actionID, parameters: parameters, context: unconfirmedContext, confirmed: false
+        )
+    }
+
+    private func executeValidated(
+        actionID: String,
+        parameters: [String: String],
+        context: ACTAActionContext,
+        confirmed: Bool
+    ) async throws -> ACTAActionResult {
         guard let action = actions[actionID] else {
             return ACTAActionResult.failed(
                 actionID: actionID,
@@ -100,7 +127,7 @@ public actor ACTAActionRegistry {
             }
             let valid: Bool
             switch field.type {
-            case "boolean": valid = ["true", "false", "1", "0"].contains(value)
+            case "boolean": valid = Self.canonicalBoolean(value) != nil
             case "integer": valid = Int(value) != nil
             case "number": valid = Double(value)?.isFinite == true
             case "string": valid = !field.isRequired || !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -110,7 +137,7 @@ public actor ACTAActionRegistry {
                 return .failed(actionID: actionID, error: "INVALID_ARGUMENT: Invalid \(field.name).")
             }
             if field.type == "boolean" {
-                parameters[field.name] = (value == "true" || value == "1") ? "true" : "false"
+                parameters[field.name] = Self.canonicalBoolean(value)
             }
         }
         do { try action.validate(parameters: parameters) }
@@ -118,15 +145,20 @@ public actor ACTAActionRegistry {
         try Task.checkCancellation()
 
         // 1. Check Destructive / Security Confirmation Gate
-        if action.requiresConfirmation(parameters: parameters) && !context.isConfirmed {
-            let token = "CONFIRM-" + UUID().uuidString.prefix(8).uppercased()
+        if action.requiresConfirmation(parameters: parameters) && !confirmed {
+            cleanupExpiredConfirmations()
+            var token: String
+            repeat {
+                token = "CONFIRM-" + UUID().uuidString
+            } while pendingConfirmations[token] != nil
+            let createdAt = confirmationNow()
             let pending = PendingConfirmation(
                 token: token,
                 actionID: actionID,
                 parameters: parameters,
                 context: context,
-                createdAt: context.now,
-                expiresAt: context.now.addingTimeInterval(300) // 5 minutes TTL
+                createdAt: createdAt,
+                expiresAt: createdAt.addingTimeInterval(300) // 5 minutes TTL
             )
             pendingConfirmations[token] = pending
 
@@ -188,7 +220,51 @@ public actor ACTAActionRegistry {
         guard let pending = pendingConfirmations.removeValue(forKey: token) else {
             return ACTAActionResult.failed(actionID: "unknown", error: "Confirmation token '\(token)' is invalid or expired.")
         }
+        return try await executePending(pending, confirmed: confirmed)
+    }
 
+    /// Confirms only the intent reviewed by the operator. A mismatch does not consume the token.
+    public func confirmAndExecute(
+        token: String,
+        confirmed: Bool,
+        expectedActionID: String,
+        expectedParameters: [String: String],
+        expectedThreadID: String
+    ) async throws -> ACTAActionResult {
+        cleanupExpiredConfirmations()
+        guard let pending = pendingConfirmations[token] else {
+            return ACTAActionResult.failed(actionID: "unknown", error: "Confirmation token '\(token)' is invalid or expired.")
+        }
+        guard matches(pending, actionID: expectedActionID, parameters: expectedParameters, threadID: expectedThreadID) else {
+            return .failed(actionID: pending.actionID, error: "CONFIRMATION_MISMATCH: Reviewed action does not match the pending confirmation.")
+        }
+        pendingConfirmations.removeValue(forKey: token)
+        return try await executePending(pending, confirmed: confirmed)
+    }
+
+    public func confirmationMatches(token: String, actionID: String, parameters: [String: String], threadID: String) -> Bool {
+        cleanupExpiredConfirmations()
+        guard let pending = pendingConfirmations[token] else { return false }
+        return matches(pending, actionID: actionID, parameters: parameters, threadID: threadID)
+    }
+
+    private func matches(_ pending: PendingConfirmation, actionID: String,
+                         parameters: [String: String], threadID: String) -> Bool {
+        guard pending.actionID == actionID, pending.context.threadID == threadID,
+              let action = actions[pending.actionID] else {
+            return false
+        }
+        var normalized = parameters
+        for field in action.parameters where field.type == "boolean" {
+            if let value = normalized[field.name] {
+                guard let canonical = Self.canonicalBoolean(value) else { return false }
+                normalized[field.name] = canonical
+            }
+        }
+        return normalized == pending.parameters
+    }
+
+    private func executePending(_ pending: PendingConfirmation, confirmed: Bool) async throws -> ACTAActionResult {
         guard confirmed else {
             return ACTAActionResult(
                 actionID: pending.actionID,
@@ -208,15 +284,24 @@ public actor ACTAActionRegistry {
             isConfirmed: true
         )
 
-        return try await execute(
+        return try await executeValidated(
             actionID: pending.actionID,
             parameters: pending.parameters,
-            context: confirmedContext
+            context: confirmedContext,
+            confirmed: true
         )
     }
 
     private func cleanupExpiredConfirmations() {
-        let now = Date()
+        let now = confirmationNow()
         pendingConfirmations = pendingConfirmations.filter { $0.value.expiresAt > now }
+    }
+
+    private static func canonicalBoolean(_ value: String) -> String? {
+        switch value {
+        case "true", "1": return "true"
+        case "false", "0": return "false"
+        default: return nil
+        }
     }
 }

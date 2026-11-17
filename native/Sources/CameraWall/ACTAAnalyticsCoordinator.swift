@@ -1433,9 +1433,9 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
             "analytics.get_settings", "analytics.set_global_toggle", "analytics.set_threshold",
             "analytics.set_sampling_fps", "analytics.set_overlay", "analytics.set_camera_override",
             "analytics.set_restricted_zone", "analytics.remove_restricted_zone", "analytics.update_restricted_zone",
-            "analytics.set_sensitivity_profile", "analytics.remove_camera_override", "incident.list", "incident.get", "incident.transition_status",
+            "analytics.set_sensitivity_profile", "analytics.remove_camera_override", "incident.list", "incident.get", "incident.transition_status", "incident.update_note",
             "watch.list", "watch.create", "watch.cancel", "memory.delete_frame", "incident.delete_evidence",
-            "alert.vlm_list", "monitor.get_isapi_events", "memory.toggle_pin", "memory.set_chapter_text", "mission.list", "mission.create", "mission.edit",
+            "alert.vlm_list", "alert.vlm_acknowledge", "alert.vlm_review", "monitor.get_isapi_events", "memory.toggle_pin", "memory.set_chapter_text", "mission.list", "mission.create", "mission.edit",
             "mission.delete", "mission.history", "mission.clear_consult", "mission.run_now", "mission.ask_consult"]
         return try await registry.allActions().filter { enabled.contains($0.id) }.map { action in
             var properties: [String: Any] = [:]
@@ -1469,7 +1469,9 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         var savedClipID: String?
         var attachedImages: [Data] = []
         var errorMsg: String?
-        let auditArguments = actaAuditArguments(arguments)
+        let registryID = toolName.hasPrefix("acta__")
+            ? String(toolName.dropFirst(6)).replacingOccurrences(of: "__", with: ".") : toolName
+        let auditArguments = actaActionAuditArguments(registryID, arguments)
 
         let allLiveFrames = liveFrames + liveCameraImages.map { ACTALiveCameraFrame(cameraID: nil, cameraName: "live", jpegData: $0) }
         let camera = Self.resolveAgentCamera(arguments["camera"] ?? arguments["camera_id"], cameraNames: cameraNames)
@@ -2130,8 +2132,6 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
                 outputDict["rows"] = rows
 
             default:
-                let registryID = toolName.hasPrefix("acta__")
-                    ? String(toolName.dropFirst(6)).replacingOccurrences(of: "__", with: ".") : toolName
                 if let _ = await ACTAActionRegistry.shared.action(for: registryID) {
                     guard let trackingStore else { throw ConfigurationError.invalid("Action audit store is unavailable.") }
                     // Persist intent before a mutation can run. Never execute if this write fails.
@@ -2601,11 +2601,17 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
     public func reviewAndExecuteChatAction(
         actionID: String,
         confirmed: Bool,
+        expectedAction: ACTAChatActionRecord? = nil,
         now: Date = Date()
     ) -> ACTAChatActionRecord? {
         do {
             guard let store = trackingStore,
                   let proposal = try store.loadACTAChatAction(actionID: actionID), proposal.status == "proposed" else { return nil }
+            if let expectedAction {
+                guard expectedAction.actionID == proposal.actionID, expectedAction.threadID == proposal.threadID,
+                      expectedAction.actionType == proposal.actionType, expectedAction.title == proposal.title,
+                      expectedAction.parameters == proposal.parameters, expectedAction.status == proposal.status else { return nil }
+            }
             if !confirmed { return try store.applyACTAChatAction(proposal, confirmed: false, now: now) { _ in } }
             let required: Set<String>
             switch proposal.actionType {

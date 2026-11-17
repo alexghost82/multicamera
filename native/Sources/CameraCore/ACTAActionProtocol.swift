@@ -12,6 +12,8 @@ public enum ACTAActionClassification: String, Codable, Sendable {
     /// Irreversible data mutation or deletion (deleting a camera, purging incident evidence, merging/splitting identities).
     /// Requires explicit two-phase operator confirmation before execution.
     case destructive
+    /// Changes privacy or security policy; requires explicit operator approval.
+    case securitySensitive
 }
 
 // MARK: - 2. Action Parameter Schema
@@ -97,10 +99,14 @@ public struct ACTAActionResult: Codable, Sendable, Equatable {
             actionID: actionID,
             success: false,
             summary: "Execution failed: \(error)",
-            outputJSON: "{\"error\": \"\(error)\"}",
+            outputJSON: String(decoding: (try? JSONEncoder().encode(["error": error])) ?? Data("{}".utf8), as: UTF8.self),
             verified: false,
             error: error
         )
+    }
+
+    public static func unsupported(actionID: String) -> ACTAActionResult {
+        failed(actionID: actionID, error: "UNSUPPORTED: Domain service is not connected for \(actionID).")
     }
 
     public static func needsConfirmation(actionID: String, summary: String, token: String) -> ACTAActionResult {
@@ -124,6 +130,7 @@ public protocol ACTAActionProtocol: Sendable {
     var description: String { get }
     var classification: ACTAActionClassification { get }
     var parameters: [ACTAActionParameterSchema] { get }
+    func requiresConfirmation(parameters: [String: String]) -> Bool
 
     func execute(
         parameters: [String: String],
@@ -137,11 +144,15 @@ public protocol ACTAActionProtocol: Sendable {
 }
 
 public extension ACTAActionProtocol {
+    func requiresConfirmation(parameters: [String: String]) -> Bool {
+        [.destructive, .securitySensitive].contains(classification)
+    }
+
     func verify(
         parameters: [String: String],
         context: ACTAActionContext
     ) async throws -> Bool {
-        // Default verification for read-only or self-verifying actions
-        return true
+        // Mutations must explicitly implement verification; absence is never evidence of success.
+        return classification == .inspect
     }
 }

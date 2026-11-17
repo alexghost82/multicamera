@@ -102,7 +102,7 @@ struct ACTAActionRegistryTests {
         // Disable scheduled missions
         let res2 = try await registry.execute(
             actionID: "settings.update_feature_toggles",
-            parameters: ["feature": "scheduledMissions", "enabled": "false"]
+            parameters: ["feature": "scheduledMissions", "enabled": "0"]
         )
         #expect(res2.success)
         #expect(res2.verified)
@@ -118,8 +118,13 @@ struct ACTAActionRegistryTests {
             actionID: "settings.update_permissions",
             parameters: ["allow_voice_input": "true", "allow_external_ai": "false"]
         )
-        #expect(result.success)
-        #expect(result.verified)
+        #expect(!result.success)
+        #expect(result.requiresOperatorConfirmation)
+        #expect(!features.preferences.allowVoiceInput)
+        let token = try #require(result.confirmationToken)
+        let approved = try await registry.confirmAndExecute(token: token, confirmed: true)
+        #expect(approved.success)
+        #expect(approved.verified)
         #expect(features.preferences.allowVoiceInput)
         #expect(!features.preferences.allowExternalAI)
     }
@@ -161,16 +166,16 @@ struct ACTAActionRegistryTests {
         #expect(!rejectResult.requiresOperatorConfirmation)
         #expect(rejectResult.summary.contains("cancelled"))
 
-        // 3. Repeating and confirming with 'confirmed: true' executes successfully
+        // Approval cannot turn an unconnected domain service into a successful deletion.
         let secondResult = try await registry.execute(
             actionID: "memory.clear_all_frames",
             parameters: [:]
         )
         let newToken = try #require(secondResult.confirmationToken)
         let confirmResult = try await registry.confirmAndExecute(token: newToken, confirmed: true)
-        #expect(confirmResult.success)
-        #expect(confirmResult.verified)
-        #expect(confirmResult.summary.contains("Purged all locally retained memory frames"))
+        #expect(!confirmResult.success)
+        #expect(!confirmResult.verified)
+        #expect(confirmResult.error?.hasPrefix("UNSUPPORTED:") == true)
     }
 
     @Test func unsupportedActionReturnsCleanDiagnostic() async throws {
@@ -179,4 +184,140 @@ struct ACTAActionRegistryTests {
         #expect(!result.success)
         #expect(result.error?.contains("Unsupported action") == true)
     }
+    @Test func disconnectedServicesNeverReportSuccess() async throws {
+        let registry = ACTAActionRegistry()
+        let cases: [(any ACTAActionProtocol, [String: String])] = [
+            (IncidentListAction(), [:]),
+            (IncidentTransitionStatusAction(), ["incident_id": "test", "status": "resolved"]),
+            (IncidentDeleteEvidenceAction(), ["incident_id": "test"]),
+            (MemoryDeleteFrameAction(), ["frame_id": "test"]),
+            (MemoryClearAllFramesAction(), [:]),
+            (WatchListAction(), [:]),
+            (WatchCreateAction(), ["text": "test"]),
+            (WatchCancelAction(), ["watch_id": "test"]),
+            (AnalyticsGetSettingsAction(), [:]),
+            (AnalyticsSetGlobalToggleAction(), ["feature": "fall", "enabled": "true"])
+        ]
+        for (action, parameters) in cases {
+            await registry.register(action)
+            let result = try await registry.execute(actionID: action.id, parameters: parameters,
+                context: ACTAActionContext(isConfirmed: true))
+            #expect(!result.success)
+            #expect(!result.verified)
+            #expect(result.error?.hasPrefix("UNSUPPORTED:") == true)
+        }
+    }
+
+    @Test func invalidArgumentsDoNotMutateSettings() async throws {
+        let registry = ACTAActionRegistry()
+        let features = MockFeatureProvider()
+        await registry.register(SettingsUpdateFeatureTogglesAction(featureProvider: features))
+        for arguments in [
+            ["feature": "scheduledMissions"],
+            ["feature": "scheduledMissions", "enabled": "yes"],
+            ["feature": "unknown", "enabled": "true"],
+            ["feature": "scheduledMissions", "enabled": "true", "extra": "value"]
+        ] {
+            let result = try await registry.execute(actionID: "settings.update_feature_toggles", parameters: arguments)
+            #expect(!result.success)
+            #expect(result.error?.hasPrefix("INVALID_ARGUMENT:") == true)
+        }
+        #expect(features.preferences == CameraFeaturePreferences())
+    }
+
+    @Test func diagnosticsRemainValidJSON() throws {
+        let result = ACTAActionResult.failed(actionID: "test", error: "invalid \"value\"\nnext line")
+        let object = try JSONSerialization.jsonObject(with: Data(result.outputJSON.utf8)) as? [String: String]
+        #expect(object?["error"] == result.error)
+    }
+
+    @Test func unknownAnalyticsFeatureDoesNotReportSuccess() async throws {
+        let registry = ACTAActionRegistry()
+        let analytics = MockAnalyticsProvider()
+        await registry.register(AnalyticsSetGlobalToggleAction(analyticsProvider: analytics))
+        let result = try await registry.execute(actionID: "analytics.set_global_toggle",
+            parameters: ["feature": "unknown", "enabled": "true"])
+        #expect(!result.success)
+    }
+
+    actor MutationLatch {
+        private var started = false
+        private var startedWaiters: [CheckedContinuation<Void, Never>] = []
+        private var finish: CheckedContinuation<Void, Never>?
+        func hold() async {
+            await withCheckedContinuation { continuation in
+                finish = continuation
+                started = true
+                startedWaiters.forEach { $0.resume() }
+                startedWaiters.removeAll()
+            }
+        }
+        func waitUntilStarted() async {
+            if started { return }
+            await withCheckedContinuation { startedWaiters.append($0) }
+        }
+        func release() { finish?.resume(); finish = nil }
+    }
+
+    struct SuspendedMutation: ACTAActionProtocol {
+        let id = "test.mutation"
+        let title = "Test"
+        let description = "Test mutation"
+        let classification = ACTAActionClassification.reversible
+        let parameters: [ACTAActionParameterSchema] = []
+        let latch: MutationLatch
+        func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
+            await latch.hold()
+            return ACTAActionResult(actionID: id, success: true, summary: "Applied")
+        }
+        func verify(parameters: [String: String], context: ACTAActionContext) async throws -> Bool { true }
+    }
+
+    @Test func overlappingMutationsCannotInterleaveAcrossAwait() async throws {
+        let registry = ACTAActionRegistry()
+        let latch = MutationLatch()
+        await registry.register(SuspendedMutation(latch: latch))
+        let first = Task { try await registry.execute(actionID: "test.mutation", parameters: [:]) }
+        await latch.waitUntilStarted()
+        let second = try await registry.execute(actionID: "test.mutation", parameters: [:])
+        await latch.release()
+        let completed = try await first.value
+        #expect(completed.success)
+        #expect(!second.success)
+        #expect(second.error?.hasPrefix("ACTION_BUSY:") == true)
+    }
+
+    @Test func confirmationTokenIsSingleUseAndExpires() async throws {
+        let registry = ACTAActionRegistry()
+        let features = MockFeatureProvider()
+        await registry.register(SettingsUpdatePermissionsAction(featureProvider: features))
+        let expired = try await registry.execute(actionID: "settings.update_permissions",
+            parameters: ["allow_voice_input": "true"], context: ACTAActionContext(now: Date().addingTimeInterval(-301)))
+        let expiredToken = try #require(expired.confirmationToken)
+        let denied = try await registry.confirmAndExecute(token: expiredToken, confirmed: true)
+        #expect(!denied.success)
+        #expect(!features.preferences.allowVoiceInput)
+        let pending = try await registry.execute(actionID: "settings.update_permissions", parameters: ["allow_voice_input": "true"])
+        #expect(pending.summary.contains("allow_voice_input=true"))
+        let token = try #require(pending.confirmationToken)
+        let approved = try await registry.confirmAndExecute(token: token, confirmed: true)
+        #expect(approved.success)
+        let replay = try await registry.confirmAndExecute(token: token, confirmed: true)
+        #expect(!replay.success)
+    }
+
+    @Test func privacyFeatureChangesRequireConfirmation() async throws {
+        let registry = ACTAActionRegistry()
+        let features = MockFeatureProvider()
+        await registry.register(SettingsUpdateFeatureTogglesAction(featureProvider: features))
+        for feature in ["publicShowcase", "accessControl", "independentWatcher", "chronologicalMemory",
+                        "crossCameraIdentity", "plateRecognition", "operatorActions"] {
+            let result = try await registry.execute(actionID: "settings.update_feature_toggles",
+                parameters: ["feature": feature, "enabled": "true"])
+            #expect(result.requiresOperatorConfirmation)
+            #expect(!result.success)
+        }
+        #expect(features.preferences.enabledFeatures.isEmpty)
+    }
+
 }

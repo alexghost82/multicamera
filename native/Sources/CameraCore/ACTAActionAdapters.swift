@@ -3,18 +3,18 @@ import Foundation
 // MARK: - Delegate Protocols for Core Adapters
 
 public protocol ACTASystemSettingsProvider: Sendable {
-    func loadConfiguration() throws -> WallConfiguration
-    func saveConfiguration(_ config: WallConfiguration) throws
+    func loadConfiguration() async throws -> WallConfiguration
+    func saveConfiguration(_ config: WallConfiguration) async throws
 }
 
 public protocol ACTAFeaturePreferencesProvider: Sendable {
-    func loadPreferences() throws -> CameraFeaturePreferences
-    func savePreferences(_ prefs: CameraFeaturePreferences) throws
+    func loadPreferences() async throws -> CameraFeaturePreferences
+    func savePreferences(_ prefs: CameraFeaturePreferences) async throws
 }
 
 public protocol ACTAVideoAnalyticsSettingsProvider: Sendable {
-    func loadSettings() -> VideoAnalyticsSettings
-    func updateSettings(_ mutate: @Sendable (inout VideoAnalyticsSettings) -> Void) throws
+    func loadSettings() async -> VideoAnalyticsSettings
+    func updateSettings(_ mutate: @Sendable (inout VideoAnalyticsSettings) -> Void) async throws
 }
 
 // Default file-based implementation for providers
@@ -73,17 +73,21 @@ public struct SettingsGetSectionAction: ACTAActionProtocol {
         let section = (parameters["section"] ?? "general").lowercased()
         switch section {
         case "general", "system":
-            let config = try settingsProvider.loadConfiguration()
-            let data = try JSONEncoder().encode(config)
+            let config = try await settingsProvider.loadConfiguration()
+            // Camera configuration may contain stream credentials; disclose only this section.
+            let values: [String: Double] = ["columns": Double(config.columns),
+                "detectionThreshold": config.detectionThreshold, "detectionFPS": config.detectionFPS,
+                "staleAfterMilliseconds": Double(config.staleAfterMilliseconds)]
+            let data = try JSONEncoder().encode(values)
             let json = String(data: data, encoding: .utf8) ?? "{}"
             return ACTAActionResult(actionID: id, success: true, summary: "Retrieved system settings (\(config.columns) cols, \(config.detectionFPS) FPS)", outputJSON: json)
         case "features", "permissions":
-            let prefs = try featureProvider.loadPreferences()
+            let prefs = try await featureProvider.loadPreferences()
             let data = try JSONEncoder().encode(prefs)
             let json = String(data: data, encoding: .utf8) ?? "{}"
             return ACTAActionResult(actionID: id, success: true, summary: "Retrieved feature policies (\(prefs.enabledFeatures.count) enabled)", outputJSON: json)
         default:
-            return ACTAActionResult(actionID: id, success: true, summary: "Retrieved section '\(section)'", outputJSON: "{\"section\": \"\(section)\"}")
+            return ACTAActionResult.unsupported(actionID: id)
         }
     }
 }
@@ -107,7 +111,7 @@ public struct SettingsUpdateSystemAction: ACTAActionProtocol {
     }
 
     public func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
-        var config = try settingsProvider.loadConfiguration()
+        var config = try await settingsProvider.loadConfiguration()
         var changed: [String] = []
 
         if let colsStr = parameters["columns"], let cols = Int(colsStr) {
@@ -127,19 +131,21 @@ public struct SettingsUpdateSystemAction: ACTAActionProtocol {
             changed.append("staleAfterMs=\(config.staleAfterMilliseconds)")
         }
 
-        try settingsProvider.saveConfiguration(config)
+        try await settingsProvider.saveConfiguration(config)
         let summary = "System settings updated: " + (changed.isEmpty ? "no changes" : changed.joined(separator: ", "))
         return ACTAActionResult(actionID: id, success: true, summary: summary, outputJSON: "{\"updated\": true}")
     }
 
     public func verify(parameters: [String: String], context: ACTAActionContext) async throws -> Bool {
-        let loaded = try settingsProvider.loadConfiguration()
+        let loaded = try await settingsProvider.loadConfiguration()
         if let colsStr = parameters["columns"], let cols = Int(colsStr), loaded.columns != min(16, max(1, cols)) {
             return false
         }
         if let fpsStr = parameters["detection_fps"], let fps = Double(fpsStr), loaded.detectionFPS != min(5, max(1, fps.rounded())) {
             return false
         }
+        if let value = parameters["detection_threshold"], let expected = Double(value), loaded.detectionThreshold != min(0.9, max(0.1, expected)) { return false }
+        if let value = parameters["stale_threshold_ms"], let expected = Int(value), loaded.staleAfterMilliseconds != min(30000, max(200, expected)) { return false }
         return true
     }
 }
@@ -160,18 +166,25 @@ public struct SettingsUpdateFeatureTogglesAction: ACTAActionProtocol {
         self.featureProvider = featureProvider
     }
 
+    public func requiresConfirmation(parameters: [String: String]) -> Bool {
+        // Sharing, identity, retained observations and access policy are protected in either direction.
+        let protected: Set<String> = ["publicShowcase", "accessControl", "independentWatcher",
+            "chronologicalMemory", "crossCameraIdentity", "plateRecognition", "operatorActions"]
+        return protected.contains(parameters["feature"] ?? "")
+    }
+
     public func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
         guard let featStr = parameters["feature"], let feat = CameraFeatureID(rawValue: featStr) else {
             return ACTAActionResult.failed(actionID: id, error: "Invalid feature ID: \(parameters["feature"] ?? "")")
         }
         let enabled = (parameters["enabled"]?.lowercased() == "true" || parameters["enabled"] == "1")
-        var prefs = try featureProvider.loadPreferences()
+        var prefs = try await featureProvider.loadPreferences()
         if enabled {
             prefs.enabledFeatures.insert(feat)
         } else {
             prefs.enabledFeatures.remove(feat)
         }
-        try featureProvider.savePreferences(prefs)
+        try await featureProvider.savePreferences(prefs)
         let summary = "Feature '\(feat.rawValue)' is now \(enabled ? "enabled" : "disabled")."
         return ACTAActionResult(actionID: id, success: true, summary: summary, outputJSON: "{\"feature\": \"\(feat.rawValue)\", \"enabled\": \(enabled)}")
     }
@@ -179,7 +192,7 @@ public struct SettingsUpdateFeatureTogglesAction: ACTAActionProtocol {
     public func verify(parameters: [String: String], context: ACTAActionContext) async throws -> Bool {
         guard let featStr = parameters["feature"], let feat = CameraFeatureID(rawValue: featStr) else { return false }
         let expected = (parameters["enabled"]?.lowercased() == "true" || parameters["enabled"] == "1")
-        let loaded = try featureProvider.loadPreferences()
+        let loaded = try await featureProvider.loadPreferences()
         return loaded.enabledFeatures.contains(feat) == expected
     }
 }
@@ -188,7 +201,7 @@ public struct SettingsUpdatePermissionsAction: ACTAActionProtocol {
     public let id = "settings.update_permissions"
     public let title = "Update System Permissions"
     public let description = "Updates operator permission toggles (allow external AI, allow local voice input, allow plate lookup)."
-    public let classification = ACTAActionClassification.reversible
+    public let classification = ACTAActionClassification.securitySensitive
     public let parameters = [
         ACTAActionParameterSchema(name: "allow_external_ai", type: "boolean", description: "Allow external OpenAI endpoints"),
         ACTAActionParameterSchema(name: "allow_voice_input", type: "boolean", description: "Allow local speech recognition microphone access"),
@@ -202,7 +215,7 @@ public struct SettingsUpdatePermissionsAction: ACTAActionProtocol {
     }
 
     public func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
-        var prefs = try featureProvider.loadPreferences()
+        var prefs = try await featureProvider.loadPreferences()
         var changed: [String] = []
 
         if let val = parameters["allow_external_ai"] {
@@ -218,17 +231,19 @@ public struct SettingsUpdatePermissionsAction: ACTAActionProtocol {
             changed.append("allowPlateRegistryLookup=\(prefs.allowPlateRegistryLookup)")
         }
 
-        try featureProvider.savePreferences(prefs)
+        try await featureProvider.savePreferences(prefs)
         let summary = "Permissions updated: " + (changed.isEmpty ? "no changes" : changed.joined(separator: ", "))
         return ACTAActionResult(actionID: id, success: true, summary: summary, outputJSON: "{\"updated\": true}")
     }
 
     public func verify(parameters: [String: String], context: ACTAActionContext) async throws -> Bool {
-        let loaded = try featureProvider.loadPreferences()
+        let loaded = try await featureProvider.loadPreferences()
         if let val = parameters["allow_voice_input"] {
             let expected = (val.lowercased() == "true" || val == "1")
             if loaded.allowVoiceInput != expected { return false }
         }
+        if let val = parameters["allow_external_ai"], loaded.allowExternalAI != (val == "true" || val == "1") { return false }
+        if let val = parameters["allow_plate_lookup"], loaded.allowPlateRegistryLookup != (val == "true" || val == "1") { return false }
         return true
     }
 }
@@ -251,7 +266,9 @@ public struct AnalyticsGetSettingsAction: ACTAActionProtocol {
     }
 
     public func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
-        let settings = analyticsProvider?.loadSettings() ?? VideoAnalyticsSettings()
+        guard let analyticsProvider else { return .unsupported(actionID: id) }
+        guard parameters["camera_id"] == nil else { return .unsupported(actionID: id) }
+        let settings = await analyticsProvider.loadSettings()
         let data = try JSONEncoder().encode(settings)
         let json = String(data: data, encoding: .utf8) ?? "{}"
         let summary = "Video analytics is \(settings.globalEnabled ? "enabled" : "disabled") (Person: \(settings.enablePersonDetection), Fall: \(settings.enableFallDetection), Fight: \(settings.enableFightDetection))"
@@ -281,7 +298,12 @@ public struct AnalyticsSetGlobalToggleAction: ACTAActionProtocol {
         }
         let enabled = (parameters["enabled"]?.lowercased() == "true" || parameters["enabled"] == "1")
 
-        try analyticsProvider?.updateSettings { settings in
+        guard let analyticsProvider else { return .unsupported(actionID: id) }
+        let supported = ["global", "globalenabled", "person", "enablepersondetection", "pose", "enableposeestimation", "fall", "enablefalldetection", "behavior", "enablebehavioranalysis", "loitering", "enableloiteringdetection", "zone", "enablezonemonitoring", "fight", "enablefightdetection", "secondary_vlm", "enablesecondaryvlmverification", "sound", "enablesoundalert", "evidence", "enableevidencerecording"]
+        guard supported.contains(feature.lowercased()) else {
+            return .failed(actionID: id, error: "INVALID_ARGUMENT: Unknown analytics feature.")
+        }
+        try await analyticsProvider.updateSettings { settings in
             switch feature.lowercased() {
             case "global", "globalenabled": settings.globalEnabled = enabled
             case "person", "enablepersondetection": settings.enablePersonDetection = enabled
@@ -303,15 +325,22 @@ public struct AnalyticsSetGlobalToggleAction: ACTAActionProtocol {
     }
 
     public func verify(parameters: [String: String], context: ACTAActionContext) async throws -> Bool {
-        guard let feature = parameters["feature"], let analyticsProvider else { return true }
+        guard let feature = parameters["feature"], let analyticsProvider else { return false }
         let expected = (parameters["enabled"]?.lowercased() == "true" || parameters["enabled"] == "1")
-        let settings = analyticsProvider.loadSettings()
+        let settings = await analyticsProvider.loadSettings()
         switch feature.lowercased() {
         case "global", "globalenabled": return settings.globalEnabled == expected
         case "person", "enablepersondetection": return settings.enablePersonDetection == expected
         case "fall", "enablefalldetection": return settings.enableFallDetection == expected
         case "fight", "enablefightdetection": return settings.enableFightDetection == expected
-        default: return true
+        case "pose", "enableposeestimation": return settings.enablePoseEstimation == expected
+        case "behavior", "enablebehavioranalysis": return settings.enableBehaviorAnalysis == expected
+        case "loitering", "enableloiteringdetection": return settings.enableLoiteringDetection == expected
+        case "zone", "enablezonemonitoring": return settings.enableZoneMonitoring == expected
+        case "secondary_vlm", "enablesecondaryvlmverification": return settings.enableSecondaryVLMVerification == expected
+        case "sound", "enablesoundalert": return settings.enableSoundAlert == expected
+        case "evidence", "enableevidencerecording": return settings.enableEvidenceRecording == expected
+        default: return false
         }
     }
 }
@@ -332,9 +361,7 @@ public struct IncidentListAction: ACTAActionProtocol {
     public init() {}
 
     public func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
-        // Return summary format
-        let openOnly = parameters["open_only"] == "true"
-        return ACTAActionResult(actionID: id, success: true, summary: "Listed incidents (openOnly: \(openOnly))", outputJSON: "{\"incidents\": []}")
+        return .unsupported(actionID: id)
     }
 }
 
@@ -352,11 +379,7 @@ public struct IncidentTransitionStatusAction: ACTAActionProtocol {
     public init() {}
 
     public func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
-        guard let incidentID = parameters["incident_id"], let status = parameters["status"] else {
-            return ACTAActionResult.failed(actionID: id, error: "incident_id and status are required.")
-        }
-        let summary = "Incident \(incidentID) transitioned to '\(status)'."
-        return ACTAActionResult(actionID: id, success: true, summary: summary, outputJSON: "{\"incident_id\": \"\(incidentID)\", \"status\": \"\(status)\"}")
+        return .unsupported(actionID: id)
     }
 }
 
@@ -372,10 +395,7 @@ public struct IncidentDeleteEvidenceAction: ACTAActionProtocol {
     public init() {}
 
     public func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
-        guard let incidentID = parameters["incident_id"] else {
-            return ACTAActionResult.failed(actionID: id, error: "incident_id is required.")
-        }
-        return ACTAActionResult(actionID: id, success: true, summary: "Deleted saved evidence frames for incident \(incidentID). Record retained.", outputJSON: "{\"deleted\": true}")
+        return .unsupported(actionID: id)
     }
 }
 
@@ -393,10 +413,7 @@ public struct MemoryDeleteFrameAction: ACTAActionProtocol {
     public init() {}
 
     public func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
-        guard let frameID = parameters["frame_id"] else {
-            return ACTAActionResult.failed(actionID: id, error: "frame_id is required.")
-        }
-        return ACTAActionResult(actionID: id, success: true, summary: "Permanently deleted memory frame \(frameID).", outputJSON: "{\"deleted\": true}")
+        return .unsupported(actionID: id)
     }
 }
 
@@ -410,7 +427,7 @@ public struct MemoryClearAllFramesAction: ACTAActionProtocol {
     public init() {}
 
     public func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
-        return ACTAActionResult(actionID: id, success: true, summary: "Purged all locally retained memory frames from disk.", outputJSON: "{\"cleared\": true}")
+        return .unsupported(actionID: id)
     }
 }
 
@@ -426,7 +443,7 @@ public struct WatchListAction: ACTAActionProtocol {
     public init() {}
 
     public func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
-        return ACTAActionResult(actionID: id, success: true, summary: "Listed visual watch rules.", outputJSON: "{\"watch_rules\": []}")
+        return .unsupported(actionID: id)
     }
 }
 
@@ -445,11 +462,7 @@ public struct WatchCreateAction: ACTAActionProtocol {
     public init() {}
 
     public func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
-        guard let text = parameters["text"], !text.isEmpty else {
-            return ACTAActionResult.failed(actionID: id, error: "Watch rule 'text' is required.")
-        }
-        let watchID = UUID().uuidString
-        return ACTAActionResult(actionID: id, success: true, summary: "Created visual watch rule '\(text)' [ID: \(watchID)].", outputJSON: "{\"watch_id\": \"\(watchID)\"}")
+        return .unsupported(actionID: id)
     }
 }
 
@@ -465,9 +478,6 @@ public struct WatchCancelAction: ACTAActionProtocol {
     public init() {}
 
     public func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
-        guard let watchID = parameters["watch_id"] else {
-            return ACTAActionResult.failed(actionID: id, error: "watch_id is required.")
-        }
-        return ACTAActionResult(actionID: id, success: true, summary: "Cancelled watch rule \(watchID).", outputJSON: "{\"cancelled\": true}")
+        return .unsupported(actionID: id)
     }
 }

@@ -173,3 +173,19 @@ Every execution (whether initiated by Text, Voice, Automation, or UI) is recorde
   *Mitigation:* Use clean generic protocols and grouping by domain modules (Camera, Analytics, Settings, Incident, Identity, Memory).
 - *Latency Overhead:* Read-after-write verification adds ~5–20 ms to mutations.  
   *Mitigation:* Verification is performed asynchronously in background tasks and does not block the UI thread.
+
+
+## Phase 1 implementation checkpoint — 2026-11-17
+
+This ADR remains only partially implemented. Current code adds primitive validation,
+explicit unsupported results, security-sensitive and per-feature confirmation gates,
+MainActor live settings/analytics providers, an eleven-action model catalogue, durable
+operator proposals, pre-execution tool audit and one-shot UI token review. Overlapping
+registry mutations are rejected with ACTION_BUSY, not queued. Mutations without an
+explicit verifier fail verification.
+
+Unimplemented: full GUI parity, remaining domain adapters, complete authorization,
+durable idempotency, deadline/cancellation policy, transactional compensation across
+files and SQLite, recovery of pending tokens after restart, and universal GUI audit.
+Read IMPLEMENTATION_REPORT.md for exact validation evidence and limitations. The
+positive consequences above are design goals, not verified completion claims.

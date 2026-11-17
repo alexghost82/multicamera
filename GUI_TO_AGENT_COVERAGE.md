@@ -10,7 +10,7 @@ Version: 1.0.0-baseline
 
 This inventory maps **every existing user-accessible SwiftUI control, persistent setting, and domain service operation** in ACTA to a typed agent action specification.
 
-- **Total Functional Operations Inventoried:** 108
+- **Action rows in this baseline:** 97 (the previous claim of 108 was not supported by the table; exhaustive UI coverage remains unverified)
 - **Existing Agent Tools in Code:** 16 read-only query tools + 1 terminal tool (`present_answer`)
 - **Existing Agent Mutations in Code:** 3 (`rename_identity`, `merge_identities`, `split_identity`)
 - **Uncovered Operations Prior to Audit:** 89 (82.4% gap across Camera lifecycle, Layout, Analytics toggles/thresholds, Incident management, Missions, Watch rules, SettingsHub, and Local Voice TTS)
@@ -32,19 +32,19 @@ This inventory maps **every existing user-accessible SwiftUI control, persistent
 
 | Action ID | UI Route / Screen | Service Owner | Typed Arguments | Action Type | Policy | Unit / Parity Test | State |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `camera.list` | `WallView` / `CameraManager` | `WallModel` | `includeDisabled: Bool?` | `Inspect` | Auto | `testCameraList` | `PLANNED` |
-| `camera.get` | `CameraEditor` | `WallModel` | `cameraID: String` | `Inspect` | Auto | `testCameraGet` | `PLANNED` |
+| `camera.list` | `WallView` / `CameraManager` | `WallModel` | `includeDisabled: Bool?` | `Inspect` | Auto | `testCameraList` | `PARTIAL — NO PARITY TEST` |
+| `camera.get` | `CameraEditor` | `WallModel` | `cameraID: String` | `Inspect` | Auto | `testCameraGet` | `PARTIAL — NO PARITY TEST` |
 | `camera.add_network` | `CameraEditor` sheet | `WallModel` | `name: String, url: String, substream: String?, username: String?, password: String?` | `Reversible` | Auto | `testCameraAddNetwork` | `PLANNED` |
 | `camera.add_local` | `LocalCameraEditor` sheet | `WallModel` | `deviceID: String, name: String` | `Reversible` | Auto | `testCameraAddLocal` | `PLANNED` |
 | `camera.add_screen` | `ScreenCaptureCameraEditor` | `WallModel` | `displayID: UInt32, name: String` | `Reversible` | Auto | `testCameraAddScreen` | `PLANNED` |
 | `camera.add_file` | `VideoFileCameraEditor` | `WallModel` | `filePath: String, name: String?` | `Reversible` | Auto | `testCameraAddFile` | `PLANNED` |
 | `camera.edit` | `CameraEditor` sheet | `WallModel` | `cameraID: String, name: String?, url: String?, substream: String?, enabled: Bool?` | `Reversible` | Auto | `testCameraEdit` | `PLANNED` |
-| `camera.set_enabled` | `CameraManager` toggle | `WallModel` | `cameraID: String, enabled: Bool` | `Reversible` | Auto | `testCameraSetEnabled` | `PLANNED` |
-| `camera.remove` | `WallView` remove alert | `WallModel` | `cameraID: String` | `Destructive` | **Confirm** | `testCameraRemove` | `PLANNED` |
+| `camera.set_enabled` | `CameraManager` toggle | `WallModel` | `cameraID: String, enabled: Bool` | `Reversible` | Auto | `testCameraSetEnabled` | `PARTIAL — NO PARITY TEST` |
+| `camera.remove` | `WallView` remove alert | `WallModel` | `cameraID: String` | `Destructive` | **Confirm** | `testCameraRemove` | `PARTIAL — NO PARITY TEST` |
 | `camera.reconnect` | Camera context menu | `WallModel` | `cameraID: String` | `ServiceAffecting` | Auto | `testCameraReconnect` | `PLANNED` |
 | `camera.snapshot` | Camera action bar | `WallModel` | `cameraID: String` | `Inspect` | Auto | `testCameraSnapshot` | `PLANNED` |
 | `camera.toggle_expand` | Video canvas double-click | `WallModel` | `cameraID: String` | `Reversible` | Auto | `testCameraToggleExpand` | `PLANNED` |
-| `canvas.set_columns` | SystemSettings / Canvas | `WallModel` | `columns: Int (1...16)` | `Reversible` | Auto | `testCanvasSetColumns` | `PLANNED` |
+| `canvas.set_columns` | SystemSettings / Canvas | `WallModel` | `columns: Int (1...16)` | `Reversible` | Auto | `testCanvasSetColumns` | `IMPLEMENTED — SERVICE TEST` |
 | `canvas.reset_layout` | Window menu / Toolbar | `WallModel` | `none` | `Reversible` | Auto | `testCanvasResetLayout` | `PLANNED` |
 
 ---
@@ -53,8 +53,8 @@ This inventory maps **every existing user-accessible SwiftUI control, persistent
 
 | Action ID | UI Route / Screen | Service Owner | Typed Arguments | Action Type | Policy | Unit / Parity Test | State |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `analytics.get_settings` | `AnalyticsSettingsEditor` | `LocalVideoAnalyticsEngine` | `cameraID: String?` | `Inspect` | Auto | `testAnalyticsGetSettings` | `PLANNED` |
-| `analytics.set_global_toggle` | `AnalyticsSettingsEditor` | `LocalVideoAnalyticsEngine` | `feature: String, enabled: Bool` | `Reversible` | Auto | `testAnalyticsSetGlobalToggle` | `PLANNED` |
+| `analytics.get_settings` | `AnalyticsSettingsEditor` | `LocalVideoAnalyticsEngine` | `cameraID: String?` | `Inspect` | Auto | `testAnalyticsGetSettings` | `PARTIAL — GLOBAL SETTINGS ONLY` |
+| `analytics.set_global_toggle` | `AnalyticsSettingsEditor` | `LocalVideoAnalyticsEngine` | `feature: String, enabled: Bool` | `Reversible` | Auto | `testAnalyticsSetGlobalToggle` | `PARTIAL — LIVE PROVIDER / FALL TEST` |
 | `analytics.set_threshold` | `AnalyticsSettingsEditor` | `LocalVideoAnalyticsEngine` | `parameter: String, value: Double` | `Reversible` | Auto | `testAnalyticsSetThreshold` | `PLANNED` |
 | `analytics.set_sampling_fps` | `AnalyticsSettingsEditor` | `LocalVideoAnalyticsEngine` | `fps: Double, idleFPS: Double?, boostFPS: Double?` | `Reversible` | Auto | `testAnalyticsSetSamplingFPS` | `PLANNED` |
 | `analytics.set_overlay` | `AnalyticsSettingsEditor` | `LocalVideoAnalyticsEngine` | `layer: String, enabled: Bool` | `Reversible` | Auto | `testAnalyticsSetOverlay` | `PLANNED` |
@@ -151,8 +151,8 @@ This inventory maps **every existing user-accessible SwiftUI control, persistent
 
 | Action ID | UI Section / Key | Service Owner | Typed Arguments | Action Type | Policy | Unit / Parity Test | State |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `settings.get_section` | `SettingsHubView` (all) | `WallModel` | `section: String` | `Inspect` | Auto | `testSettingsGetSection` | `PLANNED` |
-| `settings.update_system` | Sec 1: General & Streams | `WallModel` | `language: String?, columns: Int?, staleTimeoutMs: Int?, go2rtcPath: String?, apiPort: Int?, rtspPort: Int?, yoloThreshold: Double?, detectionFPS: Int?` | `Reversible` | Auto | `testSettingsUpdateSystem` | `PLANNED` |
+| `settings.get_section` | `SettingsHubView` (all) | `WallModel` | `section: String` | `Inspect` | Auto | `testSettingsGetSection` | `PARTIAL — GENERAL/FEATURES ONLY` |
+| `settings.update_system` | Sec 1: General & Streams | `WallModel` | `language: String?, columns: Int?, staleTimeoutMs: Int?, go2rtcPath: String?, apiPort: Int?, rtspPort: Int?, yoloThreshold: Double?, detectionFPS: Int?` | `Reversible` | Auto | `testSettingsUpdateSystem` | `PARTIAL — FOUR FIELDS` |
 | `settings.update_models` | Sec 3: AI Models | `WallModel` | `enabledServices: [String]?, customPaths: [String: String]?` | `ServiceAffecting` | Auto | `testSettingsUpdateModels` | `PLANNED` |
 | `settings.update_runtime_fall` | Sec 4: Advanced Runtime | `WallModel` | `torsoAngle: Double?, aspectRatio: Double?, heightCollapse: Double?, emaAlpha: Double?, minConfirmingSamples: Int?, maxTracks: Int?` | `Reversible` | Auto | `testSettingsUpdateRuntimeFall` | `PLANNED` |
 | `settings.update_runtime_storage` | Sec 4: Storage Cleanup | `WallModel` | `maxMediaDiskMB: Int?, minFreeDiskGB: Double?, maxCropsPerIdentity: Int?, dataSaver: Bool?, trackRetentionDays: Int?, logRetentionDays: Int?` | `Reversible` | Auto | `testSettingsUpdateRuntimeStorage` | `PLANNED` |
@@ -164,8 +164,8 @@ This inventory maps **every existing user-accessible SwiftUI control, persistent
 | `settings.update_schedules` | Sec 7: Scheduled Analysis | `WallModel` | `vlmScheduleIntervalMinutes: Int?, vlmSchedulePrompts: [String]?` | `Reversible` | Auto | `testSettingsUpdateSchedules` | `PLANNED` |
 | `settings.update_events_alerts` | Sec 9: Events & Alerts | `WallModel` | `personCountAlertsEnabled: Bool?, personThreshold: Int?, holdSeconds: Double?, cooldownSeconds: Double?, criticalSoundEnabled: Bool?` | `Reversible` | Auto | `testSettingsUpdateEventsAlerts` | `PLANNED` |
 | `settings.update_memory_policy`| Sec 10: Memory & Storage | `WallModel` | `chronologicalMemoryEnabled: Bool?, retainFullFrames: Bool?, retentionDays: Int?` | `Reversible` | Auto | `testSettingsUpdateMemoryPolicy`| `PLANNED` |
-| `settings.update_feature_toggles`| Sec 11: Features & Access | `WallModel` | `feature: String, enabled: Bool` | `Reversible` | Auto | `testSettingsUpdateFeatureToggles`| `PLANNED` |
-| `settings.update_permissions` | Sec 11: Features & Access | `WallModel` | `allowExternalAI: Bool?, allowVoiceInput: Bool?, allowPlateRegistryLookup: Bool?` | `Reversible` | Auto | `testSettingsUpdatePermissions`| `PLANNED` |
+| `settings.update_feature_toggles`| Sec 11: Features & Access | `WallModel` | `feature: String, enabled: Bool` | `Reversible` | Auto | `testSettingsUpdateFeatureToggles`| `PARTIAL — UNIT TESTS / LIVE PROVIDER` |
+| `settings.update_permissions` | Sec 11: Features & Access | `WallModel` | `allowExternalAI: Bool?, allowVoiceInput: Bool?, allowPlateRegistryLookup: Bool?` | `Reversible` | Auto | `testSettingsUpdatePermissions`| `IMPLEMENTED — CONFIRMATION / SERVICE TEST` |
 | `settings.toggle_showcase` | Sec 12: Local Showcase | `WallModel` | `running: Bool, port: Int?` | `ServiceAffecting` | Auto | `testSettingsToggleShowcase` | `PLANNED` |
 | `settings.update_reid_calibration`| Sec 13: ReID Calibration | `WallModel` | `personDistanceThreshold: Double?, vehicleDistanceThreshold: Double?, metricWeight: Double?` | `Reversible` | Auto | `testSettingsUpdateReID` | `PLANNED` |
 | `settings.export_diagnostics` | Sec 14: System Diagnostics | `WallModel` | `none` | `Inspect` | Auto | `testSettingsExportDiagnostics`| `PLANNED` |
@@ -188,9 +188,33 @@ This inventory maps **every existing user-accessible SwiftUI control, persistent
 
 ---
 
-## 4. Prior Audit Gaps and Regressions Resolved
+## 4. Prior Audit Gaps — Design Targets, Not Completion Evidence
 
-1. **Mutation Blindness:** Previously, `reviewAndExecuteChatAction` discarded any action type other than `rename_identity`, `merge_identities`, and `split_identity`. The new matrix establishes a typed entry point for every persistent domain setting and camera function.
-2. **Missing TTS Layer:** `LocalVoiceInput.swift` handled on-device ASR dictation, but ACTA had zero voice playback capability. Category I introduces `LocalTTSClient` utilizing native macOS `AVSpeechSynthesizer` with offline voice selection.
-3. **vLLM Integration:** Moving from a hardcoded, non-streaming POST `/chat/completions` endpoint to a resilient, bounded concurrency adapter compatible with upstream `vllm-metal` running locally on port 8000.
-4. **Read-After-Write Verification:** Every mutating action returns a typed result struct that re-queries the underlying persistent store to verify state changes before reporting success to the model or operator.
+1. **Action discovery:** A registry execution branch exists, but the local model still receives the old tool catalogue. End-to-end discovery and execution are pending.
+2. **Voice:** On-device ASR exists. Local TTS, voice confirmation and interruption remain pending; no `LocalTTSClient` implementation is present.
+3. **vLLM Metal:** Existing HTTP requests are not proof of a Metal plugin integration. Plugin version, exact checkpoint, streaming, concurrency and hardware benchmarks remain pending.
+4. **Verification:** Partial verification exists. It does not establish full GUI parity or persistent audit coverage.
+
+## 5. Phase 1 safety correction — 2026-11-17
+
+This is a partial implementation update, not completion of Phase 1.
+
+- Disconnected incident, memory and watch adapters return `UNSUPPORTED`, never fabricated successful mutations or fabricated empty query results.
+- Analytics adapters without a provider return `UNSUPPORTED`; camera-specific overrides are not represented as global settings.
+- `settings.get_section` returns `UNSUPPORTED` for sections it does not implement.
+- `settings.update_permissions` is security-sensitive and requires operator confirmation at the registry gate.
+- Registry rejects unknown/missing required arguments, invalid primitive types, non-finite numbers and values outside declared enums before execution.
+- Verification covers all implemented analytics switches and all permission fields.
+- Diagnostic JSON is encoded safely; confirmation summaries redact potentially secret argument values.
+
+Selected table states are updated conservatively below the full-parity threshold. Test names in the original baseline column remain planned acceptance tests unless an actual test is named in IMPLEMENTATION_REPORT.md. All other rows remain baseline planning states.
+
+### Live service and agent integration
+
+- Runtime registration now supplies MainActor providers backed by the same `WallModel`/analytics service methods as GUI settings. Integration tests verify live state and files in temporary stores.
+- Eleven implemented actions are advertised to the agent with `acta__...` transport aliases. Local inference has at most four round trips. Disconnected actions are not advertised.
+- Confirmation tokens are persisted as operator proposals; UI approval resolves the token and claims the durable proposal before awaiting execution.
+- A scripted local HTTP test proves catalogue → tool call → real temporary service mutation → verified output. Actual Qwen model behaviour and GUI interactions remain unverified.
+- Concurrent registry writes return `ACTION_BUSY`; mutation verification defaults to failure unless explicitly implemented. Token expiry and replay are tested.
+
+Protected feature switches (`publicShowcase`, `accessControl`, `independentWatcher`, `chronologicalMemory`, `crossCameraIdentity`, `plateRecognition`, `operatorActions`) require explicit confirmation. General feature switches retain their reversible policy.

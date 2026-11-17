@@ -3411,6 +3411,29 @@ final class WallModel: ObservableObject {
     }
 
     func reviewACTAChatAction(_ actionID: String, confirmed: Bool) {
+        if actionID.hasPrefix("CONFIRM-") {
+            Task { @MainActor [weak self] in
+                guard let self, let store = self.trackingStore else { return }
+                do {
+                    guard let proposal = try store.loadACTAChatAction(actionID: actionID),
+                          proposal.threadID == self.activeACTAThreadID,
+                          proposal.status == "proposed",
+                          try store.applyACTAChatAction(proposal, confirmed: confirmed, changes: { _ in }) != nil else { return }
+                    // Claim the durable proposal before awaiting so a second click cannot replay it.
+                    let result = try await ACTAActionRegistry.shared.confirmAndExecute(token: actionID, confirmed: confirmed)
+                    try store.recordACTAToolCallAudit(ACTAToolCallAuditRecord(threadID: proposal.threadID,
+                        toolName: proposal.actionType, argsJSON: String(decoding: try JSONEncoder().encode(actaAuditArguments(proposal.parameters)), as: UTF8.self),
+                        resultRows: result.success ? 1 : 0, durationMs: 0, ok: result.success && result.verified,
+                        error: result.error))
+                    self.actaAgentStatus = result.summary
+                    if confirmed && !result.success { self.notice = result.summary }
+                } catch {
+                    self.notice = "ACTA action review failed: \(error.localizedDescription)"
+                }
+                self.actaChatActions = (try? store.listACTAChatActions(threadID: self.activeACTAThreadID, status: "proposed")) ?? []
+            }
+            return
+        }
         guard let ghost = actaAnalytics else { return }
         if ghost.reviewAndExecuteChatAction(actionID: actionID, confirmed: confirmed) == nil {
             Task { @MainActor [weak self] in

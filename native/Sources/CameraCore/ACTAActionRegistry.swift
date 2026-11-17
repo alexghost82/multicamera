@@ -13,6 +13,7 @@ public actor ACTAActionRegistry {
         public let expiresAt: Date
     }
 
+    private var mutationInProgress = false
     private var actions: [String: any ACTAActionProtocol] = [:]
     private var pendingConfirmations: [String: PendingConfirmation] = [:]
 
@@ -82,12 +83,40 @@ public actor ACTAActionRegistry {
         guard let action = actions[actionID] else {
             return ACTAActionResult.failed(
                 actionID: actionID,
-                error: "Unsupported action: '\(actionID)'. Available actions: \(actions.keys.sorted().joined(separator: ", "))"
+                error: "UNSUPPORTED: Unsupported action: '\(actionID)'. Available actions: \(actions.keys.sorted().joined(separator: ", "))"
             )
         }
 
-        // 1. Check Destructive Confirmation Gate
-        if action.classification == .destructive && !context.isConfirmed {
+        // Validate before requesting confirmation or allowing any side effect.
+        var parameters = parameters
+        let schema = Dictionary(uniqueKeysWithValues: action.parameters.map { ($0.name, $0) })
+        guard Set(parameters.keys).isSubset(of: Set(schema.keys)) else {
+            return .failed(actionID: actionID, error: "INVALID_ARGUMENT: Unknown parameter.")
+        }
+        for field in action.parameters {
+            guard let value = parameters[field.name] else {
+                if field.isRequired { return .failed(actionID: actionID, error: "INVALID_ARGUMENT: Missing \(field.name).") }
+                continue
+            }
+            let valid: Bool
+            switch field.type {
+            case "boolean": valid = ["true", "false", "1", "0"].contains(value)
+            case "integer": valid = Int(value) != nil
+            case "number": valid = Double(value)?.isFinite == true
+            case "string": valid = !field.isRequired || !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            default: valid = false
+            }
+            guard valid, field.allowedValues?.contains(value) ?? true else {
+                return .failed(actionID: actionID, error: "INVALID_ARGUMENT: Invalid \(field.name).")
+            }
+            if field.type == "boolean" {
+                parameters[field.name] = (value == "true" || value == "1") ? "true" : "false"
+            }
+        }
+        try Task.checkCancellation()
+
+        // 1. Check Destructive / Security Confirmation Gate
+        if action.requiresConfirmation(parameters: parameters) && !context.isConfirmed {
             let token = "CONFIRM-" + UUID().uuidString.prefix(8).uppercased()
             let pending = PendingConfirmation(
                 token: token,
@@ -99,10 +128,22 @@ public actor ACTAActionRegistry {
             )
             pendingConfirmations[token] = pending
 
-            let paramDesc = parameters.map { "\($0.key)=\($0.value)" }.joined(separator: ", ")
-            let summary = "Operator confirmation required for destructive action '\(action.title)' [\(actionID)] with parameters: (\(paramDesc)). Token: \(token)"
+            let paramDesc = parameters.keys.sorted().map { key in
+                let sensitive = ["password", "secret", "token", "key", "credential", "url"].contains { key.lowercased().contains($0) }
+                return "\(key)=\(sensitive ? "[redacted]" : String((parameters[key] ?? "").prefix(256)))"
+            }.joined(separator: ", ")
+            let summary = "Operator confirmation required for protected action '\(action.title)' [\(actionID)] with parameters: (\(paramDesc)). Token: \(token)"
             return ACTAActionResult.needsConfirmation(actionID: actionID, summary: summary, token: token)
         }
+
+        // Actor reentrancy across execute/verify must not permit lost-update mutations.
+        // Reject overlapping writes explicitly; callers may retry after the active action completes.
+        let isMutation = action.classification != .inspect
+        if isMutation && mutationInProgress {
+            return .failed(actionID: actionID, error: "ACTION_BUSY: Another mutation is still executing or verifying.")
+        }
+        if isMutation { mutationInProgress = true }
+        defer { if isMutation { mutationInProgress = false } }
 
         // 2. Execute Action
         let result: ACTAActionResult

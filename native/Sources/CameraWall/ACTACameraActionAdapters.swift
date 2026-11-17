@@ -2,6 +2,34 @@ import Foundation
 import CameraCore
 import SwiftUI
 
+func actaAuditArguments(_ arguments: [String: String]) -> [String: String] {
+    Dictionary(uniqueKeysWithValues: arguments.map { key, value in
+        let sensitive = ["password", "secret", "token", "key", "credential"].contains { key.lowercased().contains($0) }
+        return (key, sensitive ? "[redacted]" : value.contains("://") ? actaRedactedStreamURL(value) : value)
+    })
+}
+
+/// Credentials and query tokens must never enter tool output or model context.
+func actaRedactedStreamURL(_ value: String) -> String {
+    guard var components = URLComponents(string: value), components.scheme != nil,
+          components.host != nil else { return "[redacted stream]" }
+    components.user = nil
+    components.password = nil
+    components.query = nil
+    components.fragment = nil
+    return components.string ?? "[redacted stream]"
+}
+
+@MainActor
+private func actaResolveCamera(_ value: String, model: WallModel) -> Camera? {
+    if let uuid = UUID(uuidString: value) { return model.config.cameras.first { $0.id == uuid } }
+    let exact = model.config.cameras.filter { $0.name.caseInsensitiveCompare(value) == .orderedSame }
+    guard exact.count <= 1 else { return nil }
+    if let camera = exact.first { return camera }
+    let matches = model.config.cameras.filter { $0.name.localizedCaseInsensitiveContains(value) }
+    return matches.count == 1 ? matches.first : nil
+}
+
 // MARK: - Wall Model Action Adapters
 
 public struct CameraListAction: ACTAActionProtocol {
@@ -15,7 +43,7 @@ public struct CameraListAction: ACTAActionProtocol {
 
     private unowned let model: WallModel
 
-    public init(model: WallModel) {
+    init(model: WallModel) {
         self.model = model
     }
 
@@ -30,8 +58,8 @@ public struct CameraListAction: ACTAActionProtocol {
                 "id": cam.id.uuidString,
                 "name": cam.name,
                 "enabled": cam.enabled,
-                "substream": cam.substream,
-                "mainstream": cam.mainstream ?? "",
+                "substream": actaRedactedStreamURL(cam.substream),
+                "mainstream": cam.mainstream.map(actaRedactedStreamURL) ?? "",
                 "yolo_enabled": cam.yoloEnabled,
                 "ai_chat_enabled": cam.aiChatEnabled,
                 "type": cam.fileURL != nil ? "file" : cam.localDeviceID != nil ? "local_usb" : cam.screenDisplayID != nil ? "screen" : "network_rtsp"
@@ -56,7 +84,7 @@ public struct CameraGetAction: ACTAActionProtocol {
 
     private unowned let model: WallModel
 
-    public init(model: WallModel) {
+    init(model: WallModel) {
         self.model = model
     }
 
@@ -66,19 +94,19 @@ public struct CameraGetAction: ACTAActionProtocol {
         }
 
         let found = await MainActor.run {
-            model.config.cameras.first { $0.id.uuidString == idOrName || $0.name.localizedCaseInsensitiveContains(idOrName) }
+            actaResolveCamera(idOrName, model: model)
         }
 
         guard let cam = found else {
-            return ACTAActionResult.failed(actionID: id, error: "Camera '\(idOrName)' not found.")
+            return ACTAActionResult.failed(actionID: id, error: "Camera '\(idOrName)' not found or name is ambiguous; specify its UUID.")
         }
 
         let dict: [String: Any] = [
             "id": cam.id.uuidString,
             "name": cam.name,
             "location": cam.location ?? "",
-            "substream": cam.substream,
-            "mainstream": cam.mainstream ?? "",
+            "substream": actaRedactedStreamURL(cam.substream),
+            "mainstream": cam.mainstream.map(actaRedactedStreamURL) ?? "",
             "enabled": cam.enabled,
             "yolo_enabled": cam.yoloEnabled,
             "ai_chat_enabled": cam.aiChatEnabled
@@ -101,7 +129,7 @@ public struct CameraSetEnabledAction: ACTAActionProtocol {
 
     private unowned let model: WallModel
 
-    public init(model: WallModel) {
+    init(model: WallModel) {
         self.model = model
     }
 
@@ -112,11 +140,11 @@ public struct CameraSetEnabledAction: ACTAActionProtocol {
         let enabled = (parameters["enabled"]?.lowercased() == "true" || parameters["enabled"] == "1")
 
         let targetCamera = await MainActor.run {
-            model.config.cameras.first { $0.id.uuidString == idOrName || $0.name.localizedCaseInsensitiveContains(idOrName) }
+            actaResolveCamera(idOrName, model: model)
         }
 
         guard let cam = targetCamera else {
-            return ACTAActionResult.failed(actionID: id, error: "Camera '\(idOrName)' not found.")
+            return ACTAActionResult.failed(actionID: id, error: "Camera '\(idOrName)' not found or name is ambiguous; specify its UUID.")
         }
 
         await MainActor.run {
@@ -148,7 +176,7 @@ public struct CameraRemoveAction: ACTAActionProtocol {
 
     private unowned let model: WallModel
 
-    public init(model: WallModel) {
+    init(model: WallModel) {
         self.model = model
     }
 
@@ -158,11 +186,11 @@ public struct CameraRemoveAction: ACTAActionProtocol {
         }
 
         let targetCamera = await MainActor.run {
-            model.config.cameras.first { $0.id.uuidString == idOrName || $0.name.localizedCaseInsensitiveContains(idOrName) }
+            actaResolveCamera(idOrName, model: model)
         }
 
         guard let cam = targetCamera else {
-            return ACTAActionResult.failed(actionID: id, error: "Camera '\(idOrName)' not found.")
+            return ACTAActionResult.failed(actionID: id, error: "Camera '\(idOrName)' not found or name is ambiguous; specify its UUID.")
         }
 
         await MainActor.run {
@@ -192,7 +220,7 @@ public struct CameraReconnectAction: ACTAActionProtocol {
 
     private unowned let model: WallModel
 
-    public init(model: WallModel) {
+    init(model: WallModel) {
         self.model = model
     }
 
@@ -202,11 +230,11 @@ public struct CameraReconnectAction: ACTAActionProtocol {
         }
 
         let targetCamera = await MainActor.run {
-            model.config.cameras.first { $0.id.uuidString == idOrName || $0.name.localizedCaseInsensitiveContains(idOrName) }
+            actaResolveCamera(idOrName, model: model)
         }
 
         guard let cam = targetCamera else {
-            return ACTAActionResult.failed(actionID: id, error: "Camera '\(idOrName)' not found.")
+            return ACTAActionResult.failed(actionID: id, error: "Camera '\(idOrName)' not found or name is ambiguous; specify its UUID.")
         }
 
         await MainActor.run {
@@ -228,7 +256,7 @@ public struct CanvasSetColumnsAction: ACTAActionProtocol {
 
     private unowned let model: WallModel
 
-    public init(model: WallModel) {
+    init(model: WallModel) {
         self.model = model
     }
 
@@ -259,7 +287,7 @@ public struct CanvasResetLayoutAction: ACTAActionProtocol {
 
     private unowned let model: WallModel
 
-    public init(model: WallModel) {
+    init(model: WallModel) {
         self.model = model
     }
 
@@ -269,12 +297,64 @@ public struct CanvasResetLayoutAction: ACTAActionProtocol {
         }
         return ACTAActionResult(actionID: id, success: true, summary: "Canvas layout reset to default grid.", outputJSON: "{\"reset\": true}")
     }
+
+    public func verify(parameters: [String: String], context: ACTAActionContext) async throws -> Bool {
+        try await MainActor.run {
+            let persisted = try VideoWallLayout.load(from: model.layoutURL)
+            return model.layout == VideoWallLayout() && persisted == VideoWallLayout()
+        }
+    }
+}
+
+// Providers bridge actions to the same MainActor methods used by SettingsHub.
+// These providers do not create a second configuration store or a second engine.
+@MainActor
+struct WallSystemSettingsProvider: ACTASystemSettingsProvider {
+    unowned let model: WallModel
+    func loadConfiguration() async throws -> WallConfiguration { model.config }
+    func saveConfiguration(_ config: WallConfiguration) async throws { try model.saveSystemSettings(config) }
+}
+
+@MainActor
+struct WallFeaturePreferencesProvider: ACTAFeaturePreferencesProvider {
+    unowned let model: WallModel
+    func loadPreferences() async throws -> CameraFeaturePreferences { model.featurePreferences }
+    func savePreferences(_ prefs: CameraFeaturePreferences) async throws {
+        let changed = CameraFeatureID.allCases.filter {
+            model.featurePreferences.enabledFeatures.contains($0) != prefs.enabledFeatures.contains($0)
+        }
+        // Each feature action changes one lifecycle; reject a batch rather than partially apply it.
+        guard changed.count <= 1 else {
+            throw ConfigurationError.invalid("Only one feature lifecycle can be changed per action.")
+        }
+        if let feature = changed.first {
+            guard prefs.allowExternalAI == model.featurePreferences.allowExternalAI,
+                  prefs.allowVoiceInput == model.featurePreferences.allowVoiceInput,
+                  prefs.allowPlateRegistryLookup == model.featurePreferences.allowPlateRegistryLookup else {
+                throw ConfigurationError.invalid("Feature and permission changes require separate actions.")
+            }
+            try model.setFeatureEnabled(feature, enabled: prefs.enabledFeatures.contains(feature))
+            return
+        }
+        try model.saveFeaturePolicy(prefs)
+    }
+}
+
+@MainActor
+struct WallAnalyticsSettingsProvider: ACTAVideoAnalyticsSettingsProvider {
+    unowned let model: WallModel
+    func loadSettings() async -> VideoAnalyticsSettings { model.localAnalyticsEngine.settings }
+    func updateSettings(_ mutate: @Sendable (inout VideoAnalyticsSettings) -> Void) async throws {
+        var settings = model.localAnalyticsEngine.settings
+        mutate(&settings)
+        try model.localAnalyticsEngine.updateSettings(settings)
+    }
 }
 
 // MARK: - Registration Helper
 
 @MainActor
-public func registerAllWallActions(registry: ACTAActionRegistry, model: WallModel) async {
+func registerAllWallActions(registry: ACTAActionRegistry, model: WallModel) async {
     await registry.register(CameraListAction(model: model))
     await registry.register(CameraGetAction(model: model))
     await registry.register(CameraSetEnabledAction(model: model))
@@ -283,15 +363,19 @@ public func registerAllWallActions(registry: ACTAActionRegistry, model: WallMode
     await registry.register(CanvasSetColumnsAction(model: model))
     await registry.register(CanvasResetLayoutAction(model: model))
 
+    let settings = WallSystemSettingsProvider(model: model)
+    let features = WallFeaturePreferencesProvider(model: model)
+    let analytics = WallAnalyticsSettingsProvider(model: model)
+
     // Core Settings Actions
-    await registry.register(SettingsGetSectionAction())
-    await registry.register(SettingsUpdateSystemAction())
-    await registry.register(SettingsUpdateFeatureTogglesAction())
-    await registry.register(SettingsUpdatePermissionsAction())
+    await registry.register(SettingsGetSectionAction(settingsProvider: settings, featureProvider: features))
+    await registry.register(SettingsUpdateSystemAction(settingsProvider: settings))
+    await registry.register(SettingsUpdateFeatureTogglesAction(featureProvider: features))
+    await registry.register(SettingsUpdatePermissionsAction(featureProvider: features))
 
     // Core Analytics Actions
-    await registry.register(AnalyticsGetSettingsAction())
-    await registry.register(AnalyticsSetGlobalToggleAction())
+    await registry.register(AnalyticsGetSettingsAction(analyticsProvider: analytics))
+    await registry.register(AnalyticsSetGlobalToggleAction(analyticsProvider: analytics))
 
     // Core Incident Actions
     await registry.register(IncidentListAction())

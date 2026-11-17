@@ -13,21 +13,10 @@ enum ACTAClearISAPIEventsError: Error {
 protocol ACTAISAPIEventMemory: Sendable {
     var isAvailable: Bool { get }
     var events: [ISAPIEventRecord] { get }
-    func clearEvents() -> Bool
-}
-
-@MainActor
-final class ACTAWallISAPIEventMemory: ACTAISAPIEventMemory {
-    private weak var model: WallModel?
-
-    init(model: WallModel) { self.model = model }
-    var isAvailable: Bool { model?.actaISAPIEventsLoaded == true }
-    var events: [ISAPIEventRecord] { model?.isapiEvents ?? [] }
-    func clearEvents() -> Bool {
-        guard let model else { return false }
-        model.isapiEvents = []
-        return true
-    }
+    /// Exact bytes observed when the current memory was last loaded or saved and verified.
+    var persistedBytes: Data? { get }
+    /// Commit both memory and its disk baseline together on the main actor.
+    func commitClear(persistedBytes: Data) -> Bool
 }
 
 /// Shared synchronous main-actor operation for the GUI and the agent.
@@ -61,6 +50,8 @@ final class ACTAClearISAPIEventsService {
         let disk: [ISAPIEventRecord]
         do { disk = try JSONDecoder().decode([ISAPIEventRecord].self, from: before) }
         catch { throw ACTAClearISAPIEventsError.invalidData }
+        guard let baseline = memory.persistedBytes else { throw ACTAClearISAPIEventsError.unavailable }
+        guard before == baseline else { throw ACTAClearISAPIEventsError.changed }
         let live = memory.events
         let diskByID = Dictionary(disk.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         guard diskByID.count == disk.count, live.count == disk.count,
@@ -77,20 +68,26 @@ final class ACTAClearISAPIEventsService {
         }
 
         // Even a throwing save may have replaced the file (for example chmod failure).
+        let persistedBytes: Data
         do {
             try writeEmpty()
-            let persisted = try JSONDecoder().decode([ISAPIEventRecord].self, from: read())
+            persistedBytes = try read()
+            let persisted = try JSONDecoder().decode([ISAPIEventRecord].self, from: persistedBytes)
             guard persisted.isEmpty else { throw ACTAClearISAPIEventsError.partialFailure }
         } catch {
             throw ACTAClearISAPIEventsError.partialFailure
         }
-        guard memory.clearEvents() else { throw ACTAClearISAPIEventsError.partialFailure }
+        guard memory.commitClear(persistedBytes: persistedBytes), memory.isAvailable,
+              memory.events.isEmpty, memory.persistedBytes == persistedBytes else {
+            throw ACTAClearISAPIEventsError.partialFailure
+        }
     }
 
     func isCleared() throws -> Bool {
         guard memory.isAvailable else { throw ACTAClearISAPIEventsError.unavailable }
-        let persisted = try JSONDecoder().decode([ISAPIEventRecord].self, from: read())
-        return persisted.isEmpty && memory.events.isEmpty
+        let bytes = try read()
+        let persisted = try JSONDecoder().decode([ISAPIEventRecord].self, from: bytes)
+        return persisted.isEmpty && memory.events.isEmpty && memory.persistedBytes == bytes
     }
 }
 
@@ -121,7 +118,7 @@ struct ACTAClearISAPIEventsAction: ACTAActionProtocol {
             } catch ACTAClearISAPIEventsError.changed {
                 return .failed(actionID: id, error: "CONFLICT: ISAPI history changed; nothing was cleared.")
             } catch ACTAClearISAPIEventsError.partialFailure {
-                return .failed(actionID: id, error: "PARTIAL_FAILURE: The disk may have changed; memory was not cleared.")
+                return .failed(actionID: id, error: "PARTIAL_FAILURE: Disk or memory may have changed; reconcile before retrying.")
             } catch {
                 return .failed(actionID: id, error: "UNAVAILABLE: ISAPI history is unavailable; nothing was cleared.")
             }

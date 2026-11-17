@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import SQLite3
+import Darwin
 
 public struct TrackedAttribute: Codable, Equatable, Sendable {
     public let value: String
@@ -1840,10 +1841,39 @@ public final class LocalTrackingStore: @unchecked Sendable {
         _ record: ACTANarrativeChapterRecord,
         collageJPEG: Data? = nil
     ) throws {
+        try writeACTANarrativeChapterRecord(record, collageJPEG: collageJPEG, insertOnly: false)
+    }
+
+    public func insertACTANarrativeChapterRecord(
+        _ record: ACTANarrativeChapterRecord,
+        collageJPEG: Data? = nil
+    ) throws {
+        try writeACTANarrativeChapterRecord(record, collageJPEG: collageJPEG, insertOnly: true)
+    }
+
+    private func writeACTANarrativeChapterRecord(
+        _ record: ACTANarrativeChapterRecord,
+        collageJPEG: Data?,
+        insertOnly: Bool
+    ) throws {
         let data = try JSONEncoder().encode(record.narrative)
         guard let json = String(data: data, encoding: .utf8) else { return }
         lock.lock()
         defer { lock.unlock() }
+        var transactionOpen = false
+        if insertOnly {
+            try execute("BEGIN IMMEDIATE")
+            transactionOpen = true
+        }
+        defer { if transactionOpen { try? execute("ROLLBACK") } }
+        if insertOnly {
+            let existing = try prepare("SELECT 1 FROM ghost_narrative_chapters WHERE chapter_id = ?")
+            defer { sqlite3_finalize(existing) }
+            bind(record.chapterID, at: 1, to: existing)
+            let result = sqlite3_step(existing)
+            if result == SQLITE_ROW { throw LocalTrackingStoreError.query("Narrative chapter already exists") }
+            guard result == SQLITE_DONE else { throw databaseError() }
+        }
 
         var savedCollagePath = record.collagePath
         if let collageJPEG, !collageJPEG.isEmpty {
@@ -1854,16 +1884,21 @@ public final class LocalTrackingStore: @unchecked Sendable {
             )
             let name = "narrative_\(record.chapterID.lowercased()).jpg"
             let url = cropDirectory.appendingPathComponent(name)
-            try collageJPEG.write(to: url, options: [.atomic])
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            if insertOnly {
+                let descriptor = open(url.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+                guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                let file = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+                defer { try? file.close() }
+                try file.write(contentsOf: collageJPEG)
+                try file.close()
+            } else {
+                try collageJPEG.write(to: url, options: [.atomic])
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            }
             savedCollagePath = name
         }
 
-        let statement = try prepare("""
-            INSERT INTO ghost_narrative_chapters(
-                chapter_id, camera_id, camera_name, started_at, ended_at, chapter_json,
-                ai_summary, operator_text, operator_marked, pinned, frame_count, sighting_count, identity_count, collage_path
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        let conflictClause = insertOnly ? "ON CONFLICT(chapter_id) DO NOTHING" : """
             ON CONFLICT(chapter_id) DO UPDATE SET
                 camera_id = excluded.camera_id,
                 camera_name = excluded.camera_name,
@@ -1878,6 +1913,13 @@ public final class LocalTrackingStore: @unchecked Sendable {
                 sighting_count = MAX(ghost_narrative_chapters.sighting_count, excluded.sighting_count),
                 identity_count = MAX(ghost_narrative_chapters.identity_count, excluded.identity_count),
                 collage_path = COALESCE(excluded.collage_path, ghost_narrative_chapters.collage_path)
+            """
+        let statement = try prepare("""
+            INSERT INTO ghost_narrative_chapters(
+                chapter_id, camera_id, camera_name, started_at, ended_at, chapter_json,
+                ai_summary, operator_text, operator_marked, pinned, frame_count, sighting_count, identity_count, collage_path
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            \(conflictClause)
             """)
         defer { sqlite3_finalize(statement) }
         bind(record.chapterID, at: 1, to: statement)
@@ -1895,6 +1937,10 @@ public final class LocalTrackingStore: @unchecked Sendable {
         sqlite3_bind_int(statement, 13, Int32(record.identityCount))
         if let savedCollagePath { bind(savedCollagePath, at: 14, to: statement) } else { sqlite3_bind_null(statement, 14) }
         guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseError() }
+        if insertOnly {
+            try execute("COMMIT")
+            transactionOpen = false
+        }
     }
 
     public func setACTANarrativePinned(chapterID: String, pinned: Bool) throws {

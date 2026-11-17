@@ -8,11 +8,15 @@ final class ACTAClearISAPIEventsActionTests: XCTestCase {
     private final class Memory: ACTAISAPIEventMemory {
         var isAvailable = true
         var events: [ISAPIEventRecord]
+        var persistedBytes: Data?
+        var failCommit = false
         var onClear: (() -> Void)?
         init(_ events: [ISAPIEventRecord]) { self.events = events }
-        func clearEvents() -> Bool {
+        func commitClear(persistedBytes: Data) -> Bool {
             onClear?()
+            if failCommit { return false }
             events = []
+            self.persistedBytes = persistedBytes
             return true
         }
     }
@@ -24,12 +28,13 @@ final class ACTAClearISAPIEventsActionTests: XCTestCase {
     }
 
     private func fixture() throws -> (URL, URL, Memory) {
-        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(".isapi-clear-test-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         let url = root.appendingPathComponent("events.json")
         let memory = Memory([event()])
         try ISAPIEventStore.save(memory.events, to: url)
+        memory.persistedBytes = try Data(contentsOf: url)
         return (root, url, memory)
     }
 
@@ -97,6 +102,14 @@ final class ACTAClearISAPIEventsActionTests: XCTestCase {
         }
         XCTAssertEqual(try Data(contentsOf: url), changed)
         XCTAssertEqual(memory.events.count, 1)
+
+        let sameEventsDifferentBytes = try JSONEncoder().encode(memory.events)
+        try sameEventsDifferentBytes.write(to: url)
+        XCTAssertNotEqual(sameEventsDifferentBytes, memory.persistedBytes)
+        XCTAssertThrowsError(try service.clear(confirmed: true)) {
+            guard case ACTAClearISAPIEventsError.changed = $0 else { return XCTFail("Expected conflict") }
+        }
+        XCTAssertEqual(try Data(contentsOf: url), sameEventsDifferentBytes)
     }
 
     func testChangeBetweenReadsDoesNotWrite() throws {
@@ -116,6 +129,23 @@ final class ACTAClearISAPIEventsActionTests: XCTestCase {
         XCTAssertEqual(writes, 0)
         XCTAssertEqual(try Data(contentsOf: url), original)
         XCTAssertEqual(memory.events.count, 1)
+    }
+
+    func testMissingBaselineFailsClosedAndCommitFailureIsPartial() async throws {
+        let (root, url, memory) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bytes = try Data(contentsOf: url)
+        let action = ACTAClearISAPIEventsAction(service: ACTAClearISAPIEventsService(memory: memory, url: url))
+        memory.persistedBytes = nil
+        let unavailable = try await action.execute(parameters: [:], context: ACTAActionContext(isConfirmed: true))
+        XCTAssertTrue(unavailable.error?.contains("UNAVAILABLE") == true)
+        XCTAssertEqual(try Data(contentsOf: url), bytes)
+        memory.persistedBytes = bytes
+        memory.failCommit = true
+        let partial = try await action.execute(parameters: [:], context: ACTAActionContext(isConfirmed: true))
+        XCTAssertTrue(partial.error?.contains("PARTIAL_FAILURE") == true)
+        XCTAssertEqual(memory.events.count, 1)
+        XCTAssertEqual(try JSONDecoder().decode([ISAPIEventRecord].self, from: Data(contentsOf: url)), [])
     }
 
     func testWriteOrReadbackFailureReportsPartialAndPreservesMemory() async throws {

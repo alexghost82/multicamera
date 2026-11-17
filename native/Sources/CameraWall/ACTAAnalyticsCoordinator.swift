@@ -141,6 +141,7 @@ public struct ACTACameraNarrativeState: Sendable {
         activeTrackIDs: [String] = [],
         activeIdentityIDs: [String] = [],
         modeOverride: ACTANarrativeTriggerMode? = nil,
+        allowFlush: Bool = true,
         at timestamp: Date
     ) -> (frames: [ACTANarrativeSampledFrame], sightingCount: Int, identityCount: Int)? {
         let activeMode = modeOverride ?? mode
@@ -198,7 +199,7 @@ public struct ACTACameraNarrativeState: Sendable {
         }
 
         let elapsed = timestamp.timeIntervalSince(chapterStartedAt ?? timestamp)
-        if sampledFrames.count >= Self.flushFrameThreshold || (sampledFrames.count >= 4 && elapsed >= Self.flushTimeoutSec) {
+        if allowFlush && (sampledFrames.count >= Self.flushFrameThreshold || (sampledFrames.count >= 4 && elapsed >= Self.flushTimeoutSec)) {
             return drainForFlush()
         }
         return nil
@@ -227,9 +228,31 @@ public enum ACTANarrativeFlushOutcome: Sendable, Equatable {
     case notAttempted
     case saved
     case notVerified
+    case backpressure
 
     public static let notVerifiedNotice =
-        "A narrative chapter could not be verified as saved. Buffered frames may have been lost; check local memory storage."
+        "A narrative chapter could not be verified as saved. Any pending frames remain in process memory; recovery and crash survival are not guaranteed."
+    public static let backpressureNotice =
+        "Narrative sampling is paused because its in-memory buffer is full. New frames are not being accepted; pending chapters are not guaranteed saved."
+}
+
+private struct ACTAReservedNarrativeBatch {
+    let chapterID: String
+    let cameraName: String
+    let frames: [ACTANarrativeSampledFrame]
+    let sightingCount: Int
+    let identityCount: Int
+    let previousSummary: String?
+    var inFlight: Bool
+    var retryAllowed: Bool
+    var attemptedRecord: ACTANarrativeChapterRecord? = nil
+    var attemptedJPEG: Data? = nil
+}
+
+private enum ACTANarrativeFlushAttempt {
+    case saved(ACTANarrativeChapterRecord)
+    case notStarted
+    case uncertain
 }
 
 /// A live camera snapshot captured when the operator asks Ghost Chat a question.
@@ -345,6 +368,7 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
 
     private var alertRingsByCamera: [UUID: ACTACameraAlertRingState] = [:]
     private var narrativeStatesByCamera: [UUID: ACTACameraNarrativeState] = [:]
+    private var reservedNarrativesByCamera: [UUID: ACTAReservedNarrativeBatch] = [:]
     private var recentAlertTimestamps: [Date] = []
     private var lastAlertDedupByKey: [String: Date] = [:]
 
@@ -900,13 +924,14 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         evaluateAlerts: Bool = true,
         sampleNarrative: Bool = true,
         retainCollageJPEG: Bool = true,
+        narrativePrivacy: (@MainActor @Sendable () -> (enabled: Bool, retain: Bool))? = nil,
         now: Date = Date()
     ) async -> ACTANarrativeFlushOutcome {
         let effectiveLabels = activeLabels.isEmpty ? (hasActiveObjects ? ["person"] : []) : activeLabels
-        let (ringReady, narrativeFlush, prevNarrativeSummary): ([ACTAAlertRingFrame]?, (frames: [ACTANarrativeSampledFrame], sightingCount: Int, identityCount: Int)?, String?) = lock.withLock {
+        let (ringReady, batch, backpressure): ([ACTAAlertRingFrame]?, ACTAReservedNarrativeBatch?, Bool) = lock.withLock {
             var rReady: [ACTAAlertRingFrame]?
-            var nFlush: (frames: [ACTANarrativeSampledFrame], sightingCount: Int, identityCount: Int)?
-            var pSummary: String?
+            var attempt: ACTAReservedNarrativeBatch?
+            var full = false
 
             if evaluateAlerts {
                 var ringState = alertRingsByCamera[cameraID] ?? ACTACameraAlertRingState()
@@ -918,22 +943,45 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
 
             if sampleNarrative {
                 var narState = narrativeStatesByCamera[cameraID] ?? ACTACameraNarrativeState()
-                if let flushed = narState.offerFrame(
-                    cgImage,
-                    activeLabels: effectiveLabels,
-                    activeTrackIDs: activeTrackIDs,
-                    activeIdentityIDs: activeIdentityIDs,
-                    modeOverride: narrativeMode,
-                    at: now
+                var reserved = reservedNarrativesByCamera[cameraID]
+                if narState.sampledFrames.count >= ACTACameraNarrativeState.flushFrameThreshold {
+                    full = true
+                    if reserved == nil, let flushed = narState.forceClose() {
+                        reserved = ACTAReservedNarrativeBatch(
+                            chapterID: UUID().uuidString, cameraName: cameraName, frames: flushed.frames,
+                            sightingCount: flushed.sightingCount, identityCount: flushed.identityCount,
+                            previousSummary: narState.lastChapterSummary, inFlight: false, retryAllowed: true)
+                    }
+                } else if let flushed = narState.offerFrame(
+                    cgImage, activeLabels: effectiveLabels, activeTrackIDs: activeTrackIDs,
+                    activeIdentityIDs: activeIdentityIDs, modeOverride: narrativeMode,
+                    allowFlush: reserved == nil, at: now
                 ) {
-                    nFlush = flushed
-                    pSummary = narState.lastChapterSummary
+                    reserved = ACTAReservedNarrativeBatch(
+                        chapterID: UUID().uuidString, cameraName: cameraName, frames: flushed.frames,
+                        sightingCount: flushed.sightingCount, identityCount: flushed.identityCount,
+                        previousSummary: narState.lastChapterSummary, inFlight: false, retryAllowed: true)
                 }
+                if var pending = reserved, !pending.inFlight, pending.retryAllowed {
+                    pending.inFlight = true
+                    reserved = pending
+                    attempt = pending
+                }
+                reservedNarrativesByCamera[cameraID] = reserved
                 narrativeStatesByCamera[cameraID] = narState
             }
-            return (rReady, nFlush, pSummary)
+            return (rReady, attempt, full)
         }
 
+        defer {
+            if let batch {
+                lock.withLock {
+                    if reservedNarrativesByCamera[cameraID]?.chapterID == batch.chapterID {
+                        reservedNarrativesByCamera[cameraID]?.inFlight = false
+                    }
+                }
+            }
+        }
         if evaluateAlerts, let ringReady, canDispatchAlertEvaluation(now: now) {
             await evaluateCriticalAlertRing(
                 cameraID: cameraID,
@@ -944,19 +992,15 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
             )
         }
 
-        if sampleNarrative, let narrativeFlush {
-            let saved = await flushNarrativeChapter(
-                cameraID: cameraID,
-                cameraName: cameraName,
-                sampledFrames: narrativeFlush.frames,
-                sightingCount: narrativeFlush.sightingCount,
-                identityCount: narrativeFlush.identityCount,
-                previousSummary: prevNarrativeSummary,
-                retainCollageJPEG: retainCollageJPEG
-            )
-            return saved == nil ? .notVerified : .saved
+        if let batch {
+            let result = await flushNarrativeChapter(cameraID: cameraID, batch: batch,
+                retainCollageJPEG: retainCollageJPEG, narrativePrivacy: narrativePrivacy)
+            finishNarrativeAttempt(cameraID: cameraID, batch: batch, result: result)
+            if backpressure { return .backpressure }
+            if case .saved = result { return .saved }
+            return .notVerified
         }
-        return .notAttempted
+        return backpressure ? .backpressure : .notAttempted
     }
 
     /// Immediately closes and summarizes the in-progress ACTA Memory chapter for a camera (e.g., on camera stop or operator button).
@@ -964,27 +1008,51 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
     public func forceCloseNarrativeChapter(
         cameraID: UUID,
         cameraName: String,
-        retainCollageJPEG: Bool = true
+        retainCollageJPEG: Bool = true,
+        narrativePrivacy: (@MainActor @Sendable () -> (enabled: Bool, retain: Bool))? = nil
     ) async -> ACTANarrativeChapterRecord? {
-        let (flushed, prevSummary): ((frames: [ACTANarrativeSampledFrame], sightingCount: Int, identityCount: Int)?, String?) = lock.withLock {
-            guard var state = narrativeStatesByCamera[cameraID],
-                  let drained = state.forceClose() else {
-                return (nil, nil)
+        let batch: ACTAReservedNarrativeBatch? = lock.withLock {
+            var pending = reservedNarrativesByCamera[cameraID]
+            if pending == nil, var state = narrativeStatesByCamera[cameraID], let drained = state.forceClose() {
+                pending = ACTAReservedNarrativeBatch(
+                    chapterID: UUID().uuidString, cameraName: cameraName, frames: drained.frames,
+                    sightingCount: drained.sightingCount, identityCount: drained.identityCount,
+                    previousSummary: state.lastChapterSummary, inFlight: false, retryAllowed: true)
+                narrativeStatesByCamera[cameraID] = state
             }
-            let prev = state.lastChapterSummary
-            narrativeStatesByCamera[cameraID] = state
-            return (drained, prev)
+            guard var pending, !pending.inFlight, pending.retryAllowed else { return nil }
+            pending.inFlight = true
+            reservedNarrativesByCamera[cameraID] = pending
+            return pending
         }
-        guard let flushed else { return nil }
-        return await flushNarrativeChapter(
-            cameraID: cameraID,
-            cameraName: cameraName,
-            sampledFrames: flushed.frames,
-            sightingCount: flushed.sightingCount,
-            identityCount: flushed.identityCount,
-            previousSummary: prevSummary,
-            retainCollageJPEG: retainCollageJPEG
-        )
+        guard let batch else { return nil }
+        defer {
+            lock.withLock {
+                if reservedNarrativesByCamera[cameraID]?.chapterID == batch.chapterID {
+                    reservedNarrativesByCamera[cameraID]?.inFlight = false
+                }
+            }
+        }
+        let result = await flushNarrativeChapter(cameraID: cameraID, batch: batch,
+            retainCollageJPEG: retainCollageJPEG, narrativePrivacy: narrativePrivacy)
+        finishNarrativeAttempt(cameraID: cameraID, batch: batch, result: result)
+        if case .saved(let saved) = result { return saved }
+        return nil
+    }
+
+    private func finishNarrativeAttempt(cameraID: UUID, batch: ACTAReservedNarrativeBatch, result: ACTANarrativeFlushAttempt) {
+        lock.withLock {
+            guard reservedNarrativesByCamera[cameraID]?.chapterID == batch.chapterID else { return }
+            switch result {
+            case .saved(let saved):
+                narrativeStatesByCamera[cameraID]?.lastChapterSummary = saved.aiSummary
+                reservedNarrativesByCamera[cameraID] = nil
+            case .notStarted:
+                break
+            case .uncertain:
+                break
+            }
+        }
     }
 
     private func canDispatchAlertEvaluation(now: Date) -> Bool {
@@ -1107,24 +1175,42 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
     @discardableResult
     private func flushNarrativeChapter(
         cameraID: UUID,
-        cameraName: String,
-        sampledFrames: [ACTANarrativeSampledFrame],
-        sightingCount: Int,
-        identityCount: Int,
-        previousSummary: String?,
-        retainCollageJPEG: Bool = true
-    ) async -> ACTANarrativeChapterRecord? {
-        guard let trackingStore else { return nil }
+        batch: ACTAReservedNarrativeBatch,
+        retainCollageJPEG: Bool,
+        narrativePrivacy: (@MainActor @Sendable () -> (enabled: Bool, retain: Bool))?
+    ) async -> ACTANarrativeFlushAttempt {
+        guard let trackingStore, !Task.isCancelled else { return .notStarted }
+        if let expected = batch.attemptedRecord {
+            return await MainActor.run {
+                let policy = narrativePrivacy?() ?? (enabled: true, retain: retainCollageJPEG)
+                guard policy.enabled, !Task.isCancelled else { return .notStarted }
+                guard batch.attemptedJPEG == nil || policy.retain else { return .uncertain }
+                do {
+                    guard let saved = try trackingStore.loadACTANarrativeChapterRecord(chapterID: batch.chapterID),
+                          saved == expected else { return .uncertain }
+                    if let jpeg = batch.attemptedJPEG {
+                        guard trackingStore.actaNarrativeCollageData(for: saved) == jpeg else { return .uncertain }
+                    }
+                    return .saved(saved)
+                } catch {
+                    return .uncertain
+                }
+            }
+        }
+        let cameraName = batch.cameraName
+        let sampledFrames = batch.frames
+        let sightingCount = batch.sightingCount
+        let identityCount = batch.identityCount
         guard let startedAt = sampledFrames.first?.capturedAt,
-              let endedAt = sampledFrames.last?.capturedAt else { return nil }
+              let endedAt = sampledFrames.last?.capturedAt else { return .notStarted }
         let thinned = ACTANarrativeSamplerRules.thinFrames(sampledFrames, maxFrames: ACTACameraNarrativeState.flushFrameThreshold)
         let cells = thinned.enumerated().map { idx, f in
             ACTACollageCell(badgeIndex: idx + 1, itemID: "N-\(idx + 1)", cgImage: f.cgImage)
         }
-        guard let collage = ACTACollageBuilder.buildCollage(kind: .narrative, cells: cells) else { return nil }
+        guard let collage = ACTACollageBuilder.buildCollage(kind: .narrative, cells: cells) else { return .notStarted }
 
         // If previousSummary is nil in RAM (e.g. after app restart), fetch the latest chapter for this camera from SQLite
-        let effectivePreviousSummary: String? = previousSummary ?? {
+        let effectivePreviousSummary: String? = batch.previousSummary ?? {
             guard let latest = try? trackingStore.loadACTANarrativeChapterRecords(cameraID: cameraID, limit: 1).first else {
                 return nil
             }
@@ -1159,7 +1245,7 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         )
 
         let record = ACTANarrativeChapterRecord(
-            chapterID: UUID().uuidString,
+            chapterID: batch.chapterID,
             cameraID: cameraID,
             cameraName: cameraName,
             startedAt: startedAt,
@@ -1174,28 +1260,37 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
             identityCount: identityCount,
             collagePath: nil
         )
-        do {
-            try trackingStore.saveACTANarrativeChapterRecord(
-                record,
-                collageJPEG: retainCollageJPEG ? collage.jpegData : nil
-            )
-            guard let saved = try trackingStore.loadACTANarrativeChapterRecord(chapterID: record.chapterID) else {
-                return nil
-            }
+        guard !Task.isCancelled else { return .notStarted }
+        return await MainActor.run {
+            let policy = narrativePrivacy?() ?? (enabled: true, retain: retainCollageJPEG)
+            guard policy.enabled, !Task.isCancelled else { return .notStarted }
             var expected = record
             expected.startedAt = Date(timeIntervalSince1970: record.startedAt.timeIntervalSince1970)
             expected.endedAt = Date(timeIntervalSince1970: record.endedAt.timeIntervalSince1970)
-            expected.collagePath = retainCollageJPEG ? "narrative_\(record.chapterID.lowercased()).jpg" : nil
-            guard saved == expected else { return nil }
-            if retainCollageJPEG {
-                guard trackingStore.actaNarrativeCollageData(for: saved) == collage.jpegData else { return nil }
-            }
+            expected.collagePath = policy.retain ? "narrative_\(record.chapterID.lowercased()).jpg" : nil
+            let jpeg = policy.retain ? collage.jpegData : nil
             lock.withLock {
-                narrativeStatesByCamera[cameraID]?.lastChapterSummary = saved.aiSummary
+                if reservedNarrativesByCamera[cameraID]?.chapterID == batch.chapterID {
+                    reservedNarrativesByCamera[cameraID]?.attemptedRecord = expected
+                    reservedNarrativesByCamera[cameraID]?.attemptedJPEG = jpeg
+                }
             }
-            return saved
-        } catch {
-            return nil
+            do {
+                try trackingStore.insertACTANarrativeChapterRecord(
+                    record,
+                    collageJPEG: jpeg
+                )
+                guard let saved = try trackingStore.loadACTANarrativeChapterRecord(chapterID: record.chapterID) else {
+                    return .uncertain
+                }
+                guard saved == expected else { return .uncertain }
+                if let jpeg {
+                    guard trackingStore.actaNarrativeCollageData(for: saved) == jpeg else { return .uncertain }
+                }
+                return .saved(saved)
+            } catch {
+                return .uncertain
+            }
         }
     }
 

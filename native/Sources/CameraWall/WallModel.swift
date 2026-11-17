@@ -3533,11 +3533,18 @@ final class WallModel: ObservableObject {
                     activeLabels: item.labels,
                     activeTrackIDs: item.trackIDs,
                     evaluateAlerts: alertsEnabled,
-                    sampleNarrative: memoryEnabled,
-                    retainCollageJPEG: retainFullFrames
+                    sampleNarrative: memoryEnabled && (self?.featurePreferences.enabledFeatures.contains(.chronologicalMemory) ?? false),
+                    retainCollageJPEG: retainFullFrames,
+                    narrativePrivacy: { [weak self] in
+                        guard let self else { return (false, false) }
+                        return (self.featurePreferences.enabledFeatures.contains(.chronologicalMemory),
+                                self.featurePreferences.retainFullFrames)
+                    }
                 )
                 if outcome == .notVerified {
                     self?.notice = ACTANarrativeFlushOutcome.notVerifiedNotice
+                } else if outcome == .backpressure {
+                    self?.notice = ACTANarrativeFlushOutcome.backpressureNotice
                 }
             }
             if descriptionsEnabled {
@@ -3613,7 +3620,12 @@ final class WallModel: ObservableObject {
             let saved = await ghost.forceCloseNarrativeChapter(
                 cameraID: cameraID,
                 cameraName: camName,
-                retainCollageJPEG: retainCollageJPEG
+                retainCollageJPEG: retainCollageJPEG,
+                narrativePrivacy: { [weak self] in
+                    guard let self else { return (false, false) }
+                    return (self.featurePreferences.enabledFeatures.contains(.chronologicalMemory),
+                            self.featurePreferences.retainFullFrames)
+                }
             )
             guard let self else { return }
             if let store = self.trackingStore {

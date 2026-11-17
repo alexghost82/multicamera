@@ -1875,6 +1875,7 @@
 "Invalid or duplicate parameter." = "Недопустимый или повторяющийся параметр.";
 "Could not clear local VLM alerts. The saved alert list may have changed; clips and review state were not cleared." = "Не удалось очистить локальные оповещения VLM. Сохранённый список мог измениться; клипы и состояние проверки не очищены.";
 "Alerts were cleared, but some clips or review state could not be removed." = "Оповещения очищены, но некоторые клипы или состояние проверки удалить не удалось.";
+"Clear ISAPI event history" = "Очистить историю событий ISAPI";
 "Incident missing or incident state is inconsistent." = "Инцидент не найден или его состояние несогласованно.";
 "Incident audit state is inconsistent." = "Состояние журнала инцидента несогласованно.";
 "Incident note audit verification failed." = "Не удалось проверить журнал заметки об инциденте.";

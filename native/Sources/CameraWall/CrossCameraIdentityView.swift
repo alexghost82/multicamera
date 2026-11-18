@@ -11,6 +11,8 @@ struct CrossCameraIdentityView: View {
     @State private var candidates: [ReIDValidationCandidate] = []
     @State private var proposals: [CrossCameraIdentityProposal] = []
     @State private var acceptedProposals: [CrossCameraIdentityProposal] = []
+    @State private var reviewSnapshot: CrossCameraIdentityReviewSnapshot?
+    @State private var pendingReview: CrossCameraIdentityPreparedReview?
     @State private var visitGroups: [CrossCameraVisitGroup] = []
     @State private var presenceCameraID: UUID?
     @State private var routeDestinationID: UUID?
@@ -22,6 +24,7 @@ struct CrossCameraIdentityView: View {
     @State private var attributeValue = ""
     @State private var message = "Identity review is disabled"
     @State private var isLoading = false
+    @State private var refreshGeneration = UUID()
 
     private var isEnabled: Bool { preferences.enabledFeatures.contains(.crossCameraIdentity) }
     private var recordsByID: [UUID: TrackedObjectRecord] { Dictionary(uniqueKeysWithValues: records.map { ($0.trackID, $0) }) }
@@ -174,6 +177,43 @@ struct CrossCameraIdentityView: View {
         }
         .background(ACTATheme.background)
         .onAppear(perform: load)
+        .sheet(item: $pendingReview) { prepared in
+            reviewConfirmation(prepared)
+        }
+    }
+
+    private func reviewConfirmation(_ prepared: CrossCameraIdentityPreparedReview) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(prepared.accept ? "Confirm appearance link" : "Confirm cannot-link decision")
+                .font(.headline)
+            Text("Appearance similarity is not identity proof. The evidence and graph will be checked again when confirmed.")
+            Text("Proposal: \(prepared.proposal.id.uuidString)")
+            Text("Category: \(prepared.proposal.category) · Distance: \(prepared.proposal.cosineDistance.formatted(.number.precision(.fractionLength(3))))")
+            ForEach([prepared.trackA, prepared.trackB]) { record in
+                VStack(alignment: .leading) {
+                    Text("\(record.trackID.uuidString) · \(record.cameraName) · \(record.label)")
+                    Text("\(record.firstSeen.formatted()) – \(record.lastSeen.formatted()) · \(record.observationCount) observations")
+                }
+            }
+            Text("Related tracks in the reviewed graph:")
+            ScrollView {
+                Text(prepared.affectedTrackIDs.map(\.uuidString).joined(separator: "\n"))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(height: 100)
+            Text("Image files are not included in this confirmation snapshot.")
+            HStack {
+                Spacer()
+                Button("Cancel") { pendingReview = nil }
+                Button("Confirm") {
+                    pendingReview = nil
+                    commitReview(prepared)
+                }
+            }
+        }
+        .padding(24)
+        .frame(minWidth: 560)
     }
 
     private func sectionHeader(_ title: String, count: Int) -> some View {
@@ -469,6 +509,9 @@ struct CrossCameraIdentityView: View {
 
     private func setEnabled(_ enabled: Bool) {
         do {
+            refreshGeneration = UUID()
+            isLoading = false
+            reviewSnapshot = nil
             if enabled { preferences.enabledFeatures.insert(.crossCameraIdentity) }
             else { preferences.enabledFeatures.remove(.crossCameraIdentity) }
             try CameraFeaturePreferencesStore.save(preferences)
@@ -490,25 +533,35 @@ struct CrossCameraIdentityView: View {
     }
 
     private func refresh() {
-        guard isEnabled, let featureStore, let trackingStore else { return }
+        guard !isLoading, isEnabled, let featureStore, let trackingStore else { return }
         isLoading = true
+        let generation = UUID()
+        refreshGeneration = generation
         let preferenceSnapshot = preferences
+        let service = CrossCameraIdentityReviewService(tracking: trackingStore, features: featureStore)
         Task { @MainActor in
             do {
                 let result = try await Task.detached(priority: .utility) {
-                    let existingTrackIDs = try trackingStore.trackIDs()
-                    _ = try featureStore.reconcileIdentityTracks(
-                        existingTrackIDs: existingTrackIDs,
-                        preferences: preferenceSnapshot
-                    )
+                    _ = try service.reconcile(preferences: preferenceSnapshot)
                     var records = try trackingStore.recentTracks(limit: 1000)
                     let samples = try trackingStore.reidValidationSamples(limit: 50_000)
                     let calibration = ReIDThresholdCalibrator.calibrate(
                         samples.map(\.pair),
                         targetPrecision: ReIDThresholdCalibrator.defaultTargetPrecision
                     )
-                    let acceptedProposals = try featureStore.identityProposals(status: .accepted)
-                    let assignments = try featureStore.crossCameraIdentityAssignments()
+                    let allCandidates = CrossCameraIdentityCandidateSelector.rankedReviewEvidence(
+                        try trackingStore.reidValidationCandidates(limit: 40)
+                    ).map(\.candidate)
+                    let autoProposals = CrossCameraIdentityCandidateSelector.calibratedReviewCandidates(
+                        allCandidates,
+                        recommendedDistance: calibration.recommendedDistance
+                    )
+                    for candidate in autoProposals {
+                        _ = try? service.propose(candidate: candidate, preferences: preferenceSnapshot)
+                    }
+                    let snapshot = try service.snapshot()
+                    let proposals = snapshot.proposals
+                    let assignments = snapshot.assignments
                     var history: [TrackedObjectRecord] = []
                     if !assignments.isEmpty {
                         try trackingStore.forEachRecentTrackPage { page in
@@ -518,24 +571,6 @@ struct CrossCameraIdentityView: View {
                     let loadedTrackIDs = Set(records.map(\.trackID))
                     records.append(contentsOf: history.filter { !loadedTrackIDs.contains($0.trackID) })
                     let visitGroups = CrossCameraVisitIndex.groups(records: history, identityByTrackID: assignments)
-                    let allCandidates = CrossCameraIdentityCandidateSelector.rankedReviewEvidence(
-                        try trackingStore.reidValidationCandidates(limit: 40)
-                    ).map(\.candidate)
-                    let autoProposals = CrossCameraIdentityCandidateSelector.calibratedReviewCandidates(
-                        allCandidates,
-                        recommendedDistance: calibration.recommendedDistance
-                    )
-                    for candidate in autoProposals {
-                        let category = candidate.trackA.label == "person" ? "person" : "vehicle"
-                        _ = try? featureStore.proposeIdentityMatch(
-                            trackA: candidate.trackA.trackID,
-                            trackB: candidate.trackB.trackID,
-                            category: category,
-                            cosineDistance: candidate.distance,
-                            preferences: preferenceSnapshot
-                        )
-                    }
-                    let proposals = try featureStore.identityProposals()
                     let recordIDs = Set(records.map(\.trackID))
                     let proposalTrackIDs = Set(proposals.flatMap { [$0.trackA, $0.trackB] })
                     for trackID in proposalTrackIDs.subtracting(recordIDs) {
@@ -544,15 +579,18 @@ struct CrossCameraIdentityView: View {
                     let candidates = try allCandidates.filter {
                         try !featureStore.hasIdentityDecision(trackA: $0.trackA.trackID, trackB: $0.trackB.trackID)
                     }
-                    return (records, proposals, acceptedProposals, visitGroups, candidates)
+                    return (records, proposals, snapshot.accepted, visitGroups, candidates, snapshot)
                 }.value
+                guard refreshGeneration == generation else { return }
                 self.records = result.0
                 self.proposals = result.1
                 self.acceptedProposals = result.2
                 self.visitGroups = result.3
                 self.candidates = result.4
+                self.reviewSnapshot = result.5
                 self.message = "Calibrated suggestions require operator review; appearance similarity is not identity proof. Manual groups are unchanged."
             } catch {
+                guard refreshGeneration == generation else { return }
                 self.message = "Could not refresh identity candidates: \(error.localizedDescription)"
             }
             self.isLoading = false
@@ -560,18 +598,11 @@ struct CrossCameraIdentityView: View {
     }
 
     private func createProposal(_ candidate: ReIDValidationCandidate) {
-        guard let featureStore else { return }
+        guard let featureStore, let trackingStore else { return }
         do {
-            guard let evidence = CrossCameraIdentityCandidateSelector.evidence(for: candidate) else {
-                throw CameraFeatureStoreError.invalidIdentityProposal
-            }
-            _ = try featureStore.proposeIdentityMatch(
-                trackA: candidate.trackA.trackID,
-                trackB: candidate.trackB.trackID,
-                category: evidence.category,
-                cosineDistance: candidate.distance,
-                preferences: preferences
-            )
+            let currentPreferences = try CameraFeaturePreferencesStore.load()
+            _ = try CrossCameraIdentityReviewService(tracking: trackingStore, features: featureStore)
+                .propose(candidate: candidate, preferences: currentPreferences)
             refresh()
         } catch {
             message = "Could not create identity proposal: \(error.localizedDescription)"
@@ -579,13 +610,23 @@ struct CrossCameraIdentityView: View {
     }
 
     private func review(_ proposal: CrossCameraIdentityProposal, accept: Bool) {
-        guard let featureStore else { return }
+        guard let featureStore, let trackingStore, let reviewSnapshot else { return }
         do {
-            _ = try featureStore.reviewIdentityProposal(
-                id: proposal.id,
-                accept: accept,
-                preferences: preferences
-            )
+            let currentPreferences = try CameraFeaturePreferencesStore.load()
+            pendingReview = try CrossCameraIdentityReviewService(tracking: trackingStore, features: featureStore)
+                .prepareReview(proposal: proposal, records: records, snapshot: reviewSnapshot,
+                               accept: accept, preferences: currentPreferences)
+        } catch {
+            message = "Could not prepare identity decision: \(error.localizedDescription)"
+        }
+    }
+
+    private func commitReview(_ prepared: CrossCameraIdentityPreparedReview) {
+        guard let featureStore, let trackingStore else { return }
+        do {
+            let currentPreferences = try CameraFeaturePreferencesStore.load()
+            _ = try CrossCameraIdentityReviewService(tracking: trackingStore, features: featureStore)
+                .review(prepared, preferences: currentPreferences)
             refresh()
         } catch {
             message = "Could not save identity decision: \(error.localizedDescription)"
@@ -593,9 +634,11 @@ struct CrossCameraIdentityView: View {
     }
 
     private func undo(_ proposal: CrossCameraIdentityProposal) {
-        guard let featureStore else { return }
+        guard let featureStore, let trackingStore, let reviewSnapshot else { return }
         do {
-            try featureStore.undoIdentityProposal(id: proposal.id, preferences: preferences)
+            let currentPreferences = try CameraFeaturePreferencesStore.load()
+            try CrossCameraIdentityReviewService(tracking: trackingStore, features: featureStore)
+                .undo(proposal: proposal, snapshot: reviewSnapshot, preferences: currentPreferences)
             refresh()
         } catch {
             message = "Could not undo identity decision: \(error.localizedDescription)"

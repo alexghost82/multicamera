@@ -364,10 +364,24 @@ func registerAllWallActions(registry: ACTAActionRegistry, model: WallModel, lang
     await registry.register(CameraListAction(model: model))
     await registry.register(CameraGetAction(model: model))
     await registry.register(CameraSetEnabledAction(model: model))
+    await registry.register(ACTACameraSetFavoriteAction(storage: ACTAUserDefaultsCameraFavoritesStorage(),
+        resolve: { [unowned model] value in actaResolveCamera(value, model: model)?.id }))
     await registry.register(CameraRemoveAction(model: model))
     await registry.register(CameraToggleExpandAction(model: model))
     await registry.register(CanvasSetColumnsAction(model: model))
     await registry.register(CanvasResetLayoutAction(model: model))
+    await registry.register(ACTACanvasSetFilterAction(bridge: model.canvasFilterBridge,
+        locationGroups: { [weak model] in
+            model.map { model in
+                Set(model.config.cameras.filter(\.enabled).map { camera in
+                    ACTACanvasFilterState.locationGroup(camera.location)
+                })
+            }
+        }))
+    await registry.register(ACTACanvasSetArrangeModeAction(bridge: model.canvasFilterBridge))
+    await registry.register(ACTACanvasSetPresentationAction(bridge: model.canvasFilterBridge))
+    await registry.register(ACTACanvasSelectCamerasAction(bridge: model.canvasFilterBridge,
+        enabledCameraIDs: { [weak model] in model?.config.cameras.filter(\.enabled).map(\.id) }))
 
     let settings = WallSystemSettingsProvider(model: model)
     let features = WallFeaturePreferencesProvider(model: model)
@@ -378,6 +392,7 @@ func registerAllWallActions(registry: ACTAActionRegistry, model: WallModel, lang
         await registry.register(WallSettingsAction(kind: kind, model: model))
     }
     await registry.register(WallAIBudgetAction(model: model))
+    await registry.register(WallAIConfigAction(model: model))
     if let languageSettings {
         await registry.register(ACTASystemLanguageAction(settingsProvider: settings, languageSettings: languageSettings))
     } else {

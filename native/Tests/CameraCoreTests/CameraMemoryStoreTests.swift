@@ -2,6 +2,11 @@ import XCTest
 @testable import CameraCore
 
 final class CameraMemoryStoreTests: XCTestCase {
+    private func fixtureURL() -> URL {
+        URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".memory-store-test-\(UUID().uuidString)")
+    }
+
     func testMemorySamplingCadenceAndSummaryAreDeterministic() {
         XCTAssertTrue(CameraMemoryStore.isSampleDue(lastSampleAt: nil, now: 1000))
         XCTAssertFalse(CameraMemoryStore.isSampleDue(lastSampleAt: 1000, now: 1000 + 899))
@@ -40,7 +45,7 @@ final class CameraMemoryStoreTests: XCTestCase {
     }
 
     func testMemoryFrameRoundTripsWithPrivatePermissions() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = fixtureURL()
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = CameraMemoryStore(url: directory)
         let capturedAt = Date(timeIntervalSince1970: 2_000_000)
@@ -57,7 +62,7 @@ final class CameraMemoryStoreTests: XCTestCase {
     }
 
     func testExpiredMemoryFramesArePurgedAfterSevenDays() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = fixtureURL()
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = CameraMemoryStore(url: directory)
         let capturedAt = Date(timeIntervalSince1970: 2_000_000)
@@ -70,7 +75,7 @@ final class CameraMemoryStoreTests: XCTestCase {
     }
 
     func testFrameSizeIsBoundedAndDeleteRemovesImage() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = fixtureURL()
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = CameraMemoryStore(url: directory)
         let capturedAt = Date(timeIntervalSince1970: 2_000_000)
@@ -86,7 +91,7 @@ final class CameraMemoryStoreTests: XCTestCase {
     }
 
     func testFrameCountCapEvictsOldestFramesFirst() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = fixtureURL()
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = CameraMemoryStore(url: directory)
         let start = Date(timeIntervalSince1970: 2_000_000)

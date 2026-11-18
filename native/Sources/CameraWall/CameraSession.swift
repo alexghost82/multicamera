@@ -18,11 +18,25 @@ struct SessionFrame {
     var measuredFPS: Double = 0
 }
 
+private final class ScreenCaptureStream: ScreenCaptureLifecycleStream {
+    let stream: SCStream
+
+    init(_ stream: SCStream) { self.stream = stream }
+
+    func start(completion: @escaping (Error?) -> Void) {
+        stream.startCapture(completionHandler: completion)
+    }
+
+    func stop(completion: @escaping (Error?) -> Void) {
+        stream.stopCapture(completionHandler: completion)
+    }
+}
+
 final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     // Capture configuration and delegate callbacks are serialized on queue.
     private var capture: AVCaptureSession?
     private var captureDevice: AVCaptureDevice?
-    private var screenStream: SCStream?
+    private let screenLifecycle = ScreenCaptureLifecycle()
     private var fpsStarted: TimeInterval = 0
     private var fpsFrames = 0
     private let condition = NSCondition()
@@ -64,14 +78,11 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         frame = SessionFrame()
         condition.broadcast()
         condition.unlock()
+        screenLifecycle.stop()
         queue.async { [self] in
             capture?.stopRunning()
             capture = nil
             captureDevice = nil
-            if let screenStream {
-                Task { try? await screenStream.stopCapture() }
-                self.screenStream = nil
-            }
         }
     }
 
@@ -89,13 +100,16 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             queue.async { [self] in maintainCapture(deviceID: deviceID) }
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { [weak self] allowed in
-                guard let self else { return }
-                if allowed { self.queue.async { self.maintainCapture(deviceID: deviceID) } }
-                else { self.setError("Allow CameraWall in System Settings → Privacy & Security → Camera.") }
+                self?.cameraAccessResolved(allowed: allowed, deviceID: deviceID)
             }
         default:
             setError("Allow CameraWall in System Settings → Privacy & Security → Camera.")
         }
+    }
+
+    func cameraAccessResolved(allowed: Bool, deviceID: String) {
+        if allowed { queue.async { [self] in maintainCapture(deviceID: deviceID) } }
+        else { setError("Allow CameraWall in System Settings → Privacy & Security → Camera.") }
     }
 
     func startScreen(displayID: String) {
@@ -113,12 +127,10 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     }
 
     private func startScreenCapture(displayID: UInt32) async {
-        guard !isStopped() else { return }
-        do {
+        await startScreenCapture {
             let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
             guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
-                setError("The selected screen is unavailable.")
-                return
+                throw ScreenCaptureError.displayUnavailable
             }
             let filter = SCContentFilter(display: display, excludingWindows: [])
             let configuration = SCStreamConfiguration()
@@ -129,12 +141,31 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             configuration.showsCursor = true
             let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
-            screenStream = stream
-            try await stream.startCapture()
-            setError("Live · ScreenCaptureKit")
-        } catch {
-            setError("Screen capture could not start. Check Screen Recording permission.")
+            return ScreenCaptureStream(stream)
         }
+    }
+
+    private enum ScreenCaptureError: Error { case displayUnavailable }
+
+    func startScreenCapture(makeStream: () async throws -> any ScreenCaptureLifecycleStream) async {
+        await screenLifecycle.start(makeStream: makeStream) { [weak self] result in
+            let message: String
+            switch result {
+            case .success:
+                message = "Live · ScreenCaptureKit"
+            case .failure(let error) where error is ScreenCaptureError:
+                message = "The selected screen is unavailable."
+            case .failure:
+                message = "Screen capture could not start. Check Screen Recording permission."
+            }
+            self?.setScreenMessage(message)
+        }
+    }
+
+    private func setScreenMessage(_ message: String) {
+        condition.lock()
+        defer { condition.unlock() }
+        if !stopped { frame.message = message }
     }
 
     private func maintainCapture(deviceID: String) {
@@ -181,7 +212,8 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
                     fpsStarted = ProcessInfo.processInfo.systemUptime
                     fpsFrames = 0
                     setError("Connecting to camera")
-                    session.startRunning()
+                    runLocalCaptureStart(start: { session.startRunning() },
+                                         stop: { session.stopRunning() })
                 } catch {
                     setError("Cannot open camera. Close other camera apps and check camera access.")
                 }
@@ -198,6 +230,20 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         }
     }
 
+    // startRunning can finish after stop was requested. Cleanup must happen on
+    // the capture queue as soon as it returns, before any queued retry runs.
+    func runLocalCaptureStart(start: () -> Void, stop: () -> Void) {
+        condition.lock()
+        let cancelled = stopped
+        condition.unlock()
+        guard !cancelled else { return }
+        start()
+        condition.lock()
+        let cancelledDuringStart = stopped
+        condition.unlock()
+        if cancelledDuringStart { stop() }
+    }
+
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
         guard let pixel = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
@@ -211,10 +257,7 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        condition.lock()
-        let shouldStop = stopped
-        condition.unlock()
-        if !shouldStop { setError("Screen capture stopped. Check Screen Recording permission.") }
+        setScreenMessage("Screen capture stopped. Check Screen Recording permission.")
     }
 
     func publish(_ pixel: CVPixelBuffer, message: String) {
@@ -279,24 +322,17 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
                     failures = 0
                 }
             }
+            retireDecoder { cw_destroy(handle) }
             condition.lock()
-            decoder = nil
-            cw_destroy(handle)
             if stopped { condition.unlock(); return }
             var buffer = [CChar](repeating: 0, count: 256)
             cw_error(error, &buffer, Int32(buffer.count))
             if filePlayback {
-                frame.pixel = nil
-                frame.reconnectEvidence = nil
-                frame.measuredFPS = 0
                 frame.message = cw_is_eof(error) != 0 ? "End of video" : String(cString: buffer)
                 condition.unlock()
                 return
             }
             frame.message = String(cString: buffer)
-            frame.pixel = nil
-            frame.reconnectEvidence = nil
-            frame.measuredFPS = 0
             frame.reconnects += 1
             failures += 1
             let delay = min(15.0, pow(2.0, Double(min(failures - 1, 4))))
@@ -309,15 +345,21 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         }
     }
 
-    private func setError(_ message: String) {
+    // Called on the decoder queue after its last read. A concurrent stop may
+    // see no handle, but must never wait for decoder destruction.
+    func retireDecoder(destroy: () -> Void) {
         condition.lock()
-        frame.message = message
+        decoder = nil
+        frame.pixel = nil
+        frame.reconnectEvidence = nil
+        frame.measuredFPS = 0
         condition.unlock()
+        destroy()
     }
 
-    private func isStopped() -> Bool {
+    private func setError(_ message: String) {
         condition.lock()
-        defer { condition.unlock() }
-        return stopped
+        if !stopped { frame.message = message }
+        condition.unlock()
     }
 }

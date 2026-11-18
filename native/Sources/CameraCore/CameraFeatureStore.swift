@@ -82,6 +82,7 @@ public enum CameraFeatureStoreError: LocalizedError {
     case identityProposalNotFound(UUID)
     case identityProposalNotUndoable(UUID)
     case identityProposalAlreadyUndone(UUID)
+    case identityReviewStale
 
     public var errorDescription: String? {
         switch self {
@@ -105,6 +106,7 @@ public enum CameraFeatureStoreError: LocalizedError {
         case .identityProposalNotFound(let id): "Identity proposal \(id) was not found."
         case .identityProposalNotUndoable(let id): "Identity proposal \(id) has not been accepted."
         case .identityProposalAlreadyUndone(let id): "Identity proposal \(id) was already undone."
+        case .identityReviewStale: "Identity review evidence or graph changed; refresh before reviewing."
         }
     }
 }
@@ -717,7 +719,7 @@ public final class CameraFeatureStore: @unchecked Sendable {
     }
 
     @discardableResult
-    public func proposeIdentityMatch(
+    func proposeIdentityMatch(
         trackA: UUID,
         trackB: UUID,
         category: String,
@@ -786,10 +788,12 @@ public final class CameraFeatureStore: @unchecked Sendable {
         }
     }
 
-    public func reviewIdentityProposal(
+    func reviewIdentityProposal(
         id: UUID,
         accept: Bool,
         preferences: CameraFeaturePreferences,
+        expectedProposal: CrossCameraIdentityProposal? = nil,
+        expectedGraph: [String]? = nil,
         at time: Date = Date()
     ) throws -> CrossCameraIdentityProposal {
         try requireEnabled(.crossCameraIdentity, preferences: preferences)
@@ -798,6 +802,12 @@ public final class CameraFeatureStore: @unchecked Sendable {
                 let current = try identityProposal(id: id)
                 guard current.status == .pending else {
                     throw CameraFeatureStoreError.identityProposalNotPending(id)
+                }
+                if let expectedProposal, current != expectedProposal {
+                    throw CameraFeatureStoreError.identityReviewStale
+                }
+                if let expectedGraph, try identityReviewGraph() != expectedGraph {
+                    throw CameraFeatureStoreError.identityReviewStale
                 }
                 var identityID: UUID?
                 if accept {
@@ -832,15 +842,23 @@ public final class CameraFeatureStore: @unchecked Sendable {
         }
     }
 
-    public func undoIdentityProposal(
+    func undoIdentityProposal(
         id: UUID,
         preferences: CameraFeaturePreferences,
+        expectedProposal: CrossCameraIdentityProposal? = nil,
+        expectedGraph: [String]? = nil,
         at time: Date = Date()
     ) throws {
         try requireEnabled(.crossCameraIdentity, preferences: preferences)
         try locked {
             try transaction {
                 let proposal = try identityProposal(id: id)
+                if let expectedProposal, proposal != expectedProposal {
+                    throw CameraFeatureStoreError.identityReviewStale
+                }
+                if let expectedGraph, try identityReviewGraph() != expectedGraph {
+                    throw CameraFeatureStoreError.identityReviewStale
+                }
                 guard proposal.status == .accepted else {
                     throw CameraFeatureStoreError.identityProposalNotUndoable(id)
                 }
@@ -1077,7 +1095,7 @@ public final class CameraFeatureStore: @unchecked Sendable {
     }
 
     @discardableResult
-    public func reconcileIdentityTracks(
+    func reconcileIdentityTracks(
         existingTrackIDs: Set<UUID>,
         preferences: CameraFeaturePreferences,
         at time: Date = Date()
@@ -1096,6 +1114,7 @@ public final class CameraFeatureStore: @unchecked Sendable {
                         sqlite3_finalize(insert)
                         throw databaseError()
                     }
+
                 }
                 sqlite3_finalize(insert)
                 try execute("""
@@ -1120,6 +1139,37 @@ public final class CameraFeatureStore: @unchecked Sendable {
                 try rebuildCrossCameraIdentities(at: time)
                 return removedProposals
             }
+        }
+    }
+
+    func identityReviewSnapshot() throws -> (proposals: [CrossCameraIdentityProposal], accepted: [CrossCameraIdentityProposal], assignments: [UUID: UUID], graph: [String]) {
+        try locked {
+            try transaction {
+                (try identityProposals(), try identityProposals(status: .accepted),
+                 try crossCameraIdentityAssignments(), try identityReviewGraph())
+            }
+        }
+    }
+
+    private func identityReviewGraph() throws -> [String] {
+        let statement = try prepare("""
+            SELECT 'link', track_id, identity_id FROM cross_camera_identity_links
+            UNION ALL
+            SELECT 'cannot', track_a, track_b FROM cross_camera_identity_cannot_links
+            UNION ALL
+            SELECT 'accepted', p.id, COALESCE(u.proposal_id, '')
+              FROM cross_camera_identity_proposals p
+              LEFT JOIN cross_camera_identity_undos u ON u.proposal_id = p.id
+             WHERE p.status = 'accepted'
+            ORDER BY 1, 2, 3
+            """)
+        defer { sqlite3_finalize(statement) }
+        var result: [String] = []
+        while true {
+            let step = sqlite3_step(statement)
+            if step == SQLITE_DONE { return result }
+            guard step == SQLITE_ROW else { throw databaseError() }
+            result.append("\(text(statement, 0)):\(text(statement, 1)):\(text(statement, 2))")
         }
     }
 

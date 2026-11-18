@@ -340,6 +340,7 @@ final class TileState: ObservableObject, Identifiable {
 
 @MainActor
 final class WallModel: ObservableObject {
+    let canvasFilterBridge = ACTACanvasFilterBridge()
     @Published var config = WallConfiguration()
     @Published var tiles: [UUID: TileState] = [:]
     @Published var expanded: UUID?
@@ -442,6 +443,8 @@ final class WallModel: ObservableObject {
     let configURL: URL
     private var relay: Go2RTC
     private let relayFactory: @MainActor () -> Go2RTC
+    private let reconnectAttempt = CameraReconnectAttempt()
+    private let reconnectDecoderStart: @MainActor (CameraSession, String) -> Void
     private var startup: Task<Void, Never>?
     private var switchTask: Task<Void, Never>?
     private var recovery: Task<Void, Never>?
@@ -533,14 +536,17 @@ final class WallModel: ObservableObject {
          missionStoreURL: URL = CameraMissionStore.defaultURL,
          missionConsultResponder: (@Sendable (String) async throws -> String)? = nil,
          cameraCredentialStore: any CameraCredentialStore = SystemCameraCredentialStore(),
+         reconnectDecoderStart: @escaping @MainActor (CameraSession, String) -> Void = { $0.start(url: $1) },
          operationsPreferencesURL: URL = OperationsPreferencesStore.defaultURL,
          alertClipStore: CriticalAlertClipStore = CriticalAlertClipStore(),
          languageSettings: LanguageSettings? = nil,
-         monitorHistoryURL: URL = LocalOperationsMonitorStore.defaultURL) {
+         monitorHistoryURL: URL = LocalOperationsMonitorStore.defaultURL,
+         analyticsModelDiscovery: AnalyticsModelDiscovery = .production) {
         self.monitorHistoryURL = monitorHistoryURL
         self.alertClipStore = alertClipStore
         self.operationsPreferencesURL = operationsPreferencesURL
         self.cameraCredentialStore = cameraCredentialStore
+        self.reconnectDecoderStart = reconnectDecoderStart
         self.missionConsultResponder = missionConsultResponder
         self.missionStoreURL = missionStoreURL
         self.cameraMemoryStore = cameraMemoryStore
@@ -555,7 +561,8 @@ final class WallModel: ObservableObject {
             incidentsURL: analyticsRoot.appendingPathComponent(UnifiedIncidentManager.defaultURL.lastPathComponent),
             evidenceDirectoryURL: analyticsRoot.appendingPathComponent(SafetyEvidenceStore.defaultURL.lastPathComponent),
             auditLogURL: analyticsRoot.appendingPathComponent(OperatorAuditLog.defaultURL.lastPathComponent),
-            poseModelURL: resolvedPoseURL)
+            poseModelURL: resolvedPoseURL,
+            modelDiscovery: analyticsModelDiscovery)
         self.workerEventSpool = workerMode ? try? WorkerEventSpool() : nil
         self.featureCoordinator = featureCoordinator
         let detector = YOLO26Detector()
@@ -843,6 +850,7 @@ final class WallModel: ObservableObject {
     }
 
     func stop() {
+        reconnectAttempt.cancel()
         localAnalyticsEngine.stopEngine()
         analyticsStreamSessions.removeAll()
         analyticsStreamReconnects.removeAll()
@@ -985,6 +993,7 @@ final class WallModel: ObservableObject {
 
     func toggleExpanded(_ camera: Camera) {
         guard !connecting else { return }
+        reconnectAttempt.cancel()
         let previous = expanded
         expanded = previous == camera.id ? nil : camera.id
         guard running else { return }
@@ -1003,10 +1012,64 @@ final class WallModel: ObservableObject {
     func reconnect(_ camera: Camera) {
         guard running, !connecting else { return }
         switchTask?.cancel()
+        reconnectAttempt.cancel()
         switchTask = Task {
-            do { try await connect(camera, expanded: expanded == camera.id) }
+            do {
+                guard let current = config.cameras.first(where: { $0.id == camera.id }), current.enabled else { return }
+                if current.fileURL == nil, current.localDeviceID == nil, current.screenDisplayID == nil {
+                    try await reconnectNetworkVerified(current)
+                } else {
+                    try await connect(current, expanded: expanded == current.id)
+                }
+            }
             catch is CancellationError {} catch { self.error = safeMessage(error) }
         }
+    }
+
+    func reconnectNetworkVerified(_ camera: Camera, timeout: Duration = .seconds(10)) async throws {
+        try Task.checkCancellation()
+        guard running, !connecting, camera.enabled,
+              camera.fileURL == nil, camera.localDeviceID == nil, camera.screenDisplayID == nil,
+              config.cameras.contains(camera), let tile = tiles[camera.id] else {
+            throw ConfigurationError.invalid("Camera is not available for reconnection.")
+        }
+        let selected = expanded
+        let originalSession = tile.session
+        let attemptRelay = relay
+        reconnectAttempt.cancel()
+        let credentials = try cameraCredentialStore.read(camera.id)
+        let startDecoder = reconnectDecoderStart
+        let verified = try await reconnectAttempt.run(timeout: timeout) { id in
+            NetworkReconnectSession(attemptID: id, register: {
+                try await attemptRelay.registerReconnect(camera: camera, expanded: selected == camera.id,
+                                                         attemptID: id, credentials: credentials)
+            }, startDecoder: startDecoder)
+        }
+        guard let candidate = verified.session as? NetworkReconnectSession else {
+            verified.session.stop()
+            throw CameraReconnectAttempt.Failure.invalidSession
+        }
+        var installed = false
+        defer { if !installed { candidate.stop() } }
+        try Task.checkCancellation()
+        let frame = candidate.session.snapshot()
+        let now = ContinuousClock.now
+        guard running, !connecting, relay === attemptRelay, expanded == selected,
+              config.cameras.contains(camera), tiles[camera.id] === tile,
+              tile.session === originalSession, frame.pixel != nil,
+              let evidence = frame.reconnectEvidence, evidence.attemptID == verified.attemptID,
+              evidence.sequence >= verified.frame.sequence, evidence.receivedAt <= now,
+              evidence.receivedAt.duration(to: now) <= .seconds(2) else {
+            throw CameraReconnectAttempt.Failure.superseded
+        }
+        localAnalyticsEngine.removeCamera(camera.id)
+        analyticsStreamSessions.removeValue(forKey: camera.id)
+        analyticsStreamReconnects.removeValue(forKey: camera.id)
+        trackAssigners.removeValue(forKey: camera.id)
+        fallDetectors.removeValue(forKey: camera.id)
+        tile.stop()
+        tile.session = candidate.session
+        installed = true
     }
 
     func save(ip: String, credentials: Credentials, original: Camera, progress: (String) -> Void) async throws {
@@ -1353,7 +1416,7 @@ final class WallModel: ObservableObject {
         }
     }
 
-    private static func makeACTAAIConfiguration(
+    static func makeACTAAIConfiguration(
         from preferences: VLMPreferences,
         featurePreferences: CameraFeaturePreferences
     ) -> ACTAAIConfiguration {
@@ -1622,11 +1685,11 @@ final class WallModel: ObservableObject {
     }
 
     func deleteCameraMemoryFrameChecked(_ id: UUID) throws {
-        guard let frame = try cameraMemoryStore.load().first(where: { $0.id == id }) else {
+        guard let frame = try cameraMemoryStore.deletionSnapshot().frames.first(where: { $0.id == id }) else {
             throw ConfigurationError.invalid("Memory frame does not exist.")
         }
         try cameraMemoryStore.delete(id)
-        cameraMemoryFrames = try cameraMemoryStore.load()
+        cameraMemoryFrames = try cameraMemoryStore.deletionSnapshot().frames
         guard !cameraMemoryFrames.contains(where: { $0.id == id }),
               try !cameraMemoryStore.hasStoredImage(for: frame) else {
             throw ConfigurationError.invalid("Memory deletion could not be verified on disk.")

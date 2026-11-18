@@ -88,24 +88,6 @@ private enum ACTASection: String, CaseIterable, Identifiable {
     }
 }
 
-private enum ACTACameraScope: String, CaseIterable, Identifiable {
-    case all = "All cameras"
-    case live = "Live"
-    case offline = "Offline"
-
-    var id: String { rawValue }
-    var title: LocalizedStringKey { LocalizedStringKey(rawValue) }
-}
-
-private enum ACTACameraPresentation: String, CaseIterable, Identifiable {
-    case grid
-    case list
-
-    var id: String { rawValue }
-    var title: LocalizedStringKey { self == .grid ? "Grid" : "List" }
-    var icon: String { self == .grid ? "square.grid.2x2" : "list.bullet" }
-}
-
 private struct CameraLocationGroup: Identifiable {
     let name: String
     let count: Int
@@ -126,18 +108,11 @@ struct ACTASecurityCenterView: View {
     var editCamera: (Camera) -> Void
     var removeCamera: (Camera) -> Void
 
-    @AppStorage("ACTA.favoriteCameraIDs") private var favoritesStorage = ""
+    @AppStorage(ACTACameraFavorites.key) private var favoritesStorage = ""
     @State private var section: ACTASection = .cameras
     @State private var requestedSettings = ACTASettingsSection.general
-    @State private var cameraScope: ACTACameraScope = .all
-    @State private var presentation: ACTACameraPresentation = .grid
+    @StateObject private var filters = ACTACanvasFilterState()
     @State private var referenceColumns = 4
-    @State private var arrangeCameras = false
-    @State private var locationFilter: String?
-    @State private var searchText = ""
-    @State private var alertsOnly = false
-    @State private var favoritesOnly = false
-    @State private var selectedCameraIDs: Set<UUID>?
     @State private var cameraPickerPresented = false
     @State private var aiChatPresented = false
     @State private var safetyIncidentsPresented = false
@@ -161,7 +136,7 @@ struct ACTASecurityCenterView: View {
     private let collapsedSidebarWidth: CGFloat = 64
     private let outerPadding: CGFloat = 12
     private var favoriteIDs: Set<UUID> {
-        Set(favoritesStorage.split(separator: ",").compactMap { UUID(uuidString: String($0)) })
+        ACTACameraFavorites.decode(favoritesStorage)
     }
 
     private var enabledCameras: [Camera] { model.config.cameras.filter(\.enabled) }
@@ -177,14 +152,13 @@ struct ACTASecurityCenterView: View {
     private var latestISAPIEvents: [ISAPIEventRecord] { model.isapiEvents.sorted { $0.receivedAt > $1.receivedAt } }
     private var locationGroups: [CameraLocationGroup] {
         let grouped = Dictionary(grouping: enabledCameras) { camera in
-            let location = camera.location?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return location.isEmpty ? "Other" : location
+            ACTACanvasFilterState.locationGroup(camera.location)
         }
         return grouped.map { CameraLocationGroup(name: $0.key, count: $0.value.count) }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
     private var selectedCameraCount: Int {
-        guard let selectedCameraIDs else { return enabledCameras.count }
+        guard let selectedCameraIDs = filters.selectedCameraIDs else { return enabledCameras.count }
         return enabledCameras.filter { selectedCameraIDs.contains($0.id) }.count
     }
     private var cameraPickerCameras: [Camera] {
@@ -195,14 +169,12 @@ struct ACTASecurityCenterView: View {
 
     private var filteredCameras: [Camera] {
         enabledCameras.filter { camera in
-            guard cameraScope == .all || (cameraScope == .live) == (model.tiles[camera.id]?.stale == false) else { return false }
-            let location = camera.location?.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard locationFilter == nil || (locationFilter == "Other" ? location?.isEmpty != false : location == locationFilter) else { return false }
-            guard !favoritesOnly || favoriteIDs.contains(camera.id) else { return false }
-                    guard !alertsOnly || model.vlmAlerts.contains(where: { $0.cameraID == camera.id })
-                        || model.isapiEvents.contains(where: { $0.cameraID == camera.id }) else { return false }
-            guard selectedCameraIDs == nil || selectedCameraIDs?.contains(camera.id) == true else { return false }
-            return searchText.isEmpty || "\(camera.name) \(camera.location ?? "")".localizedCaseInsensitiveContains(searchText)
+            guard filters.includes(name: camera.name, location: camera.location, stale: model.tiles[camera.id]?.stale,
+                                   favorite: favoriteIDs.contains(camera.id),
+                                   hasEvents: !filters.alertsOnly || model.vlmAlerts.contains(where: { $0.cameraID == camera.id })
+                                        || model.isapiEvents.contains(where: { $0.cameraID == camera.id })) else { return false }
+            guard filters.includesCamera(id: camera.id) else { return false }
+            return true
         }
     }
 
@@ -247,6 +219,8 @@ struct ACTASecurityCenterView: View {
         .frame(minWidth: 1280, minHeight: 800)
         .foregroundStyle(ACTATheme.textPrimary)
         .preferredColorScheme(.dark)
+        .onAppear { model.canvasFilterBridge.attach(filters) }
+        .onDisappear { model.canvasFilterBridge.detach(filters) }
         .sheet(item: $selectedAlert) { alert in
             alertDetail(alert)
         }
@@ -355,13 +329,13 @@ struct ACTASecurityCenterView: View {
 
     private func locationButton(name: String, count: Int, icon: String, collapsed: Bool, localizeName: Bool = false) -> some View {
         let displayName = localizeName ? languageSettings.localized(name) : name
-        let selected = locationFilter == (name == "All Locations" ? nil : name)
+        let selected = filters.locationFilter == (name == "All Locations" ? nil : name)
         return Button {
             section = .cameras
-            locationFilter = name == "All Locations" ? nil : name
-            cameraScope = .all
-            alertsOnly = false
-            favoritesOnly = false
+            filters.locationFilter = name == "All Locations" ? nil : name
+            filters.cameraScope = .all
+            filters.alertsOnly = false
+            filters.favoritesOnly = false
         } label: {
             HStack(spacing: ACTASpacing.regular) {
                 Image(systemName: icon).frame(width: 18)
@@ -467,7 +441,7 @@ struct ACTASecurityCenterView: View {
             Spacer(minLength: 8)
             HStack {
                 Image(systemName: "magnifyingglass").foregroundColor(.gray)
-                TextField(languageSettings.localized("Search cameras and locations…"), text: $searchText)
+                TextField(languageSettings.localized("Search cameras and locations…"), text: $filters.searchText)
                     .textFieldStyle(.plain).foregroundColor(.white).focused($searchFocused)
                 Text("⌘K").font(.caption).padding(4).background(Color.white.opacity(0.1)).cornerRadius(4).foregroundColor(.gray)
             }
@@ -497,8 +471,8 @@ struct ACTASecurityCenterView: View {
     private var referenceFilters: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                Button { cameraScope = .all; locationFilter = nil; alertsOnly = false; favoritesOnly = false } label: {
-                    FilterTag(title: languageSettings.localized("All cameras"), isActive: cameraScope == .all && locationFilter == nil)
+                Button { filters.cameraScope = .all; filters.locationFilter = nil; filters.alertsOnly = false; filters.favoritesOnly = false } label: {
+                    FilterTag(title: languageSettings.localized("All cameras"), isActive: filters.cameraScope == .all && filters.locationFilter == nil)
                 }
                 ForEach(LocalModelService.allCases, id: \.self) { service in
                     FilterTag(title: languageSettings.localized(service.title), isActive: false)
@@ -592,12 +566,12 @@ struct ACTASecurityCenterView: View {
     private func searchField(compact: Bool) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").foregroundStyle(ACTATheme.textMuted)
-            TextField("Search cameras, locations…", text: $searchText)
+            TextField("Search cameras, locations…", text: $filters.searchText)
                 .textFieldStyle(.plain)
                 .focused($searchFocused)
                 .accessibilityLabel("Search cameras and locations")
-            if !searchText.isEmpty {
-                Button { searchText = "" } label: { Image(systemName: "xmark.circle.fill") }
+            if !filters.searchText.isEmpty {
+                Button { filters.searchText = "" } label: { Image(systemName: "xmark.circle.fill") }
                     .buttonStyle(.plain)
                     .help("Clear search")
                     .accessibilityLabel("Clear camera search")
@@ -620,7 +594,7 @@ struct ACTASecurityCenterView: View {
             .help(languageSettings.localized("Add network camera"))
             .accessibilityLabel(languageSettings.localized("Add network camera"))
 
-            Picker("", selection: $presentation) {
+            Picker("", selection: $filters.presentation) {
                 ForEach(ACTACameraPresentation.allCases) { mode in
                     Image(systemName: mode.icon).tag(mode)
                         .accessibilityLabel(mode.title)
@@ -632,13 +606,13 @@ struct ACTASecurityCenterView: View {
             .accessibilityLabel("Camera view")
 
             Menu {
-                Picker("Camera status", selection: $cameraScope) {
+                Picker("Camera status", selection: $filters.cameraScope) {
                     ForEach(ACTACameraScope.allCases) { scope in Text(scope.title).tag(scope) }
                 }
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "line.3.horizontal.decrease")
-                    Text(cameraScope.title)
+                    Text(filters.cameraScope.title)
                         .font(.system(size: ACTAType.caption, weight: .medium))
                         .lineLimit(1)
                     Image(systemName: "chevron.down").font(.system(size: ACTAType.metadata, weight: .semibold))
@@ -651,16 +625,16 @@ struct ACTASecurityCenterView: View {
             .help("Filter cameras by status")
             .accessibilityLabel("Camera status filter")
 
-            Button { alertsOnly.toggle() } label: {
-                Image(systemName: alertsOnly ? "bell.badge.fill" : "bell")
-                    .foregroundStyle(alertsOnly ? ACTATheme.warning : ACTATheme.textSecondary)
+            Button { filters.alertsOnly.toggle() } label: {
+                Image(systemName: filters.alertsOnly ? "bell.badge.fill" : "bell")
+                    .foregroundStyle(filters.alertsOnly ? ACTATheme.warning : ACTATheme.textSecondary)
                     .frame(width: 40, height: 40)
-                    .background(alertsOnly ? ACTATheme.warning.opacity(0.12) : ACTATheme.surface,
+                    .background(filters.alertsOnly ? ACTATheme.warning.opacity(0.12) : ACTATheme.surface,
                                 in: RoundedRectangle(cornerRadius: 8))
             }
             .buttonStyle(.plain)
-            .help(languageSettings.localized(alertsOnly ? "Show all cameras" : "Show cameras with stored AI alerts"))
-            .accessibilityLabel(languageSettings.localized(alertsOnly ? "Clear AI alert filter" : "Filter to cameras with AI alerts"))
+            .help(languageSettings.localized(filters.alertsOnly ? "Show all cameras" : "Show cameras with stored AI alerts"))
+            .accessibilityLabel(languageSettings.localized(filters.alertsOnly ? "Clear AI alert filter" : "Filter to cameras with AI alerts"))
 
             Menu {
                 ForEach(1...4, id: \.self) { columns in
@@ -705,20 +679,20 @@ struct ACTASecurityCenterView: View {
             .help(languageSettings.localized("Enter or exit full screen"))
             .accessibilityLabel(languageSettings.localized("Enter or exit full screen"))
 
-            Button { favoritesOnly.toggle() } label: {
+            Button { filters.favoritesOnly.toggle() } label: {
                 HStack(spacing: 8) {
-                    Image(systemName: favoritesOnly ? "star.fill" : "star")
+                    Image(systemName: filters.favoritesOnly ? "star.fill" : "star")
                     if !compact { Text("Favorites").font(.system(size: ACTAType.caption, weight: .medium)) }
                 }
-                .foregroundStyle(favoritesOnly ? ACTATheme.warning : ACTATheme.textSecondary)
+                .foregroundStyle(filters.favoritesOnly ? ACTATheme.warning : ACTATheme.textSecondary)
                 .padding(.horizontal, 12)
                 .frame(width: compact ? 40 : 112, height: 40)
-                    .background(favoritesOnly ? ACTATheme.warning.opacity(0.12) : ACTATheme.surface,
+                    .background(filters.favoritesOnly ? ACTATheme.warning.opacity(0.12) : ACTATheme.surface,
                                 in: RoundedRectangle(cornerRadius: 8))
             }
             .buttonStyle(.plain)
-            .help(languageSettings.localized(favoritesOnly ? "Show all cameras" : "Show favorite cameras"))
-            .accessibilityLabel(languageSettings.localized(favoritesOnly ? "Show all cameras" : "Show favorites"))
+            .help(languageSettings.localized(filters.favoritesOnly ? "Show all cameras" : "Show favorite cameras"))
+            .accessibilityLabel(languageSettings.localized(filters.favoritesOnly ? "Show all cameras" : "Show favorites"))
         }
     }
 
@@ -768,10 +742,10 @@ struct ACTASecurityCenterView: View {
             }
 
             HStack(spacing: 8) {
-                Button("Select all") { selectedCameraIDs = Set(enabledCameras.map(\.id)) }
+                Button("Select all") { filters.selectedCameraIDs = Set(enabledCameras.map(\.id)) }
                     .buttonStyle(.plain)
                 Spacer()
-                Button("Clear") { selectedCameraIDs = [] }
+                Button("Clear") { filters.selectedCameraIDs = [] }
                     .buttonStyle(.plain)
                     .foregroundStyle(ACTATheme.textSecondary)
             }
@@ -828,11 +802,11 @@ struct ACTASecurityCenterView: View {
     }
 
     private func cameraPickerRow(_ camera: Camera) -> some View {
-        let isSelected = selectedCameraIDs?.contains(camera.id) ?? true
+        let isSelected = filters.includesCamera(id: camera.id)
         return Button {
-            var selection = selectedCameraIDs ?? Set(enabledCameras.map(\.id))
+            var selection = filters.selectedCameraIDs ?? Set(enabledCameras.map(\.id))
             if isSelected { selection.remove(camera.id) } else { selection.insert(camera.id) }
-            selectedCameraIDs = selection
+            filters.selectedCameraIDs = selection
         } label: {
             HStack(spacing: 9) {
                 Circle()
@@ -865,13 +839,12 @@ struct ACTASecurityCenterView: View {
     }
 
     private func cameraLocation(_ camera: Camera) -> String {
-        let location = camera.location?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return location.isEmpty ? "Other" : location
+        ACTACanvasFilterState.locationGroup(camera.location)
     }
 
     private func toggleCameraPicker() {
-        if !cameraPickerPresented, selectedCameraIDs == nil {
-            selectedCameraIDs = Set(enabledCameras.map(\.id))
+        if !cameraPickerPresented, filters.selectedCameraIDs == nil {
+            filters.selectedCameraIDs = Set(enabledCameras.map(\.id))
         }
         aiChatPresented = false
         withAnimation(reduceMotion ? nil : .snappy(duration: 0.24)) {
@@ -936,7 +909,7 @@ struct ACTASecurityCenterView: View {
             Button("Manage cameras", systemImage: "list.bullet", action: showCameraManager)
             Button("Ask AI about cameras", systemImage: "sparkles", action: openAIChat)
             Divider()
-            Toggle("Arrange cameras", isOn: $arrangeCameras)
+            Toggle("Arrange cameras", isOn: $filters.arrangeCameras)
             Button("Reset window layout", systemImage: "square.grid.3x3", action: resetLayout)
             Button("Export diagnostics", systemImage: "chart.bar.xaxis", action: exportDiagnostics)
             Button("Settings", systemImage: "gearshape", action: openSettings)
@@ -999,21 +972,21 @@ struct ACTASecurityCenterView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if filteredCameras.isEmpty {
-                ContentUnavailableView.search(text: searchText.isEmpty ? "active filters" : searchText)
+                ContentUnavailableView.search(text: filters.searchText.isEmpty ? "active filters" : filters.searchText)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .overlay(alignment: .bottom) {
                         Button("Clear filters") {
-                            searchText = ""
-                            cameraScope = .all
-                            locationFilter = nil
-                            alertsOnly = false
-                            favoritesOnly = false
+                            filters.searchText = ""
+                            filters.cameraScope = .all
+                            filters.locationFilter = nil
+                            filters.alertsOnly = false
+                            filters.favoritesOnly = false
                         }
                         .buttonStyle(.bordered)
                         .padding(.bottom, 24)
                     }
-            } else if presentation == .grid {
-                VideoCanvas(model: model, cameras: filteredCameras, arrangeCameras: arrangeCameras, preferredColumns: model.config.columns,
+            } else if filters.presentation == .grid {
+                VideoCanvas(model: model, cameras: filteredCameras, arrangeCameras: filters.arrangeCameras, preferredColumns: model.config.columns,
                             edit: editCamera, remove: removeCamera)
                     .padding(8)
             } else {
@@ -1722,10 +1695,8 @@ struct ACTASecurityCenterView: View {
     }
 
     private func toggleFavorite(_ camera: Camera) {
-        var favorites = favoriteIDs
-        if favorites.contains(camera.id) { favorites.remove(camera.id) }
-        else { favorites.insert(camera.id) }
-        favoritesStorage = favorites.map(\.uuidString).sorted().joined(separator: ",")
+        let current = UserDefaults.standard.string(forKey: ACTACameraFavorites.key) ?? ""
+        favoritesStorage = ACTACameraFavorites.toggling(camera.id, in: current)
     }
 }
 

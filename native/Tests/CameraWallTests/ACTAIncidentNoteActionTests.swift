@@ -12,10 +12,10 @@ final class ACTAIncidentNoteActionTests: XCTestCase {
     }
 
     private func fixture() throws -> (URL, WallModel, SafetyIncident) {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = IsolatedWallFixtureSupport.root()
+        try IsolatedWallFixtureSupport.prepare(root)
         let analytics = root.appendingPathComponent("analytics")
         try FileManager.default.createDirectory(at: analytics, withIntermediateDirectories: true)
-        try ConfigurationStore.save(WallConfiguration(), to: root.appendingPathComponent("cameras.json"))
         var incident = SafetyIncident(cameraID: UUID(), cameraName: "synthetic", trackIDs: [UUID()],
             zoneID: UUID(), zoneName: "zone", type: .restrictedZoneIntrusion, severity: .high,
             status: .resolved, confidence: 0.75, createdAt: Date(timeIntervalSince1970: 100),
@@ -28,11 +28,9 @@ final class ACTAIncidentNoteActionTests: XCTestCase {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         try encoder.encode([incident]).write(to: analytics.appendingPathComponent(UnifiedIncidentManager.defaultURL.lastPathComponent))
-        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), transport: { _ in
-            XCTFail("Network access is forbidden")
-            throw URLError(.notConnectedToInternet)
-        })
+        let client = IsolatedWallFixtureSupport.client()
         let model = WallModel(configURL: root.appendingPathComponent("cameras.json"),
+            poseModelURL: root.appendingPathComponent("fake-pose.mlmodel"),
             trackingStoreURL: root.appendingPathComponent("tracks.sqlite"),
             featureCoordinator: CameraFeatureCoordinator(preferencesURL: root.appendingPathComponent("features.json"),
                 databaseURL: root.appendingPathComponent("features.sqlite")),
@@ -42,7 +40,11 @@ final class ACTAIncidentNoteActionTests: XCTestCase {
             missionStoreURL: root.appendingPathComponent("missions.json"),
             cameraCredentialStore: CredentialsFake(),
             operationsPreferencesURL: root.appendingPathComponent("operations.json"),
-            alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")))
+            alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")),
+            languageSettings: LanguageSettings(storage: InMemoryLanguageStorage()),
+            monitorHistoryURL: root.appendingPathComponent("monitor.json"),
+            analyticsModelDiscovery: IsolatedWallFixtureSupport.modelDiscovery)
+        IsolatedWallFixtureSupport.assertSafe(model)
         return (root, model, incident)
     }
 
@@ -53,6 +55,8 @@ final class ACTAIncidentNoteActionTests: XCTestCase {
     }
 
     func testReviewPersistsNoteAndPreservesAllOtherFields() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model, original) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = await registry(model)
@@ -93,6 +97,8 @@ final class ACTAIncidentNoteActionTests: XCTestCase {
     }
 
     func testInvalidOrUnconfirmedRequestsDoNotWrite() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model, original) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = await registry(model)
@@ -124,6 +130,8 @@ final class ACTAIncidentNoteActionTests: XCTestCase {
     }
 
     func testMissingAndCorruptStorageNeverReportSuccess() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model, original) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = await registry(model)
@@ -144,6 +152,8 @@ final class ACTAIncidentNoteActionTests: XCTestCase {
     }
 
     func testCorruptOrDivergentAuditDoesNotGetOverwritten() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model, original) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = await registry(model)

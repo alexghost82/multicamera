@@ -6,27 +6,45 @@ import XCTest
 @MainActor
 final class ACTACameraConfigurationActionTests: XCTestCase {
     private func fixture() throws -> (URL, WallModel, TestCameraCredentials, Camera) {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".camera-action-fixture-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         let camera = Camera(name: "Entrance", location: "Old location", substream: "rtsp://127.0.0.1/original?channel=1", enabled: false)
         var config = WallConfiguration()
         config.cameras = [camera]
         try ConfigurationStore.save(config, to: root.appendingPathComponent("cameras.json"))
+        try ModelSelectionPreferences(enabled: []).save(to: root.appendingPathComponent("model-preferences.json"))
+        try CameraFeaturePreferencesStore.save(CameraFeaturePreferences(), to: root.appendingPathComponent("features.json"))
         let credentials = TestCameraCredentials()
         credentials.values[camera.id] = Credentials(username: "fixture", password: "fixture-secret")
+        let poseURL = root.appendingPathComponent("unused-pose.mlmodel")
         let model = WallModel(configURL: root.appendingPathComponent("cameras.json"),
+            workerMode: false, poseModelURL: poseURL,
             trackingStoreURL: root.appendingPathComponent("tracks.sqlite"),
             featureCoordinator: CameraFeatureCoordinator(preferencesURL: root.appendingPathComponent("features.json"), databaseURL: root.appendingPathComponent("features.sqlite")),
             analyticsDirectoryURL: root.appendingPathComponent("analytics"),
+            agentClient: IsolatedWallFixtureSupport.client(),
             cameraMemoryStore: CameraMemoryStore(url: root.appendingPathComponent("frames")),
             operationsWatchURL: root.appendingPathComponent("watches.json"), missionStoreURL: root.appendingPathComponent("missions.json"),
             cameraCredentialStore: credentials,
             operationsPreferencesURL: root.appendingPathComponent("operations.json"),
-            alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")))
+            alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")),
+            languageSettings: LanguageSettings(storage: InMemoryLanguageStorage()),
+            monitorHistoryURL: root.appendingPathComponent("monitor.json"),
+            analyticsModelDiscovery: AnalyticsModelDiscovery(modelURL: { _ in nil }, integrity: { url in
+                XCTAssertEqual(url, poseURL)
+                return (hash: "synthetic", sizeBytes: 0)
+            }))
+        XCTAssertFalse(model.running)
+        XCTAssertNil(model.tiles[camera.id]?.session)
+        XCTAssertFalse(model.featurePreferences.enabledFeatures.contains(.independentWatcher))
+        XCTAssertTrue(LocalModelService.allCases.allSatisfy { !ModelSelectionRegistry.isEnabled($0) })
         return (root, model, credentials, camera)
     }
 
     func testDisabledSourceRegistrationAndInspectionDoNotStartCaptureOrWriteCredentials() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model, credentials, _) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = ACTAActionRegistry()
@@ -66,6 +84,8 @@ final class ACTACameraConfigurationActionTests: XCTestCase {
     }
 
     func testMetadataProcessingAndURLChangesPreserveCredentialAndSourceIdentity() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model, credentials, camera) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = ACTAActionRegistry()
@@ -110,9 +130,12 @@ final class ACTACameraConfigurationActionTests: XCTestCase {
         XCTAssertTrue(enabled.success)
         XCTAssertTrue(try ConfigurationStore.load(from: model.configURL).cameras[0].enabled)
         XCTAssertFalse(model.running, "Config enable is not a verified stream connection")
+        XCTAssertNil(model.tiles[camera.id]?.session)
     }
 
     func testInvalidURLsAreRejectedBeforeConfirmationAndInvalidSourcesDoNotWrite() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model, credentials, camera) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = ACTAActionRegistry()
@@ -142,6 +165,8 @@ final class ACTACameraConfigurationActionTests: XCTestCase {
     }
 
     func testRemovalRequiresReviewAndChecksCredentialDeletion() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model, credentials, camera) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = ACTAActionRegistry()
@@ -164,6 +189,8 @@ final class ACTACameraConfigurationActionTests: XCTestCase {
     }
 
     func testCredentialRollbackOnFailedConfigurationSaveAndCorruptFileProtection() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model, credentials, camera) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = ACTAActionRegistry()

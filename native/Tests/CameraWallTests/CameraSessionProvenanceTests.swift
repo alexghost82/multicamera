@@ -38,6 +38,76 @@ final class CameraSessionProvenanceTests: XCTestCase {
         second.stop()
     }
 
+    func testLateDeniedCameraPermissionCannotReplaceStoppedStatus() {
+        let session = CameraSession()
+        session.stop()
+        session.cameraAccessResolved(allowed: false, deviceID: "synthetic")
+        XCTAssertEqual(session.snapshot().message, "Stopped")
+    }
+
+    func testDeniedCameraPermissionStillReportsErrorWhileActive() {
+        let session = CameraSession()
+        defer { session.stop() }
+        session.cameraAccessResolved(allowed: false, deviceID: "synthetic")
+        XCTAssertEqual(session.snapshot().message,
+                       "Allow CameraWall in System Settings → Privacy & Security → Camera.")
+    }
+
+    func testStoppedSessionDoesNotStartLocalCapture() {
+        let session = CameraSession()
+        session.stop()
+        var started = false
+        session.runLocalCaptureStart(start: { started = true }, stop: {
+            XCTFail("Unstarted capture should not need cleanup")
+        })
+        XCTAssertFalse(started)
+    }
+
+    func testStopDuringBlockingLocalStartCleansUpAfterLateCompletion() async {
+        let session = CameraSession()
+        let started = expectation(description: "fake capture start entered")
+        let finished = expectation(description: "late capture cleaned up")
+        let release = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            session.runLocalCaptureStart(start: {
+                started.fulfill()
+                _ = release.wait(timeout: .now() + 2)
+            }, stop: { finished.fulfill() })
+        }
+        await fulfillment(of: [started], timeout: 1)
+        let beforeStop = ContinuousClock.now
+        session.stop()
+        XCTAssertLessThan(beforeStop.duration(to: .now), .seconds(1))
+        XCTAssertEqual(session.snapshot().message, "Stopped")
+        release.signal()
+        await fulfillment(of: [finished], timeout: 1)
+    }
+
+    func testBlockingDecoderDestructionDoesNotBlockStopOrRetainFrame() async throws {
+        let session = CameraSession()
+        var pixel: CVPixelBuffer?
+        XCTAssertEqual(CVPixelBufferCreate(nil, 2, 2, kCVPixelFormatType_32BGRA, nil, &pixel), kCVReturnSuccess)
+        session.publish(try XCTUnwrap(pixel), message: "Synthetic")
+        let destroying = expectation(description: "decoder destruction entered")
+        let finished = expectation(description: "decoder destruction finished")
+        let release = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            session.retireDecoder {
+                destroying.fulfill()
+                _ = release.wait(timeout: .now() + 2)
+            }
+            finished.fulfill()
+        }
+        await fulfillment(of: [destroying], timeout: 1)
+        let beforeRead = ContinuousClock.now
+        XCTAssertNil(session.snapshot().reconnectEvidence)
+        session.stop()
+        XCTAssertLessThan(beforeRead.duration(to: .now), .seconds(1))
+        XCTAssertNil(session.snapshot().pixel)
+        release.signal()
+        await fulfillment(of: [finished], timeout: 1)
+    }
+
     #if RECONNECT_FAKE_BRIDGE
     func testFakeDecoderFrameCarriesAttemptAndIsClearedOnStop() async throws {
         let id = UUID()

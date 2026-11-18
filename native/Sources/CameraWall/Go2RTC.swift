@@ -70,6 +70,9 @@ final class Go2RTC {
     private var token = ""
     private var apiPort = 11984
     private var rtspPort = 18554
+    private var reconnectRegistrations = 0
+    private let transport: ((URLRequest) async throws -> (Data, URLResponse))?
+    private let runningOverride: (() -> Bool)?
     private let session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 2
@@ -79,7 +82,13 @@ final class Go2RTC {
         return URLSession(configuration: config)
     }()
 
-    var running: Bool { process?.isRunning == true }
+    init(transport: ((URLRequest) async throws -> (Data, URLResponse))? = nil,
+         runningOverride: (() -> Bool)? = nil) {
+        self.transport = transport
+        self.runningOverride = runningOverride
+    }
+
+    var running: Bool { runningOverride?() ?? (process?.isRunning == true) }
 
     static func executablePath(configuredPath: String, bundleURL: URL) -> String {
         let bundledPath = bundleURL.appendingPathComponent("Contents/Helpers/go2rtc").path
@@ -88,6 +97,7 @@ final class Go2RTC {
 
     func start(config: WallConfiguration) async throws {
         stop()
+        reconnectRegistrations = 0
         apiPort = config.apiPort
         rtspPort = config.rtspPort
         // Keep API password compact for compatibility with go2rtc auth parsers.
@@ -155,6 +165,19 @@ final class Go2RTC {
         return "rtsp://127.0.0.1:\(rtspPort)/\(name)?video"
     }
 
+    // Never reuse a reconnect name: an HTTP cancellation or timeout does not
+    // prove that the relay did not apply the PATCH later.
+    func registerReconnect(camera: Camera, expanded: Bool, attemptID: UUID,
+                           credentials: Credentials?) async throws -> String {
+        guard reconnectRegistrations < 64 else {
+            throw ConfigurationError.invalid("Reconnect limit reached; restart the video wall to clear relay registrations.")
+        }
+        reconnectRegistrations += 1
+        let name = camera.streamName(expanded: expanded) + "_r_" +
+            attemptID.uuidString.lowercased().replacingOccurrences(of: "-", with: "")
+        return try await register(source: camera.source(expanded: expanded), name: name, credentials: credentials)
+    }
+
     func profiles(address: CameraAddress, credentials: Credentials) async throws -> [String] {
         let ports = address.port.map { [$0] } ?? [80, 8080, 8899]
         for port in ports {
@@ -193,7 +216,12 @@ final class Go2RTC {
         request.timeoutInterval = timeout
         let auth = Data("camerawall:\(token)".utf8).base64EncodedString()
         request.setValue("Basic \(auth)", forHTTPHeaderField: "Authorization")
-        let (data, response) = try await session.data(for: request)
+        let (data, response): (Data, URLResponse)
+        if let transport {
+            (data, response) = try await transport(request)
+        } else {
+            (data, response) = try await session.data(for: request)
+        }
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw ConfigurationError.invalid("go2rtc HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)")
         }

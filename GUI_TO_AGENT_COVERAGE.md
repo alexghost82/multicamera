@@ -8,7 +8,7 @@ Version: 1.0.0-baseline
 
 ## 1. Executive Summary
 
-Current implementation checkpoint: **59 previously advertised actions plus `reid.calibrate` and `settings.run_health_check`**, with row-specific limitations below. The original baseline inventory is not proof of exhaustive UI coverage.
+Current implementation checkpoint: **59 previously advertised actions plus `reid.calibrate`, `settings.run_health_check`, `settings.update_ai_budget`, `settings.update_ai_config`, `camera.set_favorite`, `canvas.set_filter`, `canvas.select_cameras`, `canvas.set_arrange_mode`, and `canvas.set_presentation`**, with row-specific limitations below. The original baseline inventory is not proof of exhaustive UI coverage.
 
 This working inventory maps currently identified UI/domain operations to agent action contracts. Exhaustive control-by-control parity has not been established.
 
@@ -24,14 +24,23 @@ authorization policy and agent/GUI parity remain unverified.
 
 | Candidate | GUI operation | Current limitation |
 | :--- | :--- | :--- |
-| `camera.set_all_running` | Start or stop the camera wall | `camera.set_enabled` changes a single configuration flag, not wall lifecycle. |
+| `camera.set_all_running` | Start or stop the camera wall | `camera.set_enabled` changes one configuration flag. Screen capture late-start fencing is fake-tested; actual stop is asynchronous and `running` is not stream readiness. Full isolated lifecycle proof remains missing. |
 | `camera.import_sources` | Import RTSP sources from a file | Import may handle credentials; anonymous disabled `camera.add_network` is not equivalent. |
-| `camera.set_favorite` | Mark or unmark a camera as favorite | No equivalent agent contract confirmed. |
-| `canvas.set_filter` | Filter by status, favorite, events, search or location | Listing cameras does not change the GUI filter. |
-| `canvas.select_cameras` | Select individual cameras, all or none | Expanding a camera does not select a set. |
-| `canvas.set_tile_frame`, `canvas.set_arrange_mode` | Arrange and move camera tiles | Column count and layout reset do not provide full geometry controls. |
+| `camera.set_favorite` | Mark or unmark a camera as favorite | Registered and advertised; current preference readback is verified, but durable disk synchronization and live GUI update are not. |
+| `canvas.set_filter` | Filter by status, favorite, events, search or location | Registered for these filters in the unique attached view; rendered GUI remains unverified. |
+| `canvas.select_cameras` | Select individual cameras, all or none | Registered for the unique attached view; readback and enabled-camera inventory verified, live rendering unverified. |
+| `canvas.set_tile_frame`, `canvas.set_arrange_mode` | Arrange and move camera tiles | Arrange toggle is registered and checked in the unique attached view. Geometry remains unsupported: whole-layout writes can overwrite concurrent updates or an in-progress drag. |
 | `chat.select_thread`, `chat.new_thread` | Switch or create a chat thread | Switching cancels an active request; agent parity is not established. |
 | `chat.cancel_request` | Cancel an active chat request | A GUI cancellation test exists, but an agent contract is not established. |
+| Operator track grouping / separation | Group selected tracks or remove them from operator groups | Distinct from legacy identity merge/split; separation can partially succeed. |
+| ReID pair review | Inspect candidates, mark Same/Different or undo Different | Same can also group tracks; operator attribution and stale-pair checks are needed. |
+| Cross-camera proposal creation | Propose a match between tracks | Pair freshness and provenance have not been established. |
+| Incident evidence viewing | Display evidence frames | Sensitive-image disclosure and delivery policy are unresolved. |
+| Alert lookback clips | View or delete a clip | Deletion spans alert storage and clip files and may partially fail. |
+| Alert review history | Inspect prior operator reviews | Notes are sensitive; safe disclosure policy is unresolved. |
+| Crop description / visual similarity | Describe a saved crop or find visually similar crops | Model and privacy controls and evidence semantics require review. |
+| Spoken tactical briefing | Enable or disable speech in AI settings | Not registered: existing briefing generation can send context to a configured external backend. |
+| Grid/list and fullscreen | Change camera display mode or fullscreen | Window-local grid/list is registered; key-window fullscreen is not. |
 
 ---
 
@@ -60,11 +69,16 @@ authorization policy and agent/GUI parity remain unverified.
 | `camera.set_processing` | Camera context settings | WallModel | `camera_id, feature: yolo/ai_chat, enabled: Bool` | `Reversible` | **Confirm AI flag change** | `testMetadataProcessingAndURLChangesPreserveCredentialAndSourceIdentity` | `IMPLEMENTED — CONFIG/GUI SERVICE TEST` |
 | `camera.set_enabled` | `CameraManager` toggle | `WallModel` | `cameraID: String, enabled: Bool` | `ServiceAffecting` | **Confirm on enable** | `testMetadataProcessingAndURLChangesPreserveCredentialAndSourceIdentity` | `IMPLEMENTED — CONFIG FLAG; STREAM UNVERIFIED` |
 | `camera.remove` | `WallView` remove alert | `WallModel` | `cameraID: String` | `Destructive` | **Confirm** | `testRemovalRequiresReviewAndChecksCredentialDeletion` | `IMPLEMENTED — CONFIG/FAKE CREDENTIAL STORE; LIVE KEYCHAIN UNVERIFIED` |
-| `camera.reconnect` | Camera context menu | `WallModel` | `cameraID: String` | `ServiceAffecting` | Auto | `ACTAServiceAdapterTests.testActionsApplyToLiveModelAndPersistThroughGUIService` | `PLANNED — REGISTRY RETURNS UNSUPPORTED UNTIL STREAM RECOVERY IS VERIFIED` |
+| `camera.reconnect` | Camera context menu | `WallModel` | `cameraID: String` | `ServiceAffecting` | Auto | `CameraReconnectAttemptTests` (fake helper only) | `GAP — RELAY CANCELLATION, LATE AVCAPTURE START AND GUI SESSION INSTALLATION UNVERIFIED` |
+| `camera.set_favorite` | Camera context menu | `UserDefaults` / `ACTACameraFavorites` | `camera_id: UUID or unique name, favorite: Bool` | `Reversible` | Auto | `ACTACameraFavoriteActionTests` | `PARTIAL — SHARED PREFERENCE/READBACK; DISK SYNCHRONIZATION AND LIVE GUI UNVERIFIED` |
 | `camera.snapshot` | Camera action bar | `WallModel` | `cameraID: String` | `ServiceAffecting` | Destination/confirmation policy pending | Not implemented | `GAP — GUI WRITES JPEG THROUGH A SAVE PANEL; NOT A READ-ONLY QUERY` |
 | `camera.toggle_expand` | Video canvas double-click | `WallModel` | `cameraID: String` | `Reversible` | Auto | `testCanvasActionsShareGUIStateAndVerifySavedLayout` | `IMPLEMENTED — UI STATE; STREAM UNVERIFIED` |
 | `canvas.set_columns` | SystemSettings / Canvas | `WallModel` | `columns: Int (1...16)` | `Reversible` | Auto | `testCanvasSetColumns` | `IMPLEMENTED — SERVICE TEST` |
 | `canvas.reset_layout` | Window menu / Toolbar | `WallModel` | `none` | `Reversible` | Auto | `testCanvasActionsShareGUIStateAndVerifySavedLayout` | `IMPLEMENTED — DISK/FAILURE TEST` |
+| `canvas.set_filter` | Camera view | `ACTACanvasFilterState` | `search?, location?, status: all/live/offline?, favorites_only?, events_only?` | `Reversible` | Auto | `ACTACanvasFilterActionTests` | `PARTIAL — UNIQUE ATTACHED VIEW STATE; LIVE RENDER UNVERIFIED` |
+| `canvas.select_cameras` | Camera picker | `ACTACanvasFilterState` | `mode: all/none/subset, camera_ids: CSV UUIDs for subset` | `Reversible` | Auto | `ACTACanvasSelectCamerasActionTests` | `PARTIAL — ENABLED CAMERA SNAPSHOT; LIVE RENDER AND CONNECTIVITY UNVERIFIED` |
+| `canvas.set_arrange_mode` | Camera view menu | `ACTACanvasFilterState` | `enabled: Bool` | `Reversible` | Auto | `ACTACanvasArrangeActionTests` | `PARTIAL — WINDOW-LOCAL TOGGLE; RENDER AND TILE GEOMETRY UNVERIFIED` |
+| `canvas.set_presentation` | Camera view grid/list picker | `ACTACanvasFilterState` | `mode: grid/list` | `Reversible` | Auto | `ACTACanvasPresentationActionTests` | `PARTIAL — WINDOW-LOCAL STATE; RENDER UNVERIFIED` |
 
 ---
 
@@ -117,7 +131,7 @@ authorization policy and agent/GUI parity remain unverified.
 | `identity.rename` | Identity Detail / Chat | `ACTAAnalyticsCoordinator` | `identityID: String, newName: String` | `Reversible` | Auto | `testIdentityRename` | `EXISTING` |
 | `identity.merge` | Cross-Camera Identity | `ACTAAnalyticsCoordinator` | `sourceID: String, targetID: String` | `Destructive` | **Confirm** | `testIdentityMerge` | `EXISTING` |
 | `identity.split` | Cross-Camera Identity | `ACTAAnalyticsCoordinator` | `identityID: String, trackID: String` | `Destructive` | **Confirm** | `testIdentitySplit` | `EXISTING` |
-| `identity.review_proposal` | Cross-Camera Identity | `WallModel` | `proposalID: String, accept: Bool` | `Reversible` | Policy pending | Not implemented | `GAP — STALE PROPOSALS CAN REFERENCE DELETED TRACKS; CROSS-STORE CHECK REQUIRED` |
+| `identity.review_proposal` | Cross-Camera Identity | `WallModel` | `proposalID: String, accept: Bool` | `Reversible` | Policy pending | Not implemented | `GAP — DELETED TRACK CAN STILL BE ACCEPTED; CROSS-STORE CHECK IS NOT ATOMIC` |
 | `identity.undo_merge` | Cross-Camera Identity | `WallModel` | `proposalID: String` | `Reversible` | Confirmation/version policy pending | Not implemented | `GAP — CONSEQUENCES CHANGE IF THE IDENTITY GRAPH CHANGES` |
 | `identity.delete_tracked_object`| `IdentityHistoryView` | `WallModel` | `trackID: String` | `Destructive` | **Confirm** | Not implemented | `GAP — PARTIAL DELETE AND CROP FAILURE RECOVERY REQUIRED` |
 | `identity.read_vehicle_plate` | `IdentityHistoryView` | `WallModel` | `trackID: String` | `ServiceAffecting` | Privacy/persistence policy pending | Not implemented | `GAP — GUI OCR MAY PERSIST EVIDENCE WHEN OPTED IN; SHARED VERIFIED WORKFLOW REQUIRED` |
@@ -148,7 +162,7 @@ authorization policy and agent/GUI parity remain unverified.
 | `memory.list_frames` | `CameraMemoryView` | `ACTAAnalyticsCoordinator` | `cameraID: String?, since: String?, until: String?, limit: Int?` | `Inspect` | Auto | `testMemoryListFrames` | `EXISTING` |
 | `memory.view_frame` | `CameraMemoryView` | `ACTAAnalyticsCoordinator` | `frameID: String` | `Inspect` | Auto | `testMemoryViewFrame` | `EXISTING` |
 | `memory.delete_frame` | `CameraMemoryView` | `WallModel` | `frameID: String` | `Destructive` | **Confirm** | `testMemoryDeletionRequiresApprovalAndRemovesActualImage` | `IMPLEMENTED — SERVICE/CONFIRMATION TEST` |
-| `memory.clear_all_frames` | `CameraMemoryView` | `WallModel` | `none` | `Destructive` | **Confirm** | `testMemoryClearAllFrames` | `PLANNED` |
+| `memory.clear_all_frames` | `CameraMemoryView` | `WallModel` | `none` | `Destructive` | **Confirm** | Not implemented | `GAP — CONFIRMATION DOES NOT BIND FRAME SET; INDEX/JPEG PARTIAL FAILURE AND RECOVERY UNRESOLVED` |
 | `memory.list_chapters` | `CameraMemoryView` | `ACTAAnalyticsCoordinator` | `cameraID: String?, pinnedOnly: Bool?, limit: Int?` | `Inspect` | Auto | `testMemoryListChapters` | `EXISTING` |
 | `memory.get_chapter` | `CameraMemoryView` | `ACTAAnalyticsCoordinator` | `chapterID: String` | `Inspect` | Auto | `testMemoryGetChapter` | `EXISTING` |
 | `memory.set_chapter_text` | `CameraMemoryView` | `WallModel` | `chapter_id: String, text: String? (<=16000), clear: Bool?` | `Reversible` | **Confirm — operator attribution** | `testNarrativeActionsRequireReviewAndPreserveAISummary` | `IMPLEMENTED — SQL/REVIEW TEST` |
@@ -169,7 +183,7 @@ authorization policy and agent/GUI parity remain unverified.
 | `monitor.clear_isapi_events`| No current GUI control; unused `WallModel.clearISAPIEvents` | `WallModel` | `none` | `Destructive` | Confirmation required | `ACTAClearISAPIEventsActionTests` (isolated service only) | `GAP — SERVICE NOT INTEGRATED; LIVE BASELINE AND PARTIAL-FAILURE HANDLING REQUIRED` |
 | `monitor.get_operational_events`| Unified Timeline | `ACTAAnalyticsCoordinator` | `cameraID: String?, kind: String?, limit: Int?` | `Inspect` | Auto | `testMonitorGetOperationalEvents` | `EXISTING` |
 | `monitor.live_look` | Unified Chat | `ACTAAnalyticsCoordinator` | `camera: String?` | `Inspect` | Auto | `testMonitorLiveLook` | `EXISTING` |
-| `monitor.export_report_html`| Reports | `WallModel` | GUI chooses report and destination | `ServiceAffecting` | Report/destination/confirmation policy pending | Not implemented | `GAP — OPERATIONS AND MISSION REPORTS ARE DISTINCT; FILE EXPORT IS NOT READ-ONLY` |
+| `monitor.export_report_html`| Reports | `WallModel` | GUI chooses report and destination | `ServiceAffecting` | Report/destination/confirmation policy pending | Not implemented | `GAP — TWO SENSITIVE REPORT TYPES USE SEPARATE SAVE PANELS; NO SHARED SAFE DESTINATION CONTRACT` |
 
 ---
 
@@ -183,8 +197,8 @@ authorization policy and agent/GUI parity remain unverified.
 | `settings.update_runtime_fall` | Sec 4: Advanced Runtime | `WallModel.saveRuntimePreferences` | 22 advanced GUI fields; four common fields use analytics actions | `ServiceAffecting` | Auto | `testAllGUIFallFieldsAndCropFieldsPersistThroughRuntimeService` | `IMPLEMENTED — TEMP STORE / SERVICE TEST` |
 | `settings.update_runtime_storage` | Sec 4: Storage Cleanup | `WallModel.saveRuntimePreferences` | `maxMediaDiskMB: Double?, minFreeDiskGB: Double?, maxCropsPerIdentity: Int?, dataSaverEnabled: Bool?, trackImageRetentionDays: Int?, logRetentionDays: Int?` | `SecuritySensitive` | **Confirm** | `testReviewedStorageAndMemoryPolicyMatchDiskWithoutClaimingCleanup` | `IMPLEMENTED — POLICY VERIFIED; CLEANUP NOT RUN` |
 | `settings.update_runtime_crop` | Sec 4: Crop Selection | `WallModel.saveRuntimePreferences` | Six capture scheduler fields plus `cropWindowSeconds: Double?, cropTopK: Int?, cropImprovementRatio: Double?` | `ServiceAffecting` | Auto | `testAllGUIFallFieldsAndCropFieldsPersistThroughRuntimeService` | `IMPLEMENTED — TEMP STORE / SERVICE TEST` |
-| `settings.update_ai_config` | Sec 6: AI Backends | `WallModel` | `mode: String ("mlx", "vllm", "openai", "hybrid", "dry_run"), vllmURL: String?, vllmModel: String?, openAIURL: String?, cloudNanoModel: String?, cloudMiniModel: String?, cloudFullModel: String?, spokenBriefingEnabled: Bool?, language: String?` | `Reversible` | Auto | `testSettingsUpdateAIConfig` | `PLANNED` |
-| `settings.update_ai_budget` | Sec 6: Cloud Privacy & Budget | `WallModel` | `blurFaces: Bool?, blurPlates: Bool?, dailyBudgetUSD: Double?, monthlyBudgetUSD: Double?` | `SecuritySensitive` | Confirmation and persistence policy pending | Not implemented | `GAP — PRIVACY CHANGE; TRANSPORT TYPES AND PERSISTENCE REQUIRE HARDENING` |
+| `settings.update_ai_config` | Sec 6: AI Backends | `WallModel.saveVLMPreferences` | `language: ru/en/he` | `SecuritySensitive` | **Confirm** | `ACTAAIConfigActionTests` | `PARTIAL — LANGUAGE ONLY; BACKENDS/ENDPOINTS UNSUPPORTED; STALE CONFIRMATION AND NETWORK POLICY REMAIN OPEN` |
+| `settings.update_ai_budget` | Sec 6: Cloud Privacy & Budget | `WallModel.saveVLMPreferences` | `blurFaces: Bool?, blurPlates: Bool?, dailyBudgetUSD: Double?, monthlyBudgetUSD: Double?` | `SecuritySensitive` | **Confirm** | `ACTAAIBudgetActionTests` | `PARTIAL — CONFIGURATION VERIFIED; SAVE SIDE EFFECTS AS ABOVE; NO BILLING CAP OR ANONYMIZATION GUARANTEE` |
 | `settings.set_api_key` | Sec 6: Keychain Credentials | `ACTAKeychainStore` | `account: String ("primary", "alert"), apiKey: String` | `Reversible` | Auto | `testSettingsSetAPIKey` | `PLANNED` |
 | `settings.clear_api_key` | Sec 6: Keychain Credentials | `ACTAKeychainStore` | `account: String` | `Destructive` | **Confirm** | `testSettingsClearAPIKey` | `PLANNED` |
 | `settings.update_schedules` | Sec 7: Scheduled Analysis | `WallModel.saveVLMPreferences` | `scheduleEnabled: Bool?, intervalSeconds: Int?, analyzeAllEnabledCameras: Bool?, camera_ids: CSV UUID string?` | `SecuritySensitive` | **Confirm** | `testEventsAndSchedulesPreserveUnrelatedBackendAndPermissions` | `IMPLEMENTED — CONFIGURATION; NO INFERENCE COMPLETION PROOF` |
@@ -195,7 +209,7 @@ authorization policy and agent/GUI parity remain unverified.
 | `settings.update_feature_toggles`| Sec 11: Features & Access | `WallModel` | `feature: String, enabled: Bool` | `Reversible` | Auto | `testSettingsUpdateFeatureToggles`| `PARTIAL — UNIT TESTS / LIVE PROVIDER` |
 | `settings.update_permissions` | Sec 11: Features & Access | `WallModel` | `allowExternalAI: Bool?, allowVoiceInput: Bool?, allowPlateRegistryLookup: Bool?` | `Reversible` | Auto | `testSettingsUpdatePermissions`| `IMPLEMENTED — CONFIRMATION / SERVICE TEST` |
 | `settings.toggle_showcase` | Sec 12: Local Showcase | `WallModel` | `running: Bool, port: Int?` | `ServiceAffecting` | Auto | `testSettingsToggleShowcase` | `PLANNED` |
-| `settings.update_reid_calibration` | Sec 13: ReID Calibration | `ReIDCalibrationView` / `ReIDThresholdCalibrator` | GUI has transient `targetPrecision`, not the previously listed persistent settings | `Reversible` | Scope decision pending | Not implemented | `GAP — GUI COMPUTES A RECOMMENDATION; NO SETTINGS PERSISTENCE` |
+| `settings.update_reid_calibration` | Sec 13: ReID Calibration | `ReIDCalibrationView` / `ReIDThresholdCalibrator` | GUI has transient `targetPrecision`, not the previously listed persistent settings | `Reversible` | Scope decision pending | Not implemented | `GAP — SLIDER STATE IS NOT CONTROLLED; reid.calibrate COMPUTES THE RECOMMENDATION WITHOUT PERSISTING OR APPLYING SETTINGS` |
 | `settings.export_diagnostics` | Sec 14: System Diagnostics | `WallModel` | GUI chooses destination | `ServiceAffecting` | Destination/confirmation policy pending | Not implemented | `GAP — FILE EXPORT; NOT A READ-ONLY QUERY` |
 | `settings.run_health_check` | Sec 14: System Diagnostics | `WallModel` | `none` | `ServiceAffecting` | Notice | `ACTARunHealthCheckActionTests` | `PARTIAL — FRESH IN-APP SNAPSHOT/HISTORY TESTED; NO INDEPENDENT WATCHER OR LIVE CAMERAS` |
 | `settings.reload_models` | Sec 14: System Diagnostics | `WallModel` | `none` | `ServiceAffecting` | Auto | `testSettingsReloadModels` | `PLANNED` |

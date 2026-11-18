@@ -169,32 +169,54 @@ final class TrackResearchTests: XCTestCase {
 
     @MainActor
     func testEmptyHistoryAndEnablingPersistenceKeepTheCurrentConversation() async throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".track-research-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: directory) }
+        let previousModels = ModelSelectionPreferences(
+            enabled: Set(LocalModelService.allCases.filter { ModelSelectionRegistry.isEnabled($0) }),
+            paths: Dictionary(uniqueKeysWithValues: LocalModelService.allCases.compactMap { service in
+                ModelSelectionRegistry.path(service).map { (service, $0.path) }
+            }))
+        defer { ModelSelectionRegistry.update(previousModels) }
         let saved = TrackResearchMessage(role: .operatorMessage, text: "Earlier question", citedTrackIDs: [],
             createdAt: Date(timeIntervalSince1970: 1_700_000_000))
         let researchURL = directory.appendingPathComponent("track-research.json")
         try TrackResearchStore.save([saved], to: researchURL)
         let configURL = directory.appendingPathComponent("cameras.json")
         try ConfigurationStore.save(WallConfiguration(), to: configURL)
+        try ModelSelectionPreferences(enabled: []).save(to: directory.appendingPathComponent("model-preferences.json"))
         let coordinator = CameraFeatureCoordinator(preferencesURL: directory.appendingPathComponent("features.json"),
             databaseURL: directory.appendingPathComponent("features.sqlite3"))
         try coordinator.savePreferences(CameraFeaturePreferences(enabledFeatures: []))
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), transport: { _ in
+            XCTFail("Unexpected network request")
+            throw URLError(.notConnectedToInternet)
+        }, keyProvider: { _ in
+            XCTFail("Unexpected AI credential access")
+            return nil
+        })
         let wall = WallModel(configURL: configURL, workerMode: false,
+            poseModelURL: directory.appendingPathComponent("fake-pose.mlmodel"),
             trackingStoreURL: directory.appendingPathComponent("tracking.sqlite3"),
             featureCoordinator: coordinator,
             analyticsDirectoryURL: directory.appendingPathComponent("analytics"),
+            agentClient: client,
             cameraMemoryStore: CameraMemoryStore(url: directory.appendingPathComponent("frames")),
             operationsWatchURL: directory.appendingPathComponent("watches.json"),
             missionStoreURL: directory.appendingPathComponent("missions.json"),
             cameraCredentialStore: TrackResearchIsolatedCredentials(),
             operationsPreferencesURL: directory.appendingPathComponent("operations.json"),
-            alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")))
+            alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")),
+            languageSettings: LanguageSettings(storage: TrackResearchLanguageStorage()),
+            monitorHistoryURL: directory.appendingPathComponent("monitor.json"),
+            analyticsModelDiscovery: IsolatedWallFixtureSupport.modelDiscovery)
         defer { wall.shutdown() }
 
-        XCTAssertFalse(wall.running)
-        XCTAssertFalse(wall.featurePreferences.enabledFeatures.contains(.independentWatcher))
-        XCTAssertFalse(wall.featurePreferences.enabledFeatures.contains(.knowledgeSearch))
+        guard !wall.running, wall.config.cameras.isEmpty, wall.featurePreferences.enabledFeatures.isEmpty else {
+            XCTFail("The wall must remain stopped with no cameras or enabled features")
+            return
+        }
         wall.vlmBusy = true
         XCTAssertTrue(wall.askTrackResearch(question: "Что было вчера?"), "Background VLM work must not block history")
         XCTAssertTrue(wall.trackResearchBusy)
@@ -269,6 +291,13 @@ final class TrackResearchTests: XCTestCase {
             XCTFail("Unexpected credential removal")
             throw UnexpectedCredentialAccess()
         }
+    }
+
+    @MainActor
+    private final class TrackResearchLanguageStorage: LanguageSettingsStorage {
+        private var values: [String: String] = [:]
+        func string(forKey key: String) -> String? { values[key] }
+        func set(_ value: String, forKey key: String) { values[key] = value }
     }
 
     func testLocalVisionReadsGeneratedVehicleTextFixture() throws {

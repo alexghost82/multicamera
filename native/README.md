@@ -1,5 +1,48 @@
 # CameraWall for Apple Silicon
 
+## Sampled memory deletion and recovery
+
+The memory view confirms an exact snapshot of the indexed frames displayed in
+the list. If the index changes before approval, deletion is rejected and the
+operator must review the list again. A private deletion journal records the
+authorized frames before files are removed. A failure can leave some images
+already deleted: the view reports the incomplete operation and offers an
+explicit retry, which resumes only that journal. Memory mutations and retention
+cleanup are blocked while a journal is pending. A conflicting index requires
+manual investigation; do not delete the journal or replace the index blindly.
+The operation does not claim secure erasure or deletion of copies, backups,
+unindexed images, or data retained elsewhere.
+
+Current versions of the store coordinate through an advisory lock in the
+memory directory. **Older processes do not honor this lock or the journal**:
+they can overwrite the index, remove images or recreate stale state, even
+after a deletion is verified. Stop all older processes before using deletion;
+there is no reliable way for this version to enforce their cooperation.
+The journal is not a power-loss-durable transaction: filesystem, disk and
+process failures can require manual recovery. Existing retention/orphan
+cleanup outside this confirmed deletion path retains its previous behavior.
+Bulk agent deletion remains unsupported; the confirmation protocol does not
+bind a reviewed frame snapshot. The existing single-frame agent action is also
+subject to the legacy-process limitation.
+
+## Agent camera canvas filters
+
+`canvas.set_filter` patches the active camera view's `search`, `status`
+(`all`, `live`, `offline`), `location`, `favorites_only`, and `events_only` fields.
+An empty search or location clears that filter; a nonempty location must match
+an enabled camera's location group exactly. Unspecified fields and the
+camera picker selection are unchanged. `Other` includes unassigned locations
+and cameras explicitly named `Other`; `All Locations` is reserved for clearing
+the filter in the GUI. Events means stored VLM alerts or
+ISAPI events. The action fails when there is no unique active camera view;
+verification checks the shared in-memory filter state, not rendered results
+or camera connectivity.
+
+`canvas.set_presentation` sets the camera view to `grid` or `list` in the
+unique attached security center, including when another section is visible.
+The window-local setting is not persisted; filters, selection, arrange mode
+and fullscreen are unchanged. Verification checks state, not rendering.
+
 ## Interface Localization
 
 The interface language switch applies English or Russian to app-owned labels,
@@ -789,3 +832,22 @@ disconnect/reconnect tests. Client frame age cannot establish this delay.
 Before redistribution, bundle and audit native library dependencies,
 review the selected FFmpeg build's GPL/LGPL obligations, replace ad-hoc
 signing with Developer ID signing/notarization, and harden crash cleanup.
+
+### Agent cloud privacy and budget settings
+
+`settings.update_ai_budget` changes the existing cloud face/plate blurring
+and daily/monthly USD preferences through the same save service as the AI
+settings editor. Every change requires operator confirmation. It does not
+enable external AI permission, verify anonymization, or guarantee a billing
+cap: the existing budget tracker uses in-memory estimates and does not
+persist or reset its counters on calendar boundaries.
+Saving these settings also resets the analysis schedule and may prepare
+models, just like the GUI save workflow.
+
+`settings.update_ai_config` supports only the AI analytics prompt language
+(`language`: `ru`, `en`, or `he`), with operator confirmation and persisted
+and runtime checks. It affects future requests, not necessarily requests
+already in flight. Backend selection, endpoints, model names, credentials and
+spoken briefings are not supported by this action. Privacy and budgets remain
+separate under `settings.update_ai_budget`. The same GUI save side effects
+apply: the schedule is reset and models may be prepared.

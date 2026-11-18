@@ -197,8 +197,10 @@ final class ACTAAlertMutationActionsTests: XCTestCase {
     }
 
     func testWallProviderUsesIsolatedGUIAndPersistentStores() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
+        let root = IsolatedWallFixtureSupport.root()
+        try IsolatedWallFixtureSupport.prepare(root)
         defer { try? FileManager.default.removeItem(at: root) }
         let preferencesURL = root.appendingPathComponent("features.json")
         let databaseURL = root.appendingPathComponent("features.sqlite")
@@ -206,11 +208,10 @@ final class ACTAAlertMutationActionsTests: XCTestCase {
         let alert = VLMAlert(cameraID: UUID(), cameraName: "Synthetic camera",
                              condition: "Synthetic condition", evidence: "Synthetic evidence", priority: .critical)
         try VLMStore.save([alert], to: root.appendingPathComponent("vlm-alerts.json"))
-        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), transport: { _ in
-            throw URLError(.notConnectedToInternet)
-        })
+        let client = IsolatedWallFixtureSupport.client()
         let language = LanguageSettings(storage: InMemoryLanguageStorage())
         let model = WallModel(configURL: root.appendingPathComponent("cameras.json"),
+            poseModelURL: root.appendingPathComponent("fake-pose.mlmodel"),
             trackingStoreURL: root.appendingPathComponent("tracks.sqlite"),
             featureCoordinator: CameraFeatureCoordinator(preferencesURL: preferencesURL, databaseURL: databaseURL),
             analyticsDirectoryURL: root.appendingPathComponent("analytics"), agentClient: client,
@@ -220,8 +221,11 @@ final class ACTAAlertMutationActionsTests: XCTestCase {
             cameraCredentialStore: AlertTestCredentials(),
             operationsPreferencesURL: root.appendingPathComponent("operations.json"),
             alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")),
-            languageSettings: language)
+            languageSettings: language,
+            monitorHistoryURL: root.appendingPathComponent("monitor.json"),
+            analyticsModelDiscovery: IsolatedWallFixtureSupport.modelDiscovery)
         defer { model.shutdown() }
+        IsolatedWallFixtureSupport.assertSafe(model)
         let registry = ACTAActionRegistry()
         await registerAllWallActions(registry: registry, model: model, languageSettings: language)
         let advertised = try await ACTAAnalyticsCoordinator.registryTools(registry: registry)

@@ -101,8 +101,12 @@ final class SettingsHubTests: XCTestCase {
         let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), transport: { _ in
             XCTFail("Unexpected network request")
             throw URLError(.notConnectedToInternet)
+        }, keyProvider: { _ in
+            XCTFail("Unexpected AI credential access")
+            return nil
         })
         let model = WallModel(configURL: configURL,
+            poseModelURL: directory.appendingPathComponent("fake-pose.mlmodel"),
             trackingStoreURL: directory.appendingPathComponent("tracks.sqlite"),
             featureCoordinator: features,
             analyticsDirectoryURL: directory.appendingPathComponent("analytics"),
@@ -114,7 +118,8 @@ final class SettingsHubTests: XCTestCase {
             operationsPreferencesURL: directory.appendingPathComponent("operations.json"),
             alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")),
             languageSettings: LanguageSettings(storage: InMemoryLanguageStorage()),
-            monitorHistoryURL: directory.appendingPathComponent("monitor.json"))
+            monitorHistoryURL: directory.appendingPathComponent("monitor.json"),
+            analyticsModelDiscovery: IsolatedWallFixtureSupport.modelDiscovery)
         defer { model.shutdown() }
         XCTAssertTrue(model.config.cameras.isEmpty)
         XCTAssertTrue(model.featurePreferences.enabledFeatures.isEmpty)

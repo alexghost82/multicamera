@@ -136,7 +136,7 @@ private final class NarrativeTestPolicy {
 @MainActor
 final class NarrativeFlushSafetyTests: XCTestCase {
     private func fixture() throws -> (URL, LocalTrackingStore, ACTAAnalyticsCoordinator, CGImage) {
-        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(".narrative-isolated-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         let store = try LocalTrackingStore(url: root.appendingPathComponent("tracking.sqlite"))

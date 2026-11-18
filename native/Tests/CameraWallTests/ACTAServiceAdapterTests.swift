@@ -17,12 +17,14 @@ final class ACTAServiceAdapterTests: XCTestCase {
     }
 
     func testLocalAgentDiscoversAndExecutesRegisteredActionWithScriptedTransport() async throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".service-fixture-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let previousModels = actaTestModelPreferences()
         defer { ModelSelectionRegistry.update(previousModels) }
         try prepareOfflineWallFixture(at: directory)
-        let model = WallModel(configURL: directory.appendingPathComponent("cameras.json"), workerMode: false,
+        let poseURL = directory.appendingPathComponent("fake-pose.mlmodel")
+        let model = WallModel(configURL: directory.appendingPathComponent("cameras.json"), workerMode: false, poseModelURL: poseURL,
             trackingStoreURL: directory.appendingPathComponent("model.sqlite"),
             featureCoordinator: CameraFeatureCoordinator(preferencesURL: directory.appendingPathComponent("features.json"),
                 databaseURL: directory.appendingPathComponent("features.sqlite")),
@@ -35,9 +37,13 @@ final class ACTAServiceAdapterTests: XCTestCase {
             operationsPreferencesURL: directory.appendingPathComponent("operations.json"),
             alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")),
             languageSettings: LanguageSettings(storage: ACTAIsolatedLanguageStorage()),
-            monitorHistoryURL: directory.appendingPathComponent("monitor.json"))
+            monitorHistoryURL: directory.appendingPathComponent("monitor.json"),
+            analyticsModelDiscovery: AnalyticsModelDiscovery(modelURL: { _ in nil }, integrity: { url in
+                XCTAssertEqual(url, poseURL)
+                return (hash: "synthetic", sizeBytes: 0)
+            }))
         defer { model.shutdown() }
-        XCTAssertTrue(model.config.cameras.isEmpty)
+        IsolatedWallFixtureSupport.assertSafe(model)
         XCTAssertTrue(model.featurePreferences.enabledFeatures.isEmpty)
         XCTAssertFalse(model.running)
         await registerAllWallActions(registry: .shared, model: model)
@@ -49,6 +55,9 @@ final class ACTAServiceAdapterTests: XCTestCase {
                 let payload: [String: Any] = ["choices": [["message": ["content": raw]]]]
                 let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
                 return (try JSONSerialization.data(withJSONObject: payload), response)
+            }, keyProvider: { _ in
+                XCTFail("Unexpected AI credential access")
+                return nil
             })
         let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store)
         _ = await coordinator.askACTAChatAgent(question: "Установи семь колонок", maxSteps: 3)
@@ -72,14 +81,16 @@ final class ACTAServiceAdapterTests: XCTestCase {
     }
 
     func testActionsApplyToLiveModelAndPersistThroughGUIService() async throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".service-fixture-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let previousModels = actaTestModelPreferences()
         defer { ModelSelectionRegistry.update(previousModels) }
         try prepareOfflineWallFixture(at: directory)
         let configurationURL = directory.appendingPathComponent("cameras.json")
         let preferencesURL = directory.appendingPathComponent("features.json")
-        let model = WallModel(configURL: configurationURL, workerMode: false,
+        let poseURL = directory.appendingPathComponent("fake-pose.mlmodel")
+        let model = WallModel(configURL: configurationURL, workerMode: false, poseModelURL: poseURL,
             trackingStoreURL: directory.appendingPathComponent("tracks.sqlite"),
             featureCoordinator: CameraFeatureCoordinator(preferencesURL: preferencesURL,
                 databaseURL: directory.appendingPathComponent("features.sqlite")),
@@ -92,9 +103,13 @@ final class ACTAServiceAdapterTests: XCTestCase {
             operationsPreferencesURL: directory.appendingPathComponent("operations.json"),
             alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")),
             languageSettings: LanguageSettings(storage: ACTAIsolatedLanguageStorage()),
-            monitorHistoryURL: directory.appendingPathComponent("monitor.json"))
+            monitorHistoryURL: directory.appendingPathComponent("monitor.json"),
+            analyticsModelDiscovery: AnalyticsModelDiscovery(modelURL: { _ in nil }, integrity: { url in
+                XCTAssertEqual(url, poseURL)
+                return (hash: "synthetic", sizeBytes: 0)
+            }))
         defer { model.shutdown() }
-        XCTAssertTrue(model.config.cameras.isEmpty)
+        IsolatedWallFixtureSupport.assertSafe(model)
         XCTAssertTrue(model.featurePreferences.enabledFeatures.isEmpty)
         XCTAssertFalse(model.running)
         let registry = ACTAActionRegistry()
@@ -153,6 +168,7 @@ private func actaTestModelPreferences() -> ModelSelectionPreferences {
 
 @MainActor
 private func prepareOfflineWallFixture(at root: URL) throws {
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
     try ConfigurationStore.save(WallConfiguration(), to: root.appendingPathComponent("cameras.json"))
     try CameraFeaturePreferencesStore.save(CameraFeaturePreferences(enabledFeatures: []),
         to: root.appendingPathComponent("features.json"))
@@ -168,6 +184,9 @@ private func offlineWallClient() -> ACTAAIClient {
     ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), transport: { _ in
         XCTFail("Unexpected network request")
         throw URLError(.notConnectedToInternet)
+    }, keyProvider: { _ in
+        XCTFail("Unexpected AI credential access")
+        return nil
     })
 }
 

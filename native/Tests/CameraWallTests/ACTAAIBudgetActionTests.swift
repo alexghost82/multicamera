@@ -13,7 +13,7 @@ final class ACTAAIBudgetActionTests: XCTestCase {
     }
 
     private func fixture() async throws -> Fixture {
-        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ai-budget-test-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         let previousModels = ModelSelectionPreferences(
@@ -31,10 +31,12 @@ final class ACTAAIBudgetActionTests: XCTestCase {
         preferences.intervalSeconds = 123
         preferences.cloudNanoModel = "fixture-nano"
         try VLMStore.save(preferences, to: root.appendingPathComponent("vlm.json"))
-        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun),
+        let client = ACTAAIClient(config: WallModel.makeACTAAIConfiguration(
+            from: preferences, featurePreferences: CameraFeaturePreferences(enabledFeatures: [])),
             transport: { _ in XCTFail("Unexpected network request"); throw URLError(.notConnectedToInternet) },
             keyProvider: { _ in XCTFail("Unexpected key access"); return nil })
         let model = WallModel(configURL: root.appendingPathComponent("cameras.json"),
+            poseModelURL: root.appendingPathComponent("fake-pose.mlmodel"),
             trackingStoreURL: root.appendingPathComponent("tracks.sqlite"),
             featureCoordinator: CameraFeatureCoordinator(preferencesURL: root.appendingPathComponent("features.json"),
                 databaseURL: root.appendingPathComponent("features.sqlite")),
@@ -46,7 +48,8 @@ final class ACTAAIBudgetActionTests: XCTestCase {
             operationsPreferencesURL: root.appendingPathComponent("operations.json"),
             alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")),
             languageSettings: LanguageSettings(storage: BudgetLanguageStorage()),
-            monitorHistoryURL: root.appendingPathComponent("monitor.json"))
+            monitorHistoryURL: root.appendingPathComponent("monitor.json"),
+            analyticsModelDiscovery: IsolatedWallFixtureSupport.modelDiscovery)
         let registry = ACTAActionRegistry()
         await registerAllWallActions(registry: registry, model: model)
         return Fixture(root: root, model: model, registry: registry, previousModels: previousModels)
@@ -61,10 +64,13 @@ final class ACTAAIBudgetActionTests: XCTestCase {
     func testConfirmationParityAndPreservingOtherSettings() async throws {
         let f = try await fixture()
         defer { cleanup(f) }
+        let tools = try await ACTAAnalyticsCoordinator.registryTools(registry: f.registry)
+        XCTAssertTrue(tools.contains { $0.name == "acta__settings__update_ai_budget" })
         let before = f.model.vlmPreferences
         let pending = try await f.registry.executeJSON(actionID: "settings.update_ai_budget",
             argumentsJSON: #"{"blurFaces":false,"dailyBudgetUSD":10,"monthlyBudgetUSD":20}"#)
         XCTAssertTrue(pending.requiresOperatorConfirmation)
+        XCTAssertTrue(pending.summary.contains("resets schedule and may prepare models"))
         XCTAssertEqual(f.model.vlmPreferences, before)
         let token = try XCTUnwrap(pending.confirmationToken)
         let result = try await f.registry.confirmAndExecute(token: token, confirmed: true)
@@ -130,9 +136,20 @@ final class ACTAAIBudgetActionTests: XCTestCase {
         var runtime = client.configuration()
         runtime.privacyBlurFacesInCloud = false
         client.updateConfiguration(runtime)
+        let action = WallAIBudgetAction(model: f.model)
+        let verified = try await action.verify(parameters: ["monthlyBudgetUSD": "400"], context: ACTAActionContext())
+        XCTAssertFalse(verified)
         let next = try await f.registry.execute(actionID: "settings.update_ai_budget", parameters: ["monthlyBudgetUSD": "500"])
         let mismatch = try await f.registry.confirmAndExecute(token: XCTUnwrap(next.confirmationToken), confirmed: true)
         XCTAssertFalse(mismatch.success)
+        XCTAssertEqual(try VLMStore.loadPreferences(from: f.model.vlmPreferencesURL), before)
+        client.updateConfiguration(WallModel.makeACTAAIConfiguration(from: before, featurePreferences: f.model.featurePreferences))
+        var changedPolicy = f.model.featurePreferences
+        changedPolicy.allowExternalAI = true
+        try CameraFeaturePreferencesStore.save(changedPolicy, to: f.root.appendingPathComponent("features.json"))
+        let last = try await f.registry.execute(actionID: "settings.update_ai_budget", parameters: ["blurFaces": "false"])
+        let policyMismatch = try await f.registry.confirmAndExecute(token: XCTUnwrap(last.confirmationToken), confirmed: true)
+        XCTAssertFalse(policyMismatch.success)
         XCTAssertEqual(try VLMStore.loadPreferences(from: f.model.vlmPreferencesURL), before)
     }
 }

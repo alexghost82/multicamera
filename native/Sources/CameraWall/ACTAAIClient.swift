@@ -759,11 +759,21 @@ public struct ACTAAgentTurnResult: Sendable, Equatable {
     }
 }
 
-public enum ACTAAgentError: Error, Equatable {
+public enum ACTAAgentError: LocalizedError, Equatable {
     case chainRejected
     case noBackendAvailable
     case badResponse
+
+    public var errorDescription: String? {
+        switch self {
+        case .chainRejected: return "The agent response chain was rejected."
+        case .noBackendAvailable: return "Agent inference requires the explicitly selected in-process MLX model; HTTP servers and cloud backends are not permitted."
+        case .badResponse: return "The agent model returned an invalid response."
+        }
+    }
 }
+
+typealias ACTALocalAgentInference = @Sendable (_ prompt: String, _ images: [Data]) async throws -> String
 
 private enum ACTARequestAuthorizationError: Error {
     case revoked
@@ -784,6 +794,7 @@ public final class ACTAAIClient: @unchecked Sendable {
     private let alertLane = ACTAAsyncLaneLimiter(limit: ACTAAILane.alert.maxConcurrentRequests)
     private let backgroundLane = ACTAAsyncLaneLimiter(limit: ACTAAILane.background.maxConcurrentRequests)
     private let agentTrace: (@Sendable (String) -> Void)?
+    private let localAgentInference: ACTALocalAgentInference?
     private let transport: ACTAHTTPTransport
     private let keyProvider: @Sendable (String) -> String?
 #if DEBUG
@@ -798,10 +809,12 @@ public final class ACTAAIClient: @unchecked Sendable {
         cacheStore: LocalTrackingStore? = nil,
         transport: ACTAHTTPTransport? = nil,
         keyProvider: @escaping @Sendable (String) -> String? = { ACTAKeychainStore.loadKey(account: $0) },
-        agentTrace: (@Sendable (String) -> Void)? = nil
+        agentTrace: (@Sendable (String) -> Void)? = nil,
+        localAgentInference: ACTALocalAgentInference? = nil
     ) {
         self.config = config
         self.agentTrace = agentTrace
+        self.localAgentInference = localAgentInference
         self.localVLM = localVLM
         self.cacheStore = cacheStore
         self.keyProvider = keyProvider
@@ -985,32 +998,6 @@ public final class ACTAAIClient: @unchecked Sendable {
     public static func isLoopbackURL(_ url: URL) -> Bool {
         guard let host = url.host?.lowercased() else { return false }
         return host == "127.0.0.1" || host == "::1" || host == "[::1]" || host == "localhost"
-    }
-
-    private static func redactAgentRequest(
-        _ request: ACTAAgentRequest,
-        config: ACTAAIConfiguration
-    ) -> ACTAAgentRequest {
-        guard config.privacyBlurFacesInCloud || config.privacyBlurPlatesInCloud else { return request }
-        func redactItems(_ items: [ACTAAgentItem]) -> [ACTAAgentItem] {
-            items.map { item in
-                switch item {
-                case .user(let text, let images) where !images.isEmpty:
-                    return .user(text: text, images: ACTACloudPrivacyRedactor.redactImages(images, config: config))
-                default:
-                    return item
-                }
-            }
-        }
-        return ACTAAgentRequest(
-            tier: request.tier,
-            instructions: request.instructions,
-            fullInput: redactItems(request.fullInput),
-            chainedInput: redactItems(request.chainedInput),
-            previousResponseID: request.previousResponseID,
-            tools: request.tools,
-            toolChoice: request.toolChoice
-        )
     }
 
     private func dispatchRawRequest(
@@ -1299,130 +1286,26 @@ public final class ACTAAIClient: @unchecked Sendable {
     // MARK: Agent tool-calling loop step
 
     /// Runs one model step of a tool-calling agent. The caller executes returned `functionCalls` and loops.
-    /// - Parameter pinnedBackend: keeps a multi-step loop on the backend that served its first step.
+    /// Only the explicitly selected in-process MLX backend may receive agent data.
+    /// A loopback HTTP server is an external process and is not a local inference guarantee.
     public func runAgentStep(
         lane: ACTAAILane = .chat,
         request: ACTAAgentRequest,
         pinnedBackend: ACTAAgentBackend? = nil
     ) async throws -> ACTAAgentTurnResult {
-        let currentConfig = configuration()
-        let candidates: [ACTAAgentBackend]
-        if let pinnedBackend {
-            candidates = [pinnedBackend]
-        } else {
-            switch currentConfig.mode {
-            case .openAI: candidates = [.openAI]
-            case .localVLLM: candidates = [.vllm]
-            case .mlxInProcess: candidates = [.mlx]
-            case .hybridAuto:
-                var list: [ACTAAgentBackend] = []
-                if circuitBreaker.allowRequest() { list.append(.vllm) }
-                if currentConfig.allowExternalAI, budgetTracker.isWithinBudget(config: currentConfig) { list.append(.openAI) }
-                list.append(.mlx)
-                candidates = list
-            case .dryRun: candidates = []
-            }
-        }
-        guard !candidates.isEmpty else { throw ACTAAgentError.noBackendAvailable }
-
-        return try await limiter(for: lane).withPermit {
-            var lastError: Error = ACTAAgentError.noBackendAvailable
-            for backend in candidates {
-                let start = Date()
-                do {
-                    let result: ACTAAgentTurnResult
-                    switch backend {
-                    case .openAI:
-                        result = try await agentStepOpenAI(config: currentConfig, lane: lane, request: request)
-                    case .vllm, .mlx:
-                        result = try await agentStepLocal(config: currentConfig, backend: backend, request: request)
-                    case .offline:
-                        throw ACTAAgentError.noBackendAvailable
-                    }
-                    circuitBreaker.recordSuccess(latencyMs: Date().timeIntervalSince(start) * 1000.0, backend: backend.rawValue)
-                    return result
-                } catch ACTAAgentError.chainRejected {
-                    throw ACTAAgentError.chainRejected
-                } catch {
-                    circuitBreaker.recordFailure()
-                    lastError = error
-                }
-            }
-            throw lastError
-        }
-    }
-
-    private func agentStepOpenAI(
-        config: ACTAAIConfiguration,
-        lane: ACTAAILane,
-        request: ACTAAgentRequest
-    ) async throws -> ACTAAgentTurnResult {
-        guard config.allowExternalAI else {
+        let (currentConfig, revision) = configurationSnapshot()
+        guard currentConfig.mode == .mlxInProcess,
+              pinnedBackend == nil || pinnedBackend == .mlx else {
             throw ACTAAgentError.noBackendAvailable
         }
-        let redactedRequest = Self.redactAgentRequest(request, config: config)
-        let preferredAccount = (lane == .alert) ? ACTAKeychainStore.alertKeyAccount : ACTAKeychainStore.primaryKeyAccount
-        let apiKey = ACTAKeychainStore.loadKey(account: preferredAccount)
-            ?? ACTAKeychainStore.loadKey(account: ACTAKeychainStore.primaryKeyAccount)
-        var body = Self.buildOpenAIAgentBody(request: redactedRequest)
-        body["model"] = config.tierModelNames[request.tier.rawValue] ?? request.tier.rawValue
-        let chained = body["previous_response_id"] != nil
-
-        var urls: [(URL, String)] = []
-        if let apiKey, let primary = URL(string: config.openAIBaseURL) { urls.append((primary, apiKey)) }
-        if let backup = URL(string: config.backupRelayURL) { urls.append((backup, apiKey ?? "backup-relay")) }
-        guard !urls.isEmpty else { throw ACTAAgentError.noBackendAvailable }
-
-        var lastError: Error = ACTAAgentError.noBackendAvailable
-        for (url, key) in urls {
-            do {
-                var http = URLRequest(url: url)
-                http.httpMethod = "POST"
-                http.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                http.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-                http.httpBody = try JSONSerialization.data(withJSONObject: body)
-                let (data, response) = try await sendAuthorized(http, requiresExternalConsent: true)
-                if chained, response.statusCode == 400 || response.statusCode == 404 {
-                    // Expired/unknown `previous_response_id` or unsettled call debt: caller retries with full history.
-                    throw ACTAAgentError.chainRejected
-                }
-                guard (200..<300).contains(response.statusCode),
-                      let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    throw ACTAAgentError.badResponse
-                }
-                let parsed = Self.parseResponsesOutput(root)
-                guard parsed.text != nil || !parsed.calls.isEmpty else { throw ACTAAgentError.badResponse }
-                let inputItems = chained ? request.chainedInput : request.fullInput
-                let inputChars = request.instructions.count + inputItems.reduce(0) { $0 + Self.itemTextLength($1) }
-                let imageCount = inputItems.reduce(0) { total, item in
-                    if case .user(_, let images) = item { return total + images.count }
-                    return total
-                }
-                budgetTracker.recordUsage(
-                    tier: request.tier,
-                    inputTokens: inputChars / 4 + imageCount * 250,
-                    outputTokens: ((parsed.text?.count ?? 0) + parsed.calls.reduce(0) { $0 + $1.argumentsJSON.count }) / 4,
-                    isLocalFree: false
-                )
-                return ACTAAgentTurnResult(
-                    responseID: root["id"] as? String,
-                    text: parsed.text,
-                    functionCalls: parsed.calls,
-                    backend: .openAI,
-                    usedChain: chained
-                )
-            } catch ACTAAgentError.chainRejected {
-                throw ACTAAgentError.chainRejected
-            } catch {
-                lastError = error
-            }
+        return try await limiter(for: lane).withPermit {
+            try Task.checkCancellation()
+            guard self.isCurrentConfiguration(revision) else { throw ACTAAgentError.noBackendAvailable }
+            return try await self.agentStepLocal(request: request)
         }
-        throw lastError
     }
 
     private func agentStepLocal(
-        config: ACTAAIConfiguration,
-        backend: ACTAAgentBackend,
         request: ACTAAgentRequest
     ) async throws -> ACTAAgentTurnResult {
         let forceAnswer: Bool
@@ -1447,15 +1330,15 @@ public final class ACTAAIClient: @unchecked Sendable {
             Replace S1 with actual supporting aliases from the catalogue. Put source aliases ONLY in citedRecordIDs, not in the answer text. Do not list UUIDs, propose actions, add recommendations, or repeat the JSON field names in answerMarkdown. Never claim that no other events occurred merely because only a sample was retrieved.
             """
         } else { prompt = Self.renderLocalAgentPrompt(request: request) }
-        agentTrace?("REQUEST chars=\(prompt.count) backend=\(backend)")
+        agentTrace?("REQUEST chars=\(prompt.count) backend=mlx")
         var images: [Data] = []
         for item in request.fullInput {
             if case .user(_, let imgs) = item { images.append(contentsOf: imgs) }
         }
         let recentImages = Array(images.suffix(4))
         let raw: String
-        if backend == .vllm {
-            raw = try await callLocalVLLM(config: config, prompt: prompt, jpegImages: recentImages, tier: request.tier)
+        if let localAgentInference {
+            raw = try await localAgentInference(prompt, recentImages)
         } else {
             guard let localVLM else { throw ACTAAgentError.noBackendAvailable }
             if recentImages.isEmpty { raw = try await localVLM.analyze(text: prompt, maxTokens: 2048, requestWorkload: .interactive) }
@@ -1463,7 +1346,7 @@ public final class ACTAAIClient: @unchecked Sendable {
         }
         agentTrace?("RAW \(raw)")
         let parsed = Self.parseLocalAgentReply(raw)
-        return ACTAAgentTurnResult(responseID: nil, text: parsed.text, functionCalls: parsed.calls, backend: backend)
+        return ACTAAgentTurnResult(responseID: nil, text: parsed.text, functionCalls: parsed.calls, backend: .mlx)
     }
 
     public static func buildOpenAIAgentBody(request: ACTAAgentRequest) -> [String: Any] {
@@ -1628,15 +1511,6 @@ public final class ACTAAIClient: @unchecked Sendable {
             return (nil, [ACTAAgentFunctionCall(callID: "call_local_\(UUID().uuidString.prefix(12))", name: "present_answer", argumentsJSON: cleaned)])
         }
         return (raw.trimmingCharacters(in: .whitespacesAndNewlines), [])
-    }
-
-    private static func itemTextLength(_ item: ACTAAgentItem) -> Int {
-        switch item {
-        case .user(let text, _): return text.count
-        case .assistantText(let text): return text.count
-        case .functionCall(let call): return call.argumentsJSON.count + call.name.count
-        case .functionOutput(_, let output): return output.count
-        }
     }
 
     public static func extractJSONObject(from raw: String) -> String {

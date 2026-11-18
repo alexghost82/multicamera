@@ -3,8 +3,8 @@ import Foundation
 
 struct WallAIBudgetAction: ACTAActionProtocol {
     let id = "settings.update_ai_budget"
-    let title = "Update cloud privacy and AI budget"
-    let description = "Patch cloud face/plate blurring and AI budget preferences after operator approval. This does not grant external AI permission or guarantee billing limits."
+    let title = "Update AI privacy and budget (resets schedule and may prepare models)"
+    let description = "Patch cloud face/plate blurring and AI budget preferences after operator approval, using the settings save workflow which may prepare models and reset the schedule. This does not grant external AI permission or guarantee billing limits."
     let classification = ACTAActionClassification.securitySensitive
     unowned let model: WallModel
 
@@ -58,13 +58,6 @@ struct WallAIBudgetAction: ACTAActionProtocol {
 
     func validate(parameters: [String: String]) throws { _ = try Patch(parameters) }
 
-    private func matches(_ preferences: VLMPreferences, _ configuration: ACTAAIConfiguration) -> Bool {
-        preferences.privacyBlurFacesInCloud == configuration.privacyBlurFacesInCloud
-            && preferences.privacyBlurPlatesInCloud == configuration.privacyBlurPlatesInCloud
-            && preferences.dailyBudgetLimitUSD == configuration.dailyBudgetLimitUSD
-            && preferences.monthlyBudgetLimitUSD == configuration.monthlyBudgetLimitUSD
-    }
-
     func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
         let patch = try Patch(parameters)
         guard context.isConfirmed else {
@@ -76,15 +69,18 @@ struct WallAIBudgetAction: ACTAActionProtocol {
                 throw ConfigurationError.invalid("AI client is unavailable.")
             }
             let current = model.vlmPreferences
+            let policy = try model.featurePolicySnapshotChecked()
             guard try VLMStore.loadPreferences(from: model.vlmPreferencesURL) == current,
-                  matches(current, client.configuration()) else {
+                  client.configuration() == WallModel.makeACTAAIConfiguration(from: current, featurePreferences: policy) else {
                 throw ConfigurationError.invalid("AI preferences or runtime configuration changed; reload them before making changes.")
             }
             let next = patch.applying(to: current)
             try next.validate()
             try model.saveVLMPreferences(next)
+            let savedPolicy = try model.featurePolicySnapshotChecked()
             guard try VLMStore.loadPreferences(from: model.vlmPreferencesURL) == next,
-                  model.vlmPreferences == next, matches(next, client.configuration()) else {
+                  model.vlmPreferences == next,
+                  client.configuration() == WallModel.makeACTAAIConfiguration(from: next, featurePreferences: savedPolicy) else {
                 throw ConfigurationError.invalid("AI preferences persistence or runtime verification failed.")
             }
             let output: [String: Any] = [
@@ -102,9 +98,11 @@ struct WallAIBudgetAction: ACTAActionProtocol {
         return try await MainActor.run {
             guard let client = model.actaAnalytics?.aiClient else { return false }
             let current = model.vlmPreferences
+            let stored = try VLMStore.loadPreferences(from: model.vlmPreferencesURL)
+            let policy = try model.featurePolicySnapshotChecked()
             return patch.applying(to: current) == current
-                && (try VLMStore.loadPreferences(from: model.vlmPreferencesURL)) == current
-                && matches(current, client.configuration())
+                && stored == current
+                && client.configuration() == WallModel.makeACTAAIConfiguration(from: current, featurePreferences: policy)
         }
     }
 }

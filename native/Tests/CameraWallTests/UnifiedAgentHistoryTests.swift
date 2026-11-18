@@ -30,6 +30,9 @@ final class UnifiedAgentHistoryTests: XCTestCase {
     func testFrameQuestionEntryUsesOneHistoryAgentEvenWithNoLiveCameras() async throws {
         let (directory, _, scans) = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
+        let previousModels = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previousModels) }
+        try ModelSelectionPreferences(enabled: []).save(to: directory.appendingPathComponent("model-preferences.json"))
         let configURL = directory.appendingPathComponent("cameras.json")
         try ConfigurationStore.save(WallConfiguration(), to: configURL)
         let features = CameraFeatureCoordinator(preferencesURL: directory.appendingPathComponent("features.json"),
@@ -38,8 +41,12 @@ final class UnifiedAgentHistoryTests: XCTestCase {
         let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), transport: { _ in
             XCTFail("Unexpected network request")
             throw URLError(.notConnectedToInternet)
+        }, keyProvider: { _ in
+            XCTFail("Unexpected AI credential access")
+            return nil
         })
         let wall = WallModel(configURL: configURL, workerMode: false,
+            poseModelURL: directory.appendingPathComponent("fake-pose.mlmodel"),
             trackingStoreURL: directory.appendingPathComponent("history.sqlite"),
             featureCoordinator: features,
             analyticsDirectoryURL: directory.appendingPathComponent("analytics"),
@@ -51,8 +58,11 @@ final class UnifiedAgentHistoryTests: XCTestCase {
             operationsPreferencesURL: directory.appendingPathComponent("operations.json"),
             alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")),
             languageSettings: LanguageSettings(storage: HistoryTestLanguageStorage()),
-            monitorHistoryURL: directory.appendingPathComponent("monitor.json"))
+            monitorHistoryURL: directory.appendingPathComponent("monitor.json"),
+            analyticsModelDiscovery: AnalyticsModelDiscovery(modelURL: { _ in nil },
+                integrity: { _ in (hash: "synthetic", sizeBytes: 0) }))
         defer { wall.shutdown() }
+        IsolatedWallFixtureSupport.assertSafe(wall)
         var prefs = wall.vlmPreferences; prefs.actaBackendMode = .dryRun
         try wall.saveVLMPreferences(prefs)
         XCTAssertFalse(wall.running)
@@ -167,6 +177,7 @@ final class UnifiedAgentHistoryTests: XCTestCase {
                 ModelSelectionRegistry.path(service).map { (service, $0.path) }
             }))
         defer { ModelSelectionRegistry.update(previousModels) }
+        try ModelSelectionPreferences(enabled: []).save(to: directory.appendingPathComponent("model-preferences.json"))
         let configURL = directory.appendingPathComponent("cameras.json")
         try ConfigurationStore.save(WallConfiguration(), to: configURL)
         let features = CameraFeatureCoordinator(preferencesURL: directory.appendingPathComponent("features.json"),
@@ -175,8 +186,12 @@ final class UnifiedAgentHistoryTests: XCTestCase {
         let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .localVLLM), transport: { request in
             try await Task.sleep(for: .seconds(2))
             return (Data("{\"choices\":[{\"message\":{\"content\":\"late answer\"}}]}".utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        }, keyProvider: { _ in
+            XCTFail("Unexpected AI credential access")
+            return nil
         })
         let wall = WallModel(configURL: configURL, workerMode: false,
+            poseModelURL: directory.appendingPathComponent("fake-pose.mlmodel"),
             trackingStoreURL: directory.appendingPathComponent("history.sqlite"),
             featureCoordinator: features, analyticsDirectoryURL: directory.appendingPathComponent("analytics"),
             agentClient: client, cameraMemoryStore: CameraMemoryStore(url: directory.appendingPathComponent("frames")),
@@ -186,8 +201,11 @@ final class UnifiedAgentHistoryTests: XCTestCase {
             operationsPreferencesURL: directory.appendingPathComponent("operations.json"),
             alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")),
             languageSettings: LanguageSettings(storage: HistoryTestLanguageStorage()),
-            monitorHistoryURL: directory.appendingPathComponent("monitor.json"))
+            monitorHistoryURL: directory.appendingPathComponent("monitor.json"),
+            analyticsModelDiscovery: AnalyticsModelDiscovery(modelURL: { _ in nil },
+                integrity: { _ in (hash: "synthetic", sizeBytes: 0) }))
         defer { wall.shutdown() }
+        IsolatedWallFixtureSupport.assertSafe(wall)
         XCTAssertTrue(wall.config.cameras.isEmpty)
         XCTAssertTrue(wall.featurePreferences.enabledFeatures.isEmpty)
         XCTAssertFalse(wall.running)

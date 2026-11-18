@@ -733,8 +733,19 @@ public final class LocalTrackingStore: @unchecked Sendable {
             guard result == SQLITE_ROW, let trackID = UUID(uuidString: text(statement, 0)) else {
                 throw databaseError()
             }
+
             trackIDs.insert(trackID)
         }
+    }
+
+    // Reserve against writers in other connections while the sidecar commits.
+    // This does not make the two databases crash-atomic.
+    func withIdentityReadReservation<T>(_ operation: () throws -> T) throws -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        try execute("BEGIN IMMEDIATE")
+        defer { try? execute("ROLLBACK") }
+        return try operation()
     }
 
     public func reidEmbedding(for trackID: UUID) throws -> [Float]? {

@@ -5,47 +5,103 @@ import XCTest
 
 @MainActor
 final class ACTAOperationalAdapterTests: XCTestCase {
+    private func isolatedReadModel(root: URL, preferencesURL: URL) throws -> WallModel {
+        try ConfigurationStore.save(WallConfiguration(), to: root.appendingPathComponent("cameras.json"))
+        var models = ModelSelectionPreferences()
+        models.enabled = []
+        try models.save(to: root.appendingPathComponent("model-preferences.json"))
+        var aiPreferences = VLMPreferences()
+        aiPreferences.actaBackendMode = .dryRun
+        try VLMStore.save(aiPreferences, to: root.appendingPathComponent("vlm.json"))
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), transport: { _ in
+            XCTFail("Unexpected network request")
+            throw URLError(.notConnectedToInternet)
+        }, keyProvider: { _ in
+            XCTFail("Unexpected AI credential read")
+            return nil
+        })
+        return WallModel(configURL: root.appendingPathComponent("cameras.json"), workerMode: false,
+            poseModelURL: root.appendingPathComponent("unused-pose.mlmodel"),
+            trackingStoreURL: root.appendingPathComponent("tracks.sqlite"),
+            featureCoordinator: CameraFeatureCoordinator(preferencesURL: preferencesURL,
+                databaseURL: root.appendingPathComponent("features.sqlite")),
+            analyticsDirectoryURL: root.appendingPathComponent("analytics"),
+            agentClient: client,
+            cameraMemoryStore: CameraMemoryStore(url: root.appendingPathComponent("frames")),
+            operationsWatchURL: root.appendingPathComponent("watches.json"),
+            missionStoreURL: root.appendingPathComponent("missions.json"),
+            cameraCredentialStore: ACTAIsolatedCredentials(),
+            operationsPreferencesURL: root.appendingPathComponent("operations.json"),
+            alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")),
+            languageSettings: LanguageSettings(storage: OperationalReadLanguageStorage()),
+            monitorHistoryURL: root.appendingPathComponent("monitor.json"),
+            analyticsModelDiscovery: IsolatedWallFixtureSupport.modelDiscovery)
+    }
+
+    private func currentModelPreferences() -> ModelSelectionPreferences {
+        ModelSelectionPreferences(
+            enabled: Set(LocalModelService.allCases.filter { ModelSelectionRegistry.isEnabled($0) }),
+            paths: Dictionary(uniqueKeysWithValues: LocalModelService.allCases.compactMap { service in
+                ModelSelectionRegistry.path(service).map { (service, $0.path) }
+            }))
+    }
+
     private func isolatedReviewFixture() throws -> (URL, WallModel, LocalTrackingStore) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let configURL = root.appendingPathComponent("cameras.json")
         let trackingURL = root.appendingPathComponent("tracks.sqlite")
         try ConfigurationStore.save(WallConfiguration(), to: configURL)
-        let model = WallModel(configURL: configURL, trackingStoreURL: trackingURL,
+        try ModelSelectionPreferences(enabled: []).save(to: root.appendingPathComponent("model-preferences.json"))
+        try CameraFeaturePreferencesStore.save(CameraFeaturePreferences(enabledFeatures: []), to: root.appendingPathComponent("features.json"))
+        let model = WallModel(configURL: configURL, poseModelURL: root.appendingPathComponent("fake-pose.mlmodel"), trackingStoreURL: trackingURL,
             featureCoordinator: CameraFeatureCoordinator(preferencesURL: root.appendingPathComponent("features.json"),
                 databaseURL: root.appendingPathComponent("features.sqlite")),
             analyticsDirectoryURL: root.appendingPathComponent("analytics"),
+            agentClient: IsolatedWallFixtureSupport.client(),
             cameraMemoryStore: CameraMemoryStore(url: root.appendingPathComponent("frames")),
             operationsWatchURL: root.appendingPathComponent("watches.json"),
             missionStoreURL: root.appendingPathComponent("missions.json"),
             cameraCredentialStore: NoTestCredentials(),
             operationsPreferencesURL: root.appendingPathComponent("operations.json"),
-            alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")))
+            alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")),
+            languageSettings: LanguageSettings(storage: OperationalReadLanguageStorage()),
+            monitorHistoryURL: root.appendingPathComponent("monitor.json"),
+            analyticsModelDiscovery: IsolatedWallFixtureSupport.modelDiscovery)
         return (root, model, try LocalTrackingStore(url: trackingURL))
     }
 
     private func fixture() throws -> (URL, WallModel) {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".memory-operational-fixture-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let prefs = root.appendingPathComponent("features.json")
         try CameraFeaturePreferencesStore.save(CameraFeaturePreferences(enabledFeatures: [.operationalAlerts]), to: prefs)
         var config = WallConfiguration()
         config.cameras = [Camera(name: "Fixture", substream: "rtsp://127.0.0.1/fixture", enabled: false)]
         try ConfigurationStore.save(config, to: root.appendingPathComponent("cameras.json"))
+        try ModelSelectionPreferences(enabled: []).save(to: root.appendingPathComponent("model-preferences.json"))
         let model = WallModel(configURL: root.appendingPathComponent("cameras.json"),
+            poseModelURL: root.appendingPathComponent("fake-pose.mlmodel"),
             trackingStoreURL: root.appendingPathComponent("tracks.sqlite"),
             featureCoordinator: CameraFeatureCoordinator(preferencesURL: prefs, databaseURL: root.appendingPathComponent("features.sqlite")),
             analyticsDirectoryURL: root.appendingPathComponent("analytics"),
+            agentClient: IsolatedWallFixtureSupport.client(),
             cameraMemoryStore: CameraMemoryStore(url: root.appendingPathComponent("frames")),
             operationsWatchURL: root.appendingPathComponent("watches.json"),
             missionStoreURL: root.appendingPathComponent("missions.json"),
             cameraCredentialStore: ACTAIsolatedCredentials(),
             operationsPreferencesURL: root.appendingPathComponent("operations.json"),
-            alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")))
+            alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")),
+            languageSettings: LanguageSettings(storage: OperationalReadLanguageStorage()),
+            monitorHistoryURL: root.appendingPathComponent("monitor.json"),
+            analyticsModelDiscovery: IsolatedWallFixtureSupport.modelDiscovery)
         return (root, model)
     }
 
     func testNarrativeActionsRequireReviewAndPreserveAISummary() async throws {
+        let previous = currentModelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let store = try LocalTrackingStore(url: root.appendingPathComponent("tracks.sqlite"))
@@ -98,6 +154,8 @@ final class ACTAOperationalAdapterTests: XCTestCase {
     }
 
     func testWatchActionsShareGUIServiceAndVerifyDisk() async throws {
+        let previous = currentModelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = ACTAActionRegistry()
@@ -122,6 +180,8 @@ final class ACTAOperationalAdapterTests: XCTestCase {
     }
 
     func testWatchValidationAndCorruptStorageCannotReportSuccess() async throws {
+        let previous = currentModelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = ACTAActionRegistry()
@@ -145,6 +205,8 @@ final class ACTAOperationalAdapterTests: XCTestCase {
     }
 
     func testIncidentTransitionAndQueryUsePersistentDomainService() async throws {
+        let previous = currentModelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = ACTAActionRegistry()
@@ -197,6 +259,9 @@ final class ACTAOperationalAdapterTests: XCTestCase {
     func testAlertAndISAPIReadsUseVerifiedGUIState() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let previousModels = currentModelPreferences()
+        defer { ModelSelectionRegistry.update(previousModels) }
         let prefs = root.appendingPathComponent("features.json")
         try CameraFeaturePreferencesStore.save(CameraFeaturePreferences(enabledFeatures: [.operationalAlerts]), to: prefs)
         let cameraID = UUID()
@@ -208,17 +273,10 @@ final class ACTAOperationalAdapterTests: XCTestCase {
         let eventsURL = root.appendingPathComponent("isapi-events.json")
         try VLMStore.save([alert], to: alertsURL)
         try ISAPIEventStore.save([event], to: eventsURL)
-        let model = WallModel(configURL: root.appendingPathComponent("cameras.json"),
-            trackingStoreURL: root.appendingPathComponent("tracks.sqlite"),
-            featureCoordinator: CameraFeatureCoordinator(preferencesURL: prefs, databaseURL: root.appendingPathComponent("features.sqlite")),
-            analyticsDirectoryURL: root.appendingPathComponent("analytics"),
-            cameraMemoryStore: CameraMemoryStore(url: root.appendingPathComponent("frames")),
-            operationsWatchURL: root.appendingPathComponent("watches.json"),
-            missionStoreURL: root.appendingPathComponent("missions.json"),
-            cameraCredentialStore: ACTAIsolatedCredentials(),
-            operationsPreferencesURL: root.appendingPathComponent("operations.json"),
-            alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")))
-        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let model = try isolatedReadModel(root: root, preferencesURL: prefs)
+        defer { model.shutdown() }
+        XCTAssertTrue(model.config.cameras.isEmpty)
+        XCTAssertFalse(model.running)
         let registry = ACTAActionRegistry()
         await registerAllWallActions(registry: registry, model: model)
         let tools = try await ACTAAnalyticsCoordinator.registryTools(registry: registry)
@@ -264,23 +322,19 @@ final class ACTAOperationalAdapterTests: XCTestCase {
     func testReadSourcesStayUnavailableAfterFailedStartupEvenIfFilesReappear() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let previousModels = currentModelPreferences()
+        defer { ModelSelectionRegistry.update(previousModels) }
         let prefs = root.appendingPathComponent("features.json")
         try CameraFeaturePreferencesStore.save(CameraFeaturePreferences(enabledFeatures: [.operationalAlerts]), to: prefs)
         let alertsURL = root.appendingPathComponent("vlm-alerts.json")
         let eventsURL = root.appendingPathComponent("isapi-events.json")
         try Data("{broken".utf8).write(to: alertsURL)
         try Data("{broken".utf8).write(to: eventsURL)
-        let model = WallModel(configURL: root.appendingPathComponent("cameras.json"),
-            trackingStoreURL: root.appendingPathComponent("tracks.sqlite"),
-            featureCoordinator: CameraFeatureCoordinator(preferencesURL: prefs, databaseURL: root.appendingPathComponent("features.sqlite")),
-            analyticsDirectoryURL: root.appendingPathComponent("analytics"),
-            cameraMemoryStore: CameraMemoryStore(url: root.appendingPathComponent("frames")),
-            operationsWatchURL: root.appendingPathComponent("watches.json"),
-            missionStoreURL: root.appendingPathComponent("missions.json"),
-            cameraCredentialStore: ACTAIsolatedCredentials(),
-            operationsPreferencesURL: root.appendingPathComponent("operations.json"),
-            alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")))
-        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let model = try isolatedReadModel(root: root, preferencesURL: prefs)
+        defer { model.shutdown() }
+        XCTAssertTrue(model.config.cameras.isEmpty)
+        XCTAssertFalse(model.running)
         try Data("[]".utf8).write(to: alertsURL)
         try Data("[]".utf8).write(to: eventsURL)
         let registry = ACTAActionRegistry()
@@ -292,6 +346,8 @@ final class ACTAOperationalAdapterTests: XCTestCase {
     }
 
     func testExpiredAlertReviewDoesNotLeaveStaleAcknowledgementInGUI() async throws {
+        let previous = currentModelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let prefsURL = root.appendingPathComponent("features.json")
@@ -303,16 +359,7 @@ final class ACTAOperationalAdapterTests: XCTestCase {
         let store = try CameraFeatureStore(url: databaseURL)
         _ = try store.reviewOperationsAlert(alertID: alert.id, status: .acknowledged, preferences: preferences,
                                             at: Date().addingTimeInterval(-2 * 86_400))
-        let model = WallModel(configURL: root.appendingPathComponent("cameras.json"),
-            trackingStoreURL: root.appendingPathComponent("tracks.sqlite"),
-            featureCoordinator: CameraFeatureCoordinator(preferencesURL: prefsURL, databaseURL: databaseURL),
-            analyticsDirectoryURL: root.appendingPathComponent("analytics"),
-            cameraMemoryStore: CameraMemoryStore(url: root.appendingPathComponent("frames")),
-            operationsWatchURL: root.appendingPathComponent("watches.json"),
-            missionStoreURL: root.appendingPathComponent("missions.json"),
-            cameraCredentialStore: ACTAIsolatedCredentials(),
-            operationsPreferencesURL: root.appendingPathComponent("operations.json"),
-            alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")))
+        let model = try isolatedReadModel(root: root, preferencesURL: prefsURL)
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         XCTAssertNil(model.operationsAlertReviews[alert.id])
         XCTAssertNil(model.operationsAlertAcknowledgements[alert.id])
@@ -324,21 +371,14 @@ final class ACTAOperationalAdapterTests: XCTestCase {
     }
 
     func testAlertsBecomeReadableWhenEnabledAfterStartup() async throws {
+        let previous = currentModelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let prefsURL = root.appendingPathComponent("features.json")
         try CameraFeaturePreferencesStore.save(CameraFeaturePreferences(), to: prefsURL)
         try VLMStore.save([], to: root.appendingPathComponent("vlm-alerts.json"))
-        let model = WallModel(configURL: root.appendingPathComponent("cameras.json"),
-            trackingStoreURL: root.appendingPathComponent("tracks.sqlite"),
-            featureCoordinator: CameraFeatureCoordinator(preferencesURL: prefsURL, databaseURL: root.appendingPathComponent("features.sqlite")),
-            analyticsDirectoryURL: root.appendingPathComponent("analytics"),
-            cameraMemoryStore: CameraMemoryStore(url: root.appendingPathComponent("frames")),
-            operationsWatchURL: root.appendingPathComponent("watches.json"),
-            missionStoreURL: root.appendingPathComponent("missions.json"),
-            cameraCredentialStore: ACTAIsolatedCredentials(),
-            operationsPreferencesURL: root.appendingPathComponent("operations.json"),
-            alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")))
+        let model = try isolatedReadModel(root: root, preferencesURL: prefsURL)
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = ACTAActionRegistry()
         await registerAllWallActions(registry: registry, model: model)
@@ -350,6 +390,8 @@ final class ACTAOperationalAdapterTests: XCTestCase {
     }
 
     func testAlertReadIgnoresUnrelatedWatchLoadFailure() async throws {
+        let previous = currentModelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let prefsURL = root.appendingPathComponent("features.json")
@@ -358,16 +400,7 @@ final class ACTAOperationalAdapterTests: XCTestCase {
         let watchURL = root.appendingPathComponent("watches.json")
         let broken = Data("{invalid".utf8)
         try broken.write(to: watchURL)
-        let model = WallModel(configURL: root.appendingPathComponent("cameras.json"),
-            trackingStoreURL: root.appendingPathComponent("tracks.sqlite"),
-            featureCoordinator: CameraFeatureCoordinator(preferencesURL: prefsURL, databaseURL: root.appendingPathComponent("features.sqlite")),
-            analyticsDirectoryURL: root.appendingPathComponent("analytics"),
-            cameraMemoryStore: CameraMemoryStore(url: root.appendingPathComponent("frames")),
-            operationsWatchURL: watchURL,
-            missionStoreURL: root.appendingPathComponent("missions.json"),
-            cameraCredentialStore: ACTAIsolatedCredentials(),
-            operationsPreferencesURL: root.appendingPathComponent("operations.json"),
-            alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")))
+        let model = try isolatedReadModel(root: root, preferencesURL: prefsURL)
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = ACTAActionRegistry()
         await registerAllWallActions(registry: registry, model: model)
@@ -377,6 +410,8 @@ final class ACTAOperationalAdapterTests: XCTestCase {
     }
 
     func testAlertReadMatchesGUIAfterRetentionPolicyChange() async throws {
+        let previous = currentModelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let prefsURL = root.appendingPathComponent("features.json")
@@ -388,16 +423,7 @@ final class ACTAOperationalAdapterTests: XCTestCase {
         let store = try CameraFeatureStore(url: databaseURL)
         _ = try store.reviewOperationsAlert(alertID: alert.id, status: .acknowledged, preferences: preferences,
                                             at: Date().addingTimeInterval(-2 * 86_400))
-        let model = WallModel(configURL: root.appendingPathComponent("cameras.json"),
-            trackingStoreURL: root.appendingPathComponent("tracks.sqlite"),
-            featureCoordinator: CameraFeatureCoordinator(preferencesURL: prefsURL, databaseURL: databaseURL),
-            analyticsDirectoryURL: root.appendingPathComponent("analytics"),
-            cameraMemoryStore: CameraMemoryStore(url: root.appendingPathComponent("frames")),
-            operationsWatchURL: root.appendingPathComponent("watches.json"),
-            missionStoreURL: root.appendingPathComponent("missions.json"),
-            cameraCredentialStore: ACTAIsolatedCredentials(),
-            operationsPreferencesURL: root.appendingPathComponent("operations.json"),
-            alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")))
+        let model = try isolatedReadModel(root: root, preferencesURL: prefsURL)
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         var updated = model.featurePreferences
         updated.retentionDays = 1
@@ -410,6 +436,8 @@ final class ACTAOperationalAdapterTests: XCTestCase {
     }
 
     func testEvidenceDeletionRequiresApprovalAndPreservesIncidentRecord() async throws {
+        let previous = currentModelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let engine = model.localAnalyticsEngine
@@ -437,6 +465,8 @@ final class ACTAOperationalAdapterTests: XCTestCase {
     }
 
     func testMemoryDeletionRequiresApprovalAndRemovesActualImage() async throws {
+        let previous = currentModelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let frame = try model.cameraMemoryStore.save(Data("fixture frame".utf8), cameraID: UUID(),
@@ -456,6 +486,8 @@ final class ACTAOperationalAdapterTests: XCTestCase {
     }
 
     func testLegacyRegistryFallbackFailsClosedWithoutChangingProposal() throws {
+        let previous = currentModelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model, store) = try isolatedReviewFixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let proposal = ACTAChatActionRecord(actionID: "legacy-registry", threadID: "default",
@@ -480,6 +512,8 @@ final class ACTAOperationalAdapterTests: XCTestCase {
     }
 
     func testTokenReviewClaimsProposalAndExecutesOnce() async throws {
+        let previous = currentModelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model, store) = try isolatedReviewFixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let recorder = ReviewRecorder()
@@ -536,4 +570,11 @@ private struct NoTestCredentials: CameraCredentialStore {
     func read(_ id: UUID) throws -> Credentials? { XCTFail("Unexpected credential read"); return nil }
     func save(_ credentials: Credentials, for id: UUID) throws { XCTFail("Unexpected credential save") }
     func remove(_ id: UUID) throws { XCTFail("Unexpected credential removal") }
+}
+
+@MainActor
+private final class OperationalReadLanguageStorage: LanguageSettingsStorage {
+    private var values: [String: String] = [:]
+    func string(forKey key: String) -> String? { values[key] }
+    func set(_ value: String, forKey key: String) { values[key] = value }
 }

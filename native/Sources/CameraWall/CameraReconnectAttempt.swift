@@ -17,7 +17,56 @@ protocol ReconnectAttemptSession: AnyObject {
     // delayed startup/callback work, including work which ignores cancellation.
     func start() throws
     func latestFrame() -> ReconnectFrameEvidence?
+    var failure: Error? { get }
     func stop()
+}
+
+extension ReconnectAttemptSession {
+    var failure: Error? { nil }
+}
+
+@MainActor
+final class NetworkReconnectSession: ReconnectAttemptSession {
+    let attemptID: UUID
+    let session: CameraSession
+    private let register: @MainActor () async throws -> String
+    private let startDecoder: @MainActor (CameraSession, String) -> Void
+    private var registration: Task<Void, Never>?
+    private var stopped = false
+    private(set) var failure: Error?
+
+    init(attemptID: UUID, register: @escaping @MainActor () async throws -> String,
+         startDecoder: @escaping @MainActor (CameraSession, String) -> Void) {
+        self.attemptID = attemptID
+        self.session = CameraSession(attemptID: attemptID)
+        self.register = register
+        self.startDecoder = startDecoder
+    }
+
+    func start() throws {
+        guard !stopped, registration == nil else { throw CancellationError() }
+        registration = Task {
+            do {
+                let url = try await register()
+                guard !stopped, !Task.isCancelled else { return }
+                startDecoder(session, url)
+            } catch {
+                if !stopped, !Task.isCancelled { failure = error }
+            }
+        }
+    }
+
+    func latestFrame() -> ReconnectFrameEvidence? {
+        let frame = session.snapshot()
+        return frame.pixel == nil ? nil : frame.reconnectEvidence
+    }
+
+    func stop() {
+        guard !stopped else { return }
+        stopped = true
+        registration?.cancel()
+        session.stop()
+    }
 }
 
 @MainActor
@@ -71,6 +120,7 @@ final class CameraReconnectAttempt {
         while true {
             try Task.checkCancellation()
             guard active?.id == id else { throw Failure.superseded }
+            if let failure = session.failure { throw failure }
             let now = clock.now
             guard now < deadline else { throw Failure.timedOut }
             if let frame = session.latestFrame(),

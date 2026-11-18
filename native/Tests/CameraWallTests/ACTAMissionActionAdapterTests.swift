@@ -6,27 +6,44 @@ import XCTest
 @MainActor
 final class ACTAMissionActionAdapterTests: XCTestCase {
     private func fixture(responder: (@Sendable (String) async throws -> String)? = nil) throws -> (URL, WallModel, UUID) {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".mission-fixture-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         var config = WallConfiguration()
-        let camera = Camera(name: "Fixture", substream: "rtsp://127.0.0.1/fixture", enabled: true)
+        let camera = Camera(name: "Fixture", substream: "rtsp://fixture.invalid/fixture", enabled: true)
         config.cameras = [camera]
         try ConfigurationStore.save(config, to: root.appendingPathComponent("cameras.json"))
+        try ModelSelectionPreferences(enabled: []).save(to: root.appendingPathComponent("model-preferences.json"))
         let prefs = root.appendingPathComponent("features.json")
         try CameraFeaturePreferencesStore.save(CameraFeaturePreferences(enabledFeatures: [.scheduledMissions]), to: prefs)
+        let poseURL = root.appendingPathComponent("fake-pose.mlmodel")
         let model = WallModel(configURL: root.appendingPathComponent("cameras.json"),
+            workerMode: false, poseModelURL: poseURL,
             trackingStoreURL: root.appendingPathComponent("tracks.sqlite"),
             featureCoordinator: CameraFeatureCoordinator(preferencesURL: prefs, databaseURL: root.appendingPathComponent("features.sqlite")),
             analyticsDirectoryURL: root.appendingPathComponent("analytics"),
+            agentClient: IsolatedWallFixtureSupport.client(),
             cameraMemoryStore: CameraMemoryStore(url: root.appendingPathComponent("frames")),
             operationsWatchURL: root.appendingPathComponent("watches.json"), missionStoreURL: root.appendingPathComponent("missions.json"),
             missionConsultResponder: responder, cameraCredentialStore: ACTAIsolatedCredentials(),
             operationsPreferencesURL: root.appendingPathComponent("operations.json"),
-            alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")))
+            alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")),
+            languageSettings: LanguageSettings(storage: InMemoryLanguageStorage()),
+            monitorHistoryURL: root.appendingPathComponent("monitor.json"),
+            analyticsModelDiscovery: AnalyticsModelDiscovery(modelURL: { _ in nil }, integrity: { url in
+                XCTAssertEqual(url, poseURL)
+                return (hash: "synthetic", sizeBytes: 0)
+            }))
+        XCTAssertFalse(model.running)
+        XCTAssertNil(model.tiles[camera.id]?.session)
+        XCTAssertTrue(LocalModelService.allCases.allSatisfy { !ModelSelectionRegistry.isEnabled($0) })
+        XCTAssertFalse(model.featurePreferences.enabledFeatures.contains(.independentWatcher))
         return (root, model, camera.id)
     }
 
     func testConsultationReceiptAndSavedReplyUseLocalDomainWorkflow() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let script = MissionConsultScript()
         let (root, model, camera) = try fixture(responder: { prompt in await script.answer(prompt) })
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
@@ -80,6 +97,8 @@ final class ACTAMissionActionAdapterTests: XCTestCase {
     }
 
     func testMissionLifecyclePreservesHistoryAndUsesInjectedGUIStore() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model, camera) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = ACTAActionRegistry()
@@ -130,6 +149,8 @@ final class ACTAMissionActionAdapterTests: XCTestCase {
     }
 
     func testClockScheduleValidationAndScheduleRecalculation() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model, camera) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = ACTAActionRegistry()
@@ -161,6 +182,8 @@ final class ACTAMissionActionAdapterTests: XCTestCase {
     }
 
     func testCorruptOrExternallyChangedMissionStorageIsNotOverwritten() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model, camera) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = ACTAActionRegistry()
@@ -187,6 +210,8 @@ final class ACTAMissionActionAdapterTests: XCTestCase {
     }
 
     func testManualRunIsAnIdempotentQueueReceiptNotACompletedAnalysis() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model, camera) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = ACTAActionRegistry()

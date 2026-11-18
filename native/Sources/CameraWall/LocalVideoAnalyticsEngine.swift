@@ -6,6 +6,24 @@ import CoreVideo
 import Foundation
 import CameraCore
 
+struct AnalyticsModelDiscovery {
+    var modelURL: (AnalyticsModelID) -> URL?
+    var integrity: (URL) throws -> (hash: String, sizeBytes: Int64)
+
+    static var production: Self {
+        Self(modelURL: { id in
+            switch id {
+            case .yoloObject: return YOLO26Detector.defaultModelURL
+            case .yoloPose: return YOLO26PoseDetector.defaultModelURL
+            case .yoloSegmentation: return ONNXSegmentationEncoder.modelURL
+            case .personReID: return ONNXReIDEncoder.modelURL(for: .person)
+            case .vehicleReID: return ONNXReIDEncoder.modelURL(for: .vehicle)
+            case .qwenVLM, .fightClassifier: return nil
+            }
+        }, integrity: { try ModelIntegrityVerifier.computeSHA256(at: $0) })
+    }
+}
+
 /// Primary Local Video Analytics Engine for macOS / Apple Silicon.
 /// Coordinates frame scheduling, YOLO26s-Pose inference, multi-object fall detection,
 /// temporal behavior analysis, unified incident management, and evidence recording in Local Mode
@@ -43,14 +61,17 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
     private var customPoseModelURL: URL?
     private var isLoopRunning = false
     private var secondaryVLMVerifier: ((SafetyIncident, Data?) async -> IncidentVerification?)?
+    private let modelDiscovery: AnalyticsModelDiscovery
 
     init(
         settingsURL: URL = VideoAnalyticsSettingsStore.defaultURL,
         incidentsURL: URL = UnifiedIncidentManager.defaultURL,
         evidenceDirectoryURL: URL = SafetyEvidenceStore.defaultURL,
         auditLogURL: URL = OperatorAuditLog.defaultURL,
-        poseModelURL: URL? = nil
+        poseModelURL: URL? = nil,
+        modelDiscovery: AnalyticsModelDiscovery = .production
     ) {
+        self.modelDiscovery = modelDiscovery
         self.settingsURL = settingsURL
         let audit = OperatorAuditLog(url: auditLogURL)
         self.auditLog = audit
@@ -659,8 +680,8 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         var map: [AnalyticsModelID: AnalyticsModelDescriptor] = [:]
 
         // 1. YOLO26n Object Detector
-        if let yoloURL = YOLO26Detector.defaultModelURL {
-            let info = try? ModelIntegrityVerifier.computeSHA256(at: yoloURL)
+        if let yoloURL = modelDiscovery.modelURL(.yoloObject) {
+            let info = try? modelDiscovery.integrity(yoloURL)
             map[.yoloObject] = AnalyticsModelDescriptor(
                 modelID: .yoloObject,
                 version: "26n-coreml",
@@ -684,8 +705,8 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         // 2. YOLO26s-Pose Detector
         if let existingPose = modelDescriptors[.yoloPose], existingPose.status == .ready || existingPose.status == .loading {
             map[.yoloPose] = existingPose
-        } else if let poseURL = customPoseModelURL ?? YOLO26PoseDetector.defaultModelURL {
-            let info = try? ModelIntegrityVerifier.computeSHA256(at: poseURL)
+        } else if let poseURL = customPoseModelURL ?? modelDiscovery.modelURL(.yoloPose) {
+            let info = try? modelDiscovery.integrity(poseURL)
             map[.yoloPose] = AnalyticsModelDescriptor(
                 modelID: .yoloPose,
                 version: "26s-pose-fp16",
@@ -707,8 +728,8 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         }
 
         // 3. YOLO26n-Seg
-        if let segURL = ONNXSegmentationEncoder.modelURL {
-            let info = try? ModelIntegrityVerifier.computeSHA256(at: segURL)
+        if let segURL = modelDiscovery.modelURL(.yoloSegmentation) {
+            let info = try? modelDiscovery.integrity(segURL)
             map[.yoloSegmentation] = AnalyticsModelDescriptor(
                 modelID: .yoloSegmentation,
                 version: "26n-seg-onnx",
@@ -730,8 +751,8 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         }
 
         // 4. Person Re-ID
-        if let reidURL = ONNXReIDEncoder.modelURL(for: .person) {
-            let info = try? ModelIntegrityVerifier.computeSHA256(at: reidURL)
+        if let reidURL = modelDiscovery.modelURL(.personReID) {
+            let info = try? modelDiscovery.integrity(reidURL)
             map[.personReID] = AnalyticsModelDescriptor(
                 modelID: .personReID,
                 version: "26m-reid",
@@ -752,8 +773,8 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         }
 
         // 5. Vehicle Re-ID
-        if let vreidURL = ONNXReIDEncoder.modelURL(for: .vehicle) {
-            let info = try? ModelIntegrityVerifier.computeSHA256(at: vreidURL)
+        if let vreidURL = modelDiscovery.modelURL(.vehicleReID) {
+            let info = try? modelDiscovery.integrity(vreidURL)
             map[.vehicleReID] = AnalyticsModelDescriptor(
                 modelID: .vehicleReID,
                 version: "osnet-ain-x1.0",

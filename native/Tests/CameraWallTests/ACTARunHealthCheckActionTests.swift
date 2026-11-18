@@ -15,6 +15,7 @@ final class ACTARunHealthCheckActionTests: XCTestCase {
                          corruptHistory: Bool = false) throws -> (URL, WallModel) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        try ModelSelectionPreferences(enabled: []).save(to: root.appendingPathComponent("model-preferences.json"))
         let configURL = root.appendingPathComponent("cameras.json")
         try ConfigurationStore.save(WallConfiguration(), to: configURL)
         let preferencesURL = root.appendingPathComponent("features.json")
@@ -28,9 +29,13 @@ final class ACTARunHealthCheckActionTests: XCTestCase {
         let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), transport: { _ in
             XCTFail("Unexpected network access")
             throw URLError(.notConnectedToInternet)
+        }, keyProvider: { _ in
+            XCTFail("Unexpected AI credential access")
+            return nil
         })
         let model = WallModel(
             configURL: configURL, workerMode: false,
+            poseModelURL: root.appendingPathComponent("fake-pose.mlmodel"),
             trackingStoreURL: failedWrites || failedTracking ? blocker.appendingPathComponent("tracks.sqlite") : root.appendingPathComponent("tracks.sqlite"),
             featureCoordinator: CameraFeatureCoordinator(preferencesURL: preferencesURL,
                 databaseURL: root.appendingPathComponent("features.sqlite")),
@@ -41,12 +46,20 @@ final class ACTARunHealthCheckActionTests: XCTestCase {
             cameraCredentialStore: CredentialsFake(),
             operationsPreferencesURL: root.appendingPathComponent("operations.json"),
             alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")),
-            monitorHistoryURL: historyURL)
+            languageSettings: LanguageSettings(storage: InMemoryLanguageStorage()),
+            monitorHistoryURL: historyURL,
+            analyticsModelDiscovery: AnalyticsModelDiscovery(modelURL: { _ in nil },
+                integrity: { _ in (hash: "synthetic", sizeBytes: 0) }))
         model.shutdown()
+        XCTAssertTrue(model.config.cameras.isEmpty)
+        XCTAssertFalse(model.running)
+        XCTAssertTrue(LocalModelService.allCases.allSatisfy { !ModelSelectionRegistry.isEnabled($0) })
         return (root, model)
     }
 
     func testFreshReceiptAndGUIUseSamePath() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
         model.runLocalOperationsMonitorCheck()
@@ -75,6 +88,8 @@ final class ACTARunHealthCheckActionTests: XCTestCase {
     }
 
     func testDisabledAndUnknownParametersDoNotRunCheck() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model) = try fixture(enabled: false)
         defer { try? FileManager.default.removeItem(at: root) }
         let registry = ACTAActionRegistry()
@@ -93,6 +108,8 @@ final class ACTARunHealthCheckActionTests: XCTestCase {
     }
 
     func testVerificationRejectsReplacedReceipt() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
         let action = ACTARunHealthCheckAction(model: model)
@@ -106,6 +123,8 @@ final class ACTARunHealthCheckActionTests: XCTestCase {
     }
 
     func testFailedHistoryWriteReportsPartialChangeAndDoesNotReuseReceipt() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model) = try fixture(failedWrites: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let first = try model.runLocalOperationsMonitorCheckChecked()
@@ -131,6 +150,8 @@ final class ACTARunHealthCheckActionTests: XCTestCase {
     }
 
     func testFreshCheckPersistsHistoryToInjectedPath() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model) = try fixture(failedTracking: true)
         defer { try? FileManager.default.removeItem(at: root) }
         _ = try model.runLocalOperationsMonitorCheckChecked()
@@ -149,6 +170,8 @@ final class ACTARunHealthCheckActionTests: XCTestCase {
     }
 
     func testUnreadableHistoryDoesNotTriggerOrOverwriteCheck() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model) = try fixture(corruptHistory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let registry = ACTAActionRegistry()
@@ -164,6 +187,8 @@ final class ACTARunHealthCheckActionTests: XCTestCase {
     }
 
     func testExternalHistoryChangeIsNotOverwritten() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
         let url = root.appendingPathComponent("history.json")

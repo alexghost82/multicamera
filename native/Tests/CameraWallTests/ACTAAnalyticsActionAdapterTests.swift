@@ -6,27 +6,45 @@ import XCTest
 @MainActor
 final class ACTAAnalyticsActionAdapterTests: XCTestCase {
     private func fixture() throws -> (URL, WallModel, UUID) {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".analytics-action-fixture-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         var config = WallConfiguration()
         let camera = Camera(name: "Fixture", substream: "rtsp://127.0.0.1/fixture", enabled: false, yoloEnabled: true)
         config.cameras = [camera]
         let configURL = root.appendingPathComponent("cameras.json")
         try ConfigurationStore.save(config, to: configURL)
-        let model = WallModel(configURL: configURL, trackingStoreURL: root.appendingPathComponent("tracks.sqlite"),
+        try ModelSelectionPreferences(enabled: []).save(to: root.appendingPathComponent("model-preferences.json"))
+        try CameraFeaturePreferencesStore.save(CameraFeaturePreferences(), to: root.appendingPathComponent("features.json"))
+        let poseURL = root.appendingPathComponent("unused-pose.mlmodel")
+        let model = WallModel(configURL: configURL, workerMode: false, poseModelURL: poseURL,
+            trackingStoreURL: root.appendingPathComponent("tracks.sqlite"),
             featureCoordinator: CameraFeatureCoordinator(preferencesURL: root.appendingPathComponent("features.json"),
                 databaseURL: root.appendingPathComponent("features.sqlite")),
             analyticsDirectoryURL: root.appendingPathComponent("analytics"),
+            agentClient: IsolatedWallFixtureSupport.client(),
             cameraMemoryStore: CameraMemoryStore(url: root.appendingPathComponent("frames")),
             operationsWatchURL: root.appendingPathComponent("watches.json"),
             missionStoreURL: root.appendingPathComponent("missions.json"),
             cameraCredentialStore: ACTAIsolatedCredentials(),
             operationsPreferencesURL: root.appendingPathComponent("operations.json"),
-            alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")))
+            alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")),
+            languageSettings: LanguageSettings(storage: InMemoryLanguageStorage()),
+            monitorHistoryURL: root.appendingPathComponent("monitor.json"),
+            analyticsModelDiscovery: AnalyticsModelDiscovery(modelURL: { _ in nil }, integrity: { url in
+                XCTAssertEqual(url, poseURL)
+                return (hash: "synthetic", sizeBytes: 0)
+            }))
+        XCTAssertFalse(model.running)
+        XCTAssertNil(model.tiles[camera.id]?.session)
+        XCTAssertFalse(model.featurePreferences.enabledFeatures.contains(.independentWatcher))
+        XCTAssertTrue(LocalModelService.allCases.allSatisfy { !ModelSelectionRegistry.isEnabled($0) })
         return (root, model, camera.id)
     }
 
     func testSensitivityProfilesMatchGUIAndSelectionDoesNotApplyPreset() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model, _) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = ACTAActionRegistry()
@@ -53,6 +71,8 @@ final class ACTAAnalyticsActionAdapterTests: XCTestCase {
     }
 
     func testAdvancedCameraOverridesAndConfirmedRemoval() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model, camera) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = ACTAActionRegistry()
@@ -98,6 +118,8 @@ final class ACTAAnalyticsActionAdapterTests: XCTestCase {
     }
 
     func testPolygonAndZonePolicyEditsPreserveIdentityAndRejectInvalidOperations() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model, camera) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = ACTAActionRegistry()
@@ -144,6 +166,8 @@ final class ACTAAnalyticsActionAdapterTests: XCTestCase {
     }
 
     func testCanvasActionsShareGUIStateAndVerifySavedLayout() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model, camera) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = ACTAActionRegistry()
@@ -174,6 +198,8 @@ final class ACTAAnalyticsActionAdapterTests: XCTestCase {
     }
 
     func testNumericSettingsRoundTripAndRejectInvalidValuesBeforeWriting() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model, _) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = ACTAActionRegistry()
@@ -213,6 +239,8 @@ final class ACTAAnalyticsActionAdapterTests: XCTestCase {
     }
 
     func testAllOverlaysAndGlobalFlagsUseActualService() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model, _) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = ACTAActionRegistry()
@@ -240,6 +268,8 @@ final class ACTAAnalyticsActionAdapterTests: XCTestCase {
     }
 
     func testCameraOverrideAndZoneLifecyclePreservePolicyAndIDs() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         let (root, model, camera) = try fixture()
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = ACTAActionRegistry()

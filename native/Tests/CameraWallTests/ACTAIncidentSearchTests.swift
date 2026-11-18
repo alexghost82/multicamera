@@ -124,7 +124,10 @@ final class ACTAIncidentSearchTests: XCTestCase {
     }
 
     func testRegistrySearchUsesLiveIncidentService() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
+        let root = IsolatedWallFixtureSupport.root()
+        try IsolatedWallFixtureSupport.prepare(root)
         let analytics = root.appendingPathComponent("analytics")
         try FileManager.default.createDirectory(at: analytics, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -134,16 +137,22 @@ final class ACTAIncidentSearchTests: XCTestCase {
         encoder.dateEncodingStrategy = .iso8601
         try encoder.encode([wanted, other]).write(to: analytics.appendingPathComponent(UnifiedIncidentManager.defaultURL.lastPathComponent))
         let model = WallModel(configURL: root.appendingPathComponent("cameras.json"),
+            poseModelURL: root.appendingPathComponent("fake-pose.mlmodel"),
             trackingStoreURL: root.appendingPathComponent("tracks.sqlite"),
             featureCoordinator: CameraFeatureCoordinator(preferencesURL: root.appendingPathComponent("features.json"),
                 databaseURL: root.appendingPathComponent("features.sqlite")),
-            analyticsDirectoryURL: analytics, cameraMemoryStore: CameraMemoryStore(url: root.appendingPathComponent("frames")),
+            analyticsDirectoryURL: analytics, agentClient: IsolatedWallFixtureSupport.client(),
+            cameraMemoryStore: CameraMemoryStore(url: root.appendingPathComponent("frames")),
             operationsWatchURL: root.appendingPathComponent("watches.json"),
             missionStoreURL: root.appendingPathComponent("missions.json"),
             cameraCredentialStore: IncidentTestCredentials(),
             operationsPreferencesURL: root.appendingPathComponent("operations.json"),
-            alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")))
+            alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")),
+            languageSettings: LanguageSettings(storage: InMemoryLanguageStorage()),
+            monitorHistoryURL: root.appendingPathComponent("monitor.json"),
+            analyticsModelDiscovery: IsolatedWallFixtureSupport.modelDiscovery)
         defer { model.shutdown() }
+        IsolatedWallFixtureSupport.assertSafe(model)
         let registry = ACTAActionRegistry()
         await registry.register(WallOperationalAction(specification: IncidentListAction(), model: model))
         let result = try await registry.execute(actionID: "incident.list", parameters: ["query": "NORTH"])

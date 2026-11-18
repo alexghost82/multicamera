@@ -41,8 +41,12 @@ final class StreamingTests: XCTestCase {
         let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), transport: { _ in
             XCTFail("Unexpected network request")
             throw URLError(.notConnectedToInternet)
+        }, keyProvider: { _ in
+            XCTFail("Unexpected AI credential access")
+            return nil
         })
         let model = WallModel(configURL: file, workerMode: false,
+            poseModelURL: directory.appendingPathComponent("fake-pose.mlmodel"),
             trackingStoreURL: directory.appendingPathComponent("tracking.sqlite3"),
             featureCoordinator: features, analyticsDirectoryURL: directory.appendingPathComponent("analytics"),
             agentClient: client,
@@ -53,7 +57,8 @@ final class StreamingTests: XCTestCase {
             operationsPreferencesURL: directory.appendingPathComponent("operations.json"),
             alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")),
             languageSettings: LanguageSettings(storage: InMemoryLanguageStorage()),
-            monitorHistoryURL: directory.appendingPathComponent("monitor.json"))
+            monitorHistoryURL: directory.appendingPathComponent("monitor.json"),
+            analyticsModelDiscovery: IsolatedWallFixtureSupport.modelDiscovery)
         defer { model.shutdown() }
         XCTAssertTrue(model.featurePreferences.enabledFeatures.isEmpty)
         XCTAssertTrue(model.config.cameras.allSatisfy { !$0.enabled })

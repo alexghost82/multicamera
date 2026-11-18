@@ -12,6 +12,8 @@ struct CameraMemoryView: View {
     @State private var showPinnedOnly: Bool = false
     @State private var loadError = ""
     @State private var confirmsClear = false
+    @State private var clearSnapshot: CameraMemoryDeletionSnapshot?
+    @State private var deletionPending = false
 
     private var memoryEnabled: Bool {
         model.featurePreferences.enabledFeatures.contains(.chronologicalMemory)
@@ -32,10 +34,10 @@ struct CameraMemoryView: View {
                         .foregroundStyle(ACTATheme.textSecondary)
                 }
                 Spacer()
-                Button(role: .destructive) { confirmsClear = true } label: {
+                Button(role: .destructive) { prepareClear() } label: {
                     Label("Clear all frames", systemImage: "trash")
                 }
-                .disabled(model.cameraMemoryFrames.isEmpty)
+                .disabled(model.cameraMemoryFrames.isEmpty || deletionPending)
             }
 
             OpenSettingsButton(section: .memory)
@@ -47,6 +49,9 @@ struct CameraMemoryView: View {
 
             if !loadError.isEmpty {
                 Text(locale.appLanguage.localizedMessage(loadError)).font(.system(size: ACTAType.caption)).foregroundStyle(ACTATheme.danger)
+            }
+            if deletionPending {
+                Button("Resume incomplete frame deletion") { recoverDeletion() }
             }
 
             actaMemorySection
@@ -84,12 +89,18 @@ struct CameraMemoryView: View {
                         .help("View sampled frame")
                         .accessibilityLabel("View sampled frame from \(frame.cameraName)")
                         Button(role: .destructive) {
-                            model.deleteCameraMemoryFrame(frame)
+                            do {
+                                try model.deleteCameraMemoryFrameChecked(frame.id)
+                                loadError = ""
+                            } catch {
+                                reportDeletionError(error)
+                            }
                         } label: {
                             Image(systemName: "trash")
                         }
                         .help("Delete sampled frame")
                         .accessibilityLabel("Delete sampled frame from \(frame.cameraName)")
+                        .disabled(deletionPending)
                     }
                     .padding(.vertical, 8)
                     .listRowBackground(ACTATheme.surface)
@@ -100,7 +111,18 @@ struct CameraMemoryView: View {
             }
         }
         .padding(ACTASpacing.section)
-        .onAppear { model.reloadCameraMemoryFrames() }
+        .onAppear {
+            do {
+                deletionPending = try model.cameraMemoryStore.hasPendingDeletion()
+                if deletionPending {
+                    loadError = "Memory deletion is incomplete. Resume it before changing memory."
+                } else {
+                    refreshFrames()
+                }
+            } catch {
+                loadError = error.localizedDescription
+            }
+        }
         .sheet(item: $selectedFrame) { frame in
             VStack(alignment: .leading, spacing: 12) {
                 Text("\(frame.cameraName) · \(frame.capturedAt.formatted(date: .abbreviated, time: .shortened, locale: locale))")
@@ -148,10 +170,20 @@ struct CameraMemoryView: View {
         }
         .confirmationDialog("Delete all sampled memory frames?", isPresented: $confirmsClear) {
             Button("Delete all frames", role: .destructive) {
-                for frame in model.cameraMemoryFrames { model.deleteCameraMemoryFrame(frame) }
+                guard let snapshot = clearSnapshot else { return }
+                clearSnapshot = nil
+                do {
+                    try model.cameraMemoryStore.deleteConfirmedSnapshot(snapshot)
+                    selectedImage = nil
+                    selectedFrame = nil
+                    loadError = ""
+                    refreshFrames()
+                } catch {
+                    reportDeletionError(error)
+                }
             }
         } message: {
-            Text("This removes locally retained sampled images and cannot be undone.")
+            Text("Delete the \(clearSnapshot?.count ?? 0) indexed frames shown in the list. This cannot be undone. If the set changes, review it again.")
         }
     }
 
@@ -244,12 +276,68 @@ struct CameraMemoryView: View {
 
     private func show(_ frame: CameraMemoryFrame) {
         do {
-            let data = try CameraMemoryStore().imageData(for: frame)
+            let data = try model.cameraMemoryStore.imageData(for: frame)
             guard let image = NSImage(data: data) else { throw CameraMemoryStoreError.invalidImage }
             selectedImage = image
             selectedFrame = frame
         } catch {
             loadError = "Could not open this sampled frame"
+        }
+    }
+
+    private func prepareClear() {
+        do {
+            let snapshot = try model.cameraMemoryStore.deletionSnapshot()
+            guard snapshot.count > 0 else {
+                refreshFrames()
+                return
+            }
+            guard snapshot.count == model.cameraMemoryFrames.count,
+                  snapshot.frames.allSatisfy({ model.cameraMemoryFrames.contains($0) }) else {
+                model.cameraMemoryFrames = snapshot.frames
+                loadError = "The frame list changed. Review it and try again."
+                return
+            }
+            clearSnapshot = snapshot
+            confirmsClear = true
+        } catch {
+            reportDeletionError(error)
+        }
+    }
+
+    private func recoverDeletion() {
+        do {
+            try model.cameraMemoryStore.recoverPendingDeletion()
+            deletionPending = false
+            selectedImage = nil
+            selectedFrame = nil
+            loadError = ""
+            refreshFrames()
+        } catch {
+            reportDeletionError(error)
+        }
+    }
+
+    private func reportDeletionError(_ error: Error) {
+        loadError = error.localizedDescription
+        do {
+            deletionPending = try model.cameraMemoryStore.hasPendingDeletion()
+        } catch {
+            deletionPending = true
+            loadError = error.localizedDescription
+        }
+        if deletionPending {
+            selectedImage = nil
+            selectedFrame = nil
+        }
+        if !deletionPending { refreshFrames() }
+    }
+
+    private func refreshFrames() {
+        do {
+            model.cameraMemoryFrames = try model.cameraMemoryStore.deletionSnapshot().frames
+        } catch {
+            loadError = error.localizedDescription
         }
     }
 }

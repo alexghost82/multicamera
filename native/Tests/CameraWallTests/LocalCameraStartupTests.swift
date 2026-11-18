@@ -33,14 +33,19 @@ struct LocalCameraStartupTests {
         config.cameras = [Camera(name: "Mac", substream: "", enabled: false, localDeviceID: "test")]
         try ConfigurationStore.save(config, to: url)
         let root = url.deletingLastPathComponent()
+        try ModelSelectionPreferences(enabled: []).save(to: root.appendingPathComponent("model-preferences.json"))
         let features = CameraFeatureCoordinator(preferencesURL: root.appendingPathComponent("features.json"),
             databaseURL: root.appendingPathComponent("features.sqlite3"))
         try features.savePreferences(CameraFeaturePreferences(enabledFeatures: [.operationalAlerts]))
         let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), transport: { _ in
             Issue.record("Unexpected network request")
             throw URLError(.notConnectedToInternet)
+        }, keyProvider: { _ in
+            Issue.record("Unexpected AI credential access")
+            return nil
         })
         let model = WallModel(configURL: url, workerMode: false,
+            poseModelURL: root.appendingPathComponent("fake-pose.mlmodel"),
             trackingStoreURL: root.appendingPathComponent("tracking.sqlite3"),
             featureCoordinator: features, analyticsDirectoryURL: root.appendingPathComponent("analytics"),
             agentClient: client, cameraMemoryStore: CameraMemoryStore(url: root.appendingPathComponent("frames")),
@@ -50,8 +55,11 @@ struct LocalCameraStartupTests {
             operationsPreferencesURL: root.appendingPathComponent("operations.json"),
             alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")),
             languageSettings: LanguageSettings(storage: StartupTestLanguageStorage()),
-            monitorHistoryURL: root.appendingPathComponent("monitor.json"))
+            monitorHistoryURL: root.appendingPathComponent("monitor.json"),
+            analyticsModelDiscovery: AnalyticsModelDiscovery(modelURL: { _ in nil },
+                integrity: { _ in (hash: "synthetic", sizeBytes: 0) }))
         defer { model.shutdown() }
+        #expect(LocalModelService.allCases.allSatisfy { !ModelSelectionRegistry.isEnabled($0) })
         #expect(!model.featurePreferences.enabledFeatures.contains(.independentWatcher))
         model.start()
         for _ in 0..<100 {

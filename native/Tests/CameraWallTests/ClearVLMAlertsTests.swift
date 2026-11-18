@@ -16,9 +16,10 @@ final class ClearVLMAlertsTests: XCTestCase {
     }
 
     private func withFixture(_ body: (Fixture) throws -> Void) throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("clear-vlm-alerts-test-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
+        let root = IsolatedWallFixtureSupport.root()
+        try IsolatedWallFixtureSupport.prepare(root)
         defer { try? FileManager.default.removeItem(at: root) }
 
         let preferencesURL = root.appendingPathComponent("features.json")
@@ -45,10 +46,15 @@ final class ClearVLMAlertsTests: XCTestCase {
         try coordinator.reviewOperationsAlert(alertID: alertID, status: .acknowledged, note: "Synthetic review")
 
         let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), transport: { _ in
+            XCTFail("Unexpected network request")
             throw URLError(.notConnectedToInternet)
+        }, keyProvider: { _ in
+            XCTFail("Unexpected AI credential access")
+            return nil
         })
         let model = WallModel(
             configURL: root.appendingPathComponent("cameras.json"),
+            poseModelURL: root.appendingPathComponent("fake-pose.mlmodel"),
             trackingStoreURL: root.appendingPathComponent("tracks.sqlite"),
             featureCoordinator: coordinator,
             analyticsDirectoryURL: root.appendingPathComponent("analytics"),
@@ -60,9 +66,12 @@ final class ClearVLMAlertsTests: XCTestCase {
             operationsPreferencesURL: root.appendingPathComponent("operations.json"),
             alertClipStore: clips,
             languageSettings: LanguageSettings(storage: InMemoryLanguageStorage()),
-            monitorHistoryURL: root.appendingPathComponent("monitor.json")
+            monitorHistoryURL: root.appendingPathComponent("monitor.json"),
+            analyticsModelDiscovery: AnalyticsModelDiscovery(modelURL: { _ in nil },
+                integrity: { _ in (hash: "synthetic", sizeBytes: 0) })
         )
         defer { model.shutdown() }
+        IsolatedWallFixtureSupport.assertSafe(model)
         try body(Fixture(root: root, model: model, coordinator: coordinator, clips: clips,
                          alert: alert, otherClipID: otherClipID, frames: frames))
     }

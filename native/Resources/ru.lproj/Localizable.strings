@@ -1,4 +1,16 @@
 "Switch interface language to Russian" = "Переключить язык интерфейса на русский";
+"Memory frames changed since confirmation; review them again." = "Набор кадров памяти изменился после подтверждения. Проверьте его снова.";
+"Memory deletion is incomplete. Retry recovery before modifying memory." = "Удаление кадров памяти не завершено. Повторите восстановление перед изменением памяти.";
+"Memory deletion recovery conflicts with the current index; no further frames were removed." = "Восстановление удаления конфликтует с текущим индексом; другие кадры не удалены.";
+"The agent response chain was rejected." = "Цепочка ответов агента отклонена.";
+"Agent inference requires the explicitly selected in-process MLX model; HTTP servers and cloud backends are not permitted." = "Для работы агента необходимо явно выбрать модель MLX в процессе приложения; HTTP-серверы и облачные сервисы не допускаются.";
+"The agent model returned an invalid response." = "Модель агента вернула некорректный ответ.";
+"Resume incomplete frame deletion" = "Продолжить незавершённое удаление кадров";
+"Memory deletion is incomplete. Resume it before changing memory." = "Удаление кадров памяти не завершено. Продолжите его перед изменением памяти.";
+"Delete the %@ indexed frames shown in the list. This cannot be undone. If the set changes, review it again." = "Удалить кадры в индексе (%@), показанные в списке. Это действие нельзя отменить. Если набор изменится, проверьте его снова.";
+"The frame list changed. Review it and try again." = "Список кадров изменился. Проверьте его и повторите попытку.";
+"Reconnect limit reached; restart the video wall to clear relay registrations." = "Достигнут предел переподключений. Перезапустите видеостену, чтобы очистить регистрации ретранслятора.";
+"Camera is not available for reconnection." = "Камера недоступна для переподключения.";
 "Switch interface language to English" = "Переключить язык интерфейса на английский";
 "Quit CameraWall" = "Закрыть CameraWall";
 "Edit" = "Правка";
@@ -1825,6 +1837,33 @@
 "Operations preferences changed on disk; reload them before making changes." = "Настройки событий изменились на диске; загрузите их перед изменением.";
 
 "AI preferences changed on disk; reload them before making changes." = "Настройки ИИ изменились на диске; загрузите их перед изменением.";
+"Update AI privacy and budget (resets schedule and may prepare models)" = "Изменить конфиденциальность и бюджет ИИ (сбросит расписание и может запустить подготовку моделей)";
+"Update AI language (resets schedule and may prepare models)" = "Изменить язык ИИ (сбросит расписание и может запустить подготовку моделей)";
+"Set Camera Favorite" = "Изменить избранную камеру";
+"Set camera canvas filters" = "Изменить фильтры камер";
+"Set camera arrange mode" = "Изменить режим расстановки камер";
+"Set camera presentation" = "Изменить вид камер";
+"INVALID_ARGUMENT: mode must be grid or list." = "INVALID_ARGUMENT: mode должен быть grid или list.";
+"INVALID_ARGUMENT: Provide enabled." = "INVALID_ARGUMENT: Укажите enabled.";
+"INVALID_ARGUMENT: enabled must be a boolean." = "INVALID_ARGUMENT: Значение enabled должно быть логическим.";
+"Select cameras in the canvas" = "Выбрать камеры на экране";
+"INVALID_ARGUMENT: Unknown selection parameter." = "INVALID_ARGUMENT: Неизвестный параметр выбора.";
+"INVALID_ARGUMENT: Provide camera UUIDs for subset." = "INVALID_ARGUMENT: Укажите UUID камер для выборки.";
+"INVALID_ARGUMENT: Camera UUIDs must be valid and unique." = "INVALID_ARGUMENT: UUID камер должны быть корректными и уникальными.";
+"INVALID_ARGUMENT: Use all, none, or subset; camera_ids is only valid for subset." = "INVALID_ARGUMENT: Выберите all, none или subset; camera_ids допустим только для subset.";
+"INVALID_ARGUMENT: Provide supported filters; search is limited to 4096 UTF-8 bytes." = "INVALID_ARGUMENT: Укажите поддерживаемые фильтры; поиск ограничен 4096 байтами UTF-8.";
+"INVALID_ARGUMENT: Provide supported filters; search and location are limited to 4096 UTF-8 bytes." = "INVALID_ARGUMENT: Укажите поддерживаемые фильтры; поиск и расположение ограничены 4096 байтами UTF-8.";
+"INVALID_ARGUMENT: Invalid status." = "INVALID_ARGUMENT: Недопустимый статус.";
+"INVALID_ARGUMENT: Invalid %@." = "INVALID_ARGUMENT: Недопустимое значение %@.";
+"Specify exactly one supported AI analytics language: ru, en, or he." = "Укажите один поддерживаемый язык аналитики ИИ: ru, en или he.";
+"AI preferences, feature policy or runtime configuration changed; reload them before making changes." = "Настройки ИИ, политика функций или рабочая конфигурация изменились; загрузите их перед изменением.";
+"AI language persistence or runtime verification failed." = "Не удалось проверить сохранение или рабочую конфигурацию языка ИИ.";
+"Specify at least one known AI privacy or budget field." = "Укажите хотя бы один известный параметр конфиденциальности или бюджета ИИ.";
+"%@ must be a boolean." = "Значение %@ должно быть логическим.";
+"%@ must be a finite nonnegative number." = "Значение %@ должно быть конечным неотрицательным числом.";
+"AI client is unavailable." = "Клиент ИИ недоступен.";
+"AI preferences or runtime configuration changed; reload them before making changes." = "Настройки или конфигурация ИИ изменились; загрузите их перед изменением.";
+"AI preferences persistence or runtime verification failed." = "Не удалось проверить сохранение или конфигурацию ИИ.";
 
 "Model preferences changed on disk; reload them before inspecting." = "Настройки моделей изменились на диске; загрузите их перед просмотром.";
 
@@ -1887,3 +1926,13 @@
 "Incident missing or incident state is inconsistent." = "Инцидент не найден или его состояние несогласованно.";
 "Incident audit state is inconsistent." = "Состояние журнала инцидента несогласованно.";
 "Incident note audit verification failed." = "Не удалось проверить журнал заметки об инциденте.";
+"Identity review evidence or graph changed; refresh before reviewing." = "Данные или связи идентификации изменились; обновите список перед проверкой.";
+"Confirm appearance link" = "Подтвердить связь по внешнему виду";
+"Confirm cannot-link decision" = "Подтвердить запрет связи";
+"Appearance similarity is not identity proof. The evidence and graph will be checked again when confirmed." = "Сходство внешности не доказывает личность. При подтверждении данные и связи будут проверены повторно.";
+"Proposal: %@" = "Предложение: %@";
+"Category: %@ · Distance: %@" = "Категория: %@ · Расстояние: %@";
+"%@ – %@ · %@ observations" = "%@ – %@ · наблюдений: %@";
+"Related tracks in the reviewed graph:" = "Связанные треки в проверяемом графе:";
+"Image files are not included in this confirmation snapshot." = "Файлы изображений не входят в этот снимок для подтверждения.";
+"Could not prepare identity decision: %@" = "Не удалось подготовить решение по идентификации: %@";

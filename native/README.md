@@ -1,5 +1,27 @@
 # CameraWall for Apple Silicon
 
+## Agent inference
+
+Agent inference requires explicitly selecting the in-process MLX backend.
+Cloud, hybrid and HTTP vLLM modes fail closed for agent requests; they are
+not used as fallback. Other, non-agent AI features retain their own backend
+and consent policies. This routing restriction does not sandbox agent tools
+or prove operating-system network isolation. Real-model compatibility has
+not been verified by the fake-inference tests.
+
+`settings.retry_model_loading` retries failed enabled local models only when
+runtime state and configuration match. It reports success after preparation
+reaches ready state, not after an inference test. A loader already executing
+may continue after cancellation; remaining retries are not started.
+
+## Network camera reconnect
+
+The GUI keeps the old network session until a replacement produces a fresh
+frame. Each reconnect uses a unique relay registration; registrations can
+remain until the relay restarts. After 64 attempts, restart the video wall
+before reconnecting again. Local-source reconnect follows its existing path.
+Agent reconnect is not available, and real-device behavior is unverified.
+
 ## Sampled memory deletion and recovery
 
 The memory view confirms an exact snapshot of the indexed frames displayed in
@@ -42,6 +64,11 @@ or camera connectivity.
 unique attached security center, including when another section is visible.
 The window-local setting is not persisted; filters, selection, arrange mode
 and fullscreen are unchanged. Verification checks state, not rendering.
+
+`analysis.set_section` selects `chat`, `schedule`, or `alerts` in that window
+without opening the panel. It does not refresh scheduled jobs, and leaving
+Chat is rejected while dictation is starting or recording. Verification checks
+window state, not rendering.
 
 ## Interface Localization
 

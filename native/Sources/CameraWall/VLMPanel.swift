@@ -12,22 +12,33 @@ enum VLMPanelSection: String, CaseIterable, Identifiable {
 struct VLMPanel: View {
     @ObservedObject var model: WallModel
     @ObservedObject var languageSettings: LanguageSettings
+    @ObservedObject var windowState: ACTACanvasFilterState
+    @ObservedObject private var voiceInput: LocalVoiceInput
     @State private var draft = VLMPreferences()
     @State private var operationsDraft = OperationsPreferences()
-    @State private var activeSection = VLMPanelSection.ask
     @State private var questionBeforeVoice = ""
     @State private var saveError = ""
     @State private var descriptionJobs: [CameraFeatureJob] = []
-    @StateObject private var voiceInput = LocalVoiceInput()
+    @State private var voiceOwner = UUID()
+
+    init(model: WallModel, languageSettings: LanguageSettings, windowState: ACTACanvasFilterState) {
+        self.model = model
+        self.languageSettings = languageSettings
+        self.windowState = windowState
+        self.voiceInput = windowState.analysisVoiceInput
+    }
 
     private var enabledCameras: [Camera] { model.config.cameras.filter(\.enabled) }
 
     var body: some View {
         AnalysisPanelViewport {
-            AnalysisPanelTabs(selection: $activeSection, alertCount: model.vlmAlerts.count)
+            AnalysisPanelTabs(selection: Binding(
+                get: { windowState.analysisSection },
+                set: { windowState.selectAnalysisSectionFromGUI($0) }
+            ), alertCount: model.vlmAlerts.count)
 
             Group {
-                switch activeSection {
+                switch windowState.analysisSection {
                 case .ask: actaAgentHistoryView
                 case .schedule: scheduleTab
                 case .alerts: alertsTab
@@ -195,14 +206,14 @@ struct VLMPanel: View {
             }
             HStack(alignment: .bottom, spacing: 8) {
             Button {
-                if voiceInput.isRecording { voiceInput.stop() }
-                else if model.featurePreferences.allowVoiceInput {
+                if voiceInput.isBusy { voiceInput.stop() }
+                else if windowState.analysisSection == .ask && model.featurePreferences.allowVoiceInput {
                     questionBeforeVoice = model.actaQuestionDraft
-                    Task { await voiceInput.start(localeIdentifier: languageSettings.locale.identifier) }
+                    voiceInput.start(localeIdentifier: languageSettings.locale.identifier, owner: voiceOwner)
                 }
-            } label: { Image(systemName: voiceInput.isRecording ? "stop.fill" : "mic") }
-            .disabled(!model.featurePreferences.allowVoiceInput && !voiceInput.isRecording)
-            .help(voiceInput.isRecording ? "Stop local dictation" : "Start local dictation")
+            } label: { Image(systemName: voiceInput.isBusy ? "stop.fill" : "mic") }
+            .disabled((windowState.analysisSection != .ask || !model.featurePreferences.allowVoiceInput) && !voiceInput.isBusy)
+            .help(voiceInput.isBusy ? "Stop local dictation" : "Start local dictation")
             AnalysisQuestionComposer(
                 question: $model.actaQuestionDraft,
                 sendDisabled: model.actaAgentBusy || model.actaQuestionDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -218,7 +229,7 @@ struct VLMPanel: View {
         .onChange(of: voiceInput.transcript) { _, text in
             if voiceInput.isRecording { model.actaQuestionDraft = [questionBeforeVoice, text].filter { !$0.isEmpty }.joined(separator: " ") }
         }
-        .onDisappear { voiceInput.stop() }
+        .onDisappear { voiceInput.stop(owner: voiceOwner) }
     }
 
     private func submitHistoryQuestion() {
@@ -283,7 +294,10 @@ struct VLMPanel: View {
             .font(.system(size: ACTAType.caption))
             .padding(.vertical, 8)
         }
-        .onAppear(perform: refreshDescriptionQueue)
+        .onAppear {
+            if windowState.analysisScheduleRefreshOnAppear { refreshDescriptionQueue() }
+            windowState.analysisScheduleRefreshOnAppear = true
+        }
     }
 
     private func refreshDescriptionQueue() {

@@ -72,11 +72,13 @@ final class CameraReconnectIntegrationTests: XCTestCase {
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent(".build/reconnect-fixture-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let camera = Camera(name: "Fake", substream: "rtsp://fixture.invalid/live")
+        let camera = Camera(name: "Fake", substream: "rtsp://fixture.invalid/live", aiChatEnabled: false)
         var config = WallConfiguration()
         config.cameras = [camera]
         try ConfigurationStore.save(config, to: root.appendingPathComponent("cameras.json"))
         try ModelSelectionPreferences(enabled: []).save(to: root.appendingPathComponent("model-preferences.json"))
+        try CameraFeaturePreferencesStore.save(CameraFeaturePreferences(enabledFeatures: []),
+                                               to: root.appendingPathComponent("features.json"))
         let relay = Go2RTC(transport: { try await transport.send($0) }, runningOverride: { true })
         let model = WallModel(configURL: root.appendingPathComponent("cameras.json"),
             poseModelURL: root.appendingPathComponent("unused.mlmodel"), relayFactory: { relay },
@@ -286,5 +288,17 @@ final class CameraReconnectIntegrationTests: XCTestCase {
             XCTAssertTrue(error.localizedDescription.contains("Reconnect limit"))
         }
         XCTAssertEqual(calls, 64)
+    }
+
+    func testStopBeforeRegistrationTaskRunsDoesNotSendPatch() async throws {
+        var sent = false
+        let session = NetworkReconnectSession(attemptID: UUID(), register: {
+            sent = true
+            return "unused"
+        }, startDecoder: { _, _ in XCTFail("Stopped session started") })
+        try session.start()
+        session.stop()
+        await Task.yield()
+        XCTAssertFalse(sent)
     }
 }

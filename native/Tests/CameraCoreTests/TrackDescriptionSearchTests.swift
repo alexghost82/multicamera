@@ -49,6 +49,35 @@ final class TrackDescriptionSearchTests: XCTestCase {
         XCTAssertEqual(result.records.map(\.lastSeen), result.records.map(\.lastSeen).sorted(by: >))
     }
 
+    func testSearchFindsMatchesBeyondFiveHundredRecentTracks() throws {
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent(".track-search-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try LocalTrackingStore(url: directory.appendingPathComponent("tracking.sqlite3"))
+        let cameraID = UUID()
+        let timestamp = Date(timeIntervalSince1970: 2_000_000)
+        var matches: [UUID] = []
+        for index in 0..<503 {
+            let trackID = UUID()
+            let object = DetectedObject(id: index, label: "person", confidence: 0.8,
+                                        box: .zero, trackID: trackID)
+            _ = try store.record(object, cameraID: cameraID, cameraName: "Gate",
+                                 at: timestamp.addingTimeInterval(Double(index)))
+            if index < 3 {
+                matches.append(trackID)
+                try store.saveDescription(TrackedObjectDescription(
+                    summary: "red coat", attributes: [:], overallConfidence: 0.9
+                ), for: trackID)
+            }
+        }
+
+        let result = try TrackDescriptionSearch.search(store: store, query: "red coat", limit: 2, pageSize: 50)
+
+        XCTAssertEqual(result.matchCount, 3)
+        XCTAssertEqual(result.records.map(\.trackID), [matches[2], matches[1]])
+    }
+
     private func makeRecord(camera: String, summary: String, attribute: TrackedAttribute) -> TrackedObjectRecord {
         TrackedObjectRecord(
             trackID: UUID(), cameraID: UUID(), cameraName: camera, label: "person",

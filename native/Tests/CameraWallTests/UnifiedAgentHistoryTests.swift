@@ -2,6 +2,13 @@ import XCTest
 import CameraCore
 @testable import CameraWall
 
+private actor HistoryInferenceProbe {
+    private(set) var calls = 0
+    private(set) var completions = 0
+    func record() { calls += 1 }
+    func finish() { completions += 1 }
+}
+
 final class UnifiedAgentHistoryTests: XCTestCase {
     func testScanReferencesAndAliasesPreserveProvenance() throws {
         let id = UUID(), camera = UUID()
@@ -183,12 +190,22 @@ final class UnifiedAgentHistoryTests: XCTestCase {
         let features = CameraFeatureCoordinator(preferencesURL: directory.appendingPathComponent("features.json"),
             databaseURL: directory.appendingPathComponent("features.sqlite"))
         try features.savePreferences(CameraFeaturePreferences(enabledFeatures: []))
-        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .localVLLM), transport: { request in
-            try await Task.sleep(for: .seconds(2))
-            return (Data("{\"choices\":[{\"message\":{\"content\":\"late answer\"}}]}".utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+        let probe = HistoryInferenceProbe()
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .mlxInProcess), transport: { _ in
+            XCTFail("Unexpected network request")
+            throw URLError(.notConnectedToInternet)
         }, keyProvider: { _ in
             XCTFail("Unexpected AI credential access")
             return nil
+        }, localAgentInference: { _, _ in
+            await probe.record()
+            let result: String = await withCheckedContinuation { continuation in
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
+                    continuation.resume(returning: "late answer")
+                }
+            }
+            await probe.finish()
+            return result
         })
         let wall = WallModel(configURL: configURL, workerMode: false,
             poseModelURL: directory.appendingPathComponent("fake-pose.mlmodel"),
@@ -215,8 +232,12 @@ final class UnifiedAgentHistoryTests: XCTestCase {
         while wall.actaAgentBusy && Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
         XCTAssertFalse(wall.actaAgentBusy)
         XCTAssertTrue(wall.actaAgentStatus.contains("timed out"))
+        let calls = await probe.calls
+        XCTAssertEqual(calls, 1)
         let count = wall.actaChatMessages.count
-        try await Task.sleep(for: .milliseconds(150))
+        try await Task.sleep(for: .milliseconds(350))
+        let completions = await probe.completions
+        XCTAssertEqual(completions, 1)
         XCTAssertEqual(wall.actaChatMessages.count, count)
         XCTAssertFalse(wall.actaChatMessages.contains { $0.text == "late answer" })
         wall.agentRequestDeadline = .seconds(10)

@@ -40,6 +40,14 @@ enum LocalModelState: Equatable, Sendable {
 final class LocalModelRuntime: ObservableObject {
     typealias Loader = @Sendable (LocalModelService, String) async throws -> Void
 
+    struct RetryReceipt {
+        fileprivate let generation: UUID
+        let modelPath: String
+        let enabled: Set<LocalModelService>
+        let retried: Set<LocalModelService>
+        fileprivate let task: Task<Void, Never>
+    }
+
     @Published private(set) var states: [LocalModelService: LocalModelState] = Dictionary(
         uniqueKeysWithValues: LocalModelService.allCases.map { ($0, .waiting) }
     )
@@ -53,7 +61,8 @@ final class LocalModelRuntime: ObservableObject {
     }
 
     @discardableResult
-    func start(modelPath: String, enabled: Set<LocalModelService> = Set(LocalModelService.allCases)) -> Task<Void, Never> {
+    func start(modelPath: String, enabled: Set<LocalModelService> = Set(LocalModelService.allCases),
+               shouldContinue: (@MainActor () -> Bool)? = nil) -> Task<Void, Never> {
         if let preparation, qwenModelPath == modelPath { return preparation }
         if qwenModelPath != modelPath {
             cancel()
@@ -70,6 +79,7 @@ final class LocalModelRuntime: ObservableObject {
                 guard !Task.isCancelled, self.generation == token else { return }
                 guard enabled.contains(service) else { self.states[service] = .disabled; continue }
                 guard self.states[service] != .ready else { continue }
+                guard shouldContinue?() ?? true else { return }
                 self.states[service] = .loading
                 do {
                     try await load(service, modelPath)
@@ -87,6 +97,40 @@ final class LocalModelRuntime: ObservableObject {
         }
         preparation = task
         return task
+    }
+
+    func beginCheckedRetry(modelPath: String, enabled: Set<LocalModelService>,
+                           shouldContinue: @escaping @MainActor () -> Bool) -> RetryReceipt? {
+        guard preparation == nil, qwenModelPath == modelPath else { return nil }
+        var failed = Set<LocalModelService>()
+        for service in LocalModelService.allCases {
+            guard let state = states[service] else { return nil }
+            if enabled.contains(service) {
+                switch state {
+                case .ready: break
+                case .failed: failed.insert(service)
+                default: return nil
+                }
+            } else if state != .disabled {
+                return nil
+            }
+        }
+        guard !failed.isEmpty else { return nil }
+        let task = start(modelPath: modelPath, enabled: enabled, shouldContinue: shouldContinue)
+        return RetryReceipt(generation: generation, modelPath: modelPath, enabled: enabled, retried: failed, task: task)
+    }
+
+    func waitForRetry(_ receipt: RetryReceipt) async {
+        await receipt.task.value
+    }
+
+    func isRetryVerified(_ receipt: RetryReceipt, modelPath: String, enabled: Set<LocalModelService>) -> Bool {
+        guard generation == receipt.generation, preparation == nil,
+              modelPath == receipt.modelPath, qwenModelPath == receipt.modelPath,
+              enabled == receipt.enabled else { return false }
+        return LocalModelService.allCases.allSatisfy {
+            states[$0] == (enabled.contains($0) ? .ready : .disabled)
+        }
     }
 
     func invalidate() {

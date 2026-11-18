@@ -4,6 +4,20 @@ import CoreGraphics
 import Foundation
 import XCTest
 
+private actor AnalyticsAgentScript {
+    private(set) var prompts: [String] = []
+
+    func reply(prompt: String, images: [Data]) throws -> String {
+        prompts.append(prompt)
+        if !images.isEmpty && !prompt.contains("[TOOL RESULT") {
+            return #"{"tool_calls":[{"name":"live_look","arguments":{}}]}"#
+        }
+        let answer = ACTAChatPresentAnswer(answerMarkdown: "Saved observations reviewed.",
+                                           citedRecordIDs: ["S1"])
+        return String(decoding: try JSONEncoder().encode(answer), as: UTF8.self)
+    }
+}
+
 final class ACTAAnalyticsTests: XCTestCase {
 
     private func makeTestImage(width: Int = 64, height: Int = 96, r: UInt8 = 210, g: UInt8 = 45, b: UInt8 = 50) -> CGImage {
@@ -196,7 +210,7 @@ final class ACTAAnalyticsTests: XCTestCase {
         XCTAssertEqual(split?.movedTrackKeys, ["TRK-F1"])
     }
 
-    func testCollageBuilderAndOpSecAndDryRunCoordinator() async throws {
+    func testCollageBuilderAndOpSecAndMissingStoreCoordinator() async throws {
         let img = makeTestImage(width: 96, height: 128, r: 120, g: 160, b: 90)
         let cells = [
             ACTACollageCell(badgeIndex: 1, itemID: "1", cgImage: img, caption: "P-001"),
@@ -211,7 +225,10 @@ final class ACTAAnalyticsTests: XCTestCase {
         XCTAssertFalse(sanitized.lowercased().contains("qwen"))
         XCTAssertFalse(sanitized.lowercased().contains("yolo"))
 
-        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun, preferredLanguage: .ru))
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .mlxInProcess, preferredLanguage: .ru),
+            transport: { _ in XCTFail("Unexpected HTTP"); throw URLError(.notConnectedToInternet) },
+            keyProvider: { _ in XCTFail("Unexpected credentials"); return nil },
+            localAgentInference: { _, _ in XCTFail("Missing store must stop inference"); return "{}" })
         let coordinator = ACTAAnalyticsCoordinator(aiClient: client)
         let reply = await coordinator.askACTAChatAgent(question: "Где сейчас мужчина в черной куртке?")
         XCTAssertFalse(reply.answerMarkdown.isEmpty)
@@ -528,13 +545,25 @@ final class ACTAAnalyticsTests: XCTestCase {
     }
 
     func testAgentConversationHistoryFocusChainDebtActionsAndThreadMerge() async throws {
-        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("ghost-chat-\(UUID().uuidString)", isDirectory: true)
+        let tempDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent(".ghost-chat-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: tempDir) }
         let store = try LocalTrackingStore(url: tempDir.appendingPathComponent("test.sqlite3"))
 
-        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun, preferredLanguage: .ru), cacheStore: store)
+        let script = AnalyticsAgentScript()
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .mlxInProcess, preferredLanguage: .ru), cacheStore: store,
+            transport: { _ in XCTFail("Agent must not use HTTP"); throw URLError(.notConnectedToInternet) },
+            keyProvider: { _ in XCTFail("Agent must not use credentials"); return nil },
+            localAgentInference: { prompt, images in try await script.reply(prompt: prompt, images: images) })
         let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store)
         let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+
+        try store.appendACTAChatMessage(
+            ACTAChatMessageRecord(threadID: "thread-A", role: "assistant", text: "Earlier local history",
+                                  createdAt: t0.addingTimeInterval(-1)),
+            terminalResponseID: "legacy-remote-chain",
+            pendingOutputs: [ACTAPendingOutputDebt(callID: "legacy-call", outputJSON: "legacy-secret-debt")]
+        )
 
         // Seed an identity dossier
         try store.indexACTATrackKnowledge(
@@ -573,32 +602,35 @@ final class ACTAAnalyticsTests: XCTestCase {
 
         // Verify user message had persona stripped
         let msgsA = try store.loadACTAChatMessages(threadID: "thread-A")
-        XCTAssertEqual(msgsA.count, 2)
-        XCTAssertFalse(msgsA[0].text.lowercased().contains("ignore previous instructions"))
+        XCTAssertEqual(msgsA.count, 3)
+        XCTAssertFalse(msgsA[1].text.lowercased().contains("ignore previous instructions"))
 
         // Verify focus block contains P-001 dossier summary line
         let focusBlock = try store.loadACTAThreadFocusBlock(threadID: "thread-A")
         XCTAssertTrue(focusBlock.contains("P-001"))
 
-        // Verify live_look saved a 44-minute ephemeral clip in ghost_chat_clips
+        // The prefetch and the model's live_look both save ephemeral clips.
         let clipsA = try store.loadACTAChatClips(threadID: "thread-A")
-        XCTAssertEqual(clipsA.count, 1)
-        XCTAssertEqual(clipsA[0].expiresAt.timeIntervalSince(clipsA[0].createdAt), ACTAChatClipRecord.defaultTTLSeconds, accuracy: 1.0)
+        XCTAssertEqual(clipsA.count, 2)
+        for clip in clipsA {
+            XCTAssertEqual(clip.expiresAt.timeIntervalSince(clip.createdAt), ACTAChatClipRecord.defaultTTLSeconds, accuracy: 1.0)
+        }
 
-        // Verify OpenAI Responses chain head & pending_outputs_json debt settlement
+        // A legacy remote chain must not be resumed or sent to the in-process model.
+        let prompts = await script.prompts
+        XCTAssertTrue(prompts.first?.contains("Earlier local history") == true)
+        XCTAssertTrue(prompts.allSatisfy { !$0.contains("legacy-remote-chain") && !$0.contains("legacy-call") && !$0.contains("legacy-secret-debt") })
         let threadBeforeTurn2 = try store.loadACTAChatThread(threadID: "thread-A")
-        XCTAssertNotNil(threadBeforeTurn2?.lastResponseID)
-        XCTAssertEqual(threadBeforeTurn2?.pendingOutputs.count, 1)
-        let openAIBody = ACTAAIClient.buildOpenAIResponsesBody(
-            tier: .full,
-            prompt: "Follow up",
-            jpegImages: [],
-            previousResponseID: threadBeforeTurn2?.lastResponseID,
-            owedOutputs: threadBeforeTurn2?.pendingOutputs ?? []
-        )
-        XCTAssertEqual(openAIBody["previous_response_id"] as? String, threadBeforeTurn2?.lastResponseID)
-        let inputArr = openAIBody["input"] as? [[String: Any]]
-        XCTAssertEqual(inputArr?.first?["type"] as? String, "function_call_output")
+        XCTAssertNil(threadBeforeTurn2?.lastResponseID)
+        XCTAssertTrue(threadBeforeTurn2?.pendingOutputs.isEmpty == true)
+        do {
+            _ = try await client.runAgentStep(request: ACTAAgentRequest(
+                instructions: "Follow up", fullInput: [.user(text: "Follow up", images: [])],
+                previousResponseID: "legacy-remote-chain", tools: []), pinnedBackend: .openAI)
+            XCTFail("Remote chain must be rejected")
+        } catch {
+            XCTAssertEqual(error as? ACTAAgentError, .noBackendAvailable)
+        }
 
         // 2. Test proposed action confirmation (`rename_identity`)
         let action = ACTAChatActionRecord(
@@ -631,7 +663,7 @@ final class ACTAAnalyticsTests: XCTestCase {
         XCTAssertTrue(mergedThread?.pendingOutputs.isEmpty ?? false)
 
         let mergedMessages = try store.loadACTAChatMessages(threadID: "thread-A")
-        XCTAssertEqual(mergedMessages.count, 4)
+        XCTAssertEqual(mergedMessages.count, 5)
         let mergedFocus = try store.loadACTAThreadFocusEntries(threadID: "thread-A", limit: 10)
         XCTAssertTrue(mergedFocus.map(\.refID).contains("P-001"))
         XCTAssertTrue(mergedFocus.map(\.refID).contains("V-009"))
@@ -815,7 +847,8 @@ final class ACTAAnalyticsTests: XCTestCase {
     }
 
     func testAgentWorksWithAllSavedMemoryTypes() async throws {
-        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("ghost-all-mem-\(UUID().uuidString)", isDirectory: true)
+        let tempDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent(".ghost-all-mem-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: tempDir) }
         let store = try LocalTrackingStore(url: tempDir.appendingPathComponent("test.sqlite3"))
         let memStore = CameraMemoryStore(url: tempDir.appendingPathComponent("camera-memory", isDirectory: true))
@@ -946,7 +979,16 @@ final class ACTAAnalyticsTests: XCTestCase {
         )
 
         // 7. Configure coordinator with `memoryFrameStore` and `ACTAOperationalMemorySnapshot`
-        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun))
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .mlxInProcess),
+            transport: { _ in XCTFail("Agent must not use HTTP"); throw URLError(.notConnectedToInternet) },
+            keyProvider: { _ in XCTFail("Agent must not use credentials"); return nil },
+            localAgentInference: { prompt, _ in
+                XCTAssertTrue(prompt.contains("Main Gate"))
+                XCTAssertTrue(prompt.contains("yellow safety vest"))
+                let answer = ACTAChatPresentAnswer(answerMarkdown: "Saved observations reviewed.",
+                    citedIdentityIDs: [syncedPersonIdentityID], citedCameraIDs: [camID.uuidString], citedRecordIDs: ["S1"])
+                return String(decoding: try JSONEncoder().encode(answer), as: UTF8.self)
+            })
         let coordinator = ACTAAnalyticsCoordinator(
             aiClient: client,
             trackingStore: store,
@@ -1087,6 +1129,8 @@ final class ACTAAnalyticsTests: XCTestCase {
             now: t0.addingTimeInterval(65)
         )
         XCTAssertFalse(agentAnswer.answerMarkdown.isEmpty)
+        XCTAssertGreaterThan(agentAnswer.confidence, 0)
+        XCTAssertFalse(agentAnswer.evidenceReferences.isEmpty)
         XCTAssertTrue(agentAnswer.citedIdentityIDs.contains(syncedPersonIdentityID))
         XCTAssertTrue(agentAnswer.citedCameraIDs.contains(camID.uuidString))
     }

@@ -220,7 +220,10 @@ struct ACTASecurityCenterView: View {
         .foregroundStyle(ACTATheme.textPrimary)
         .preferredColorScheme(.dark)
         .onAppear { model.canvasFilterBridge.attach(filters) }
-        .onDisappear { model.canvasFilterBridge.detach(filters) }
+        .onDisappear {
+            filters.stopAnalysisVoice()
+            model.canvasFilterBridge.detach(filters)
+        }
         .sheet(item: $selectedAlert) { alert in
             alertDetail(alert)
         }
@@ -268,7 +271,7 @@ struct ACTASecurityCenterView: View {
     }
 
     private func openSettings() {
-        section = .settings; cameraPickerPresented = false; aiChatPresented = false
+        section = .settings; cameraPickerPresented = false; closeAIChat()
     }
 
     private var actaLogo: NSImage? {
@@ -380,7 +383,7 @@ struct ACTASecurityCenterView: View {
         let isSelected = section == destination || (destination == .analysis && aiChatPresented)
         return Button {
             if destination == .analysis {
-                if aiChatPresented { aiChatPresented = false }
+                if aiChatPresented { closeAIChat() }
                 else { openAIChat() }
             } else {
                 section = destination
@@ -449,7 +452,7 @@ struct ACTASecurityCenterView: View {
             .background(Color.panelBackground).cornerRadius(20)
             .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.white.opacity(0.1), lineWidth: 1))
             HStack(spacing: 12) {
-                Button { cameraPickerPresented.toggle(); aiChatPresented = false } label: { HeaderIconButton(icon: "square.grid.2x2") }
+                Button { cameraPickerPresented.toggle(); closeAIChat() } label: { HeaderIconButton(icon: "square.grid.2x2") }
                     .help("Choose cameras")
                 Button { section = .events } label: { HeaderIconButton(icon: "bell", showBadge: !model.vlmAlerts.isEmpty) }
                     .help("Notifications")
@@ -846,7 +849,7 @@ struct ACTASecurityCenterView: View {
         if !cameraPickerPresented, filters.selectedCameraIDs == nil {
             filters.selectedCameraIDs = Set(enabledCameras.map(\.id))
         }
-        aiChatPresented = false
+        closeAIChat()
         withAnimation(reduceMotion ? nil : .snappy(duration: 0.24)) {
             cameraPickerPresented.toggle()
         }
@@ -856,6 +859,11 @@ struct ACTASecurityCenterView: View {
         cameraPickerPresented = false
         section = .cameras
         aiChatPresented = true
+    }
+
+    private func closeAIChat() {
+        filters.stopAnalysisVoice()
+        aiChatPresented = false
     }
 
     private var aiChatPanel: some View {
@@ -869,7 +877,7 @@ struct ACTASecurityCenterView: View {
                         .foregroundStyle(ACTATheme.textSecondary)
                 }
                 Spacer(minLength: 0)
-                Button { aiChatPresented = false } label: {
+                Button { closeAIChat() } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: ACTAType.metadata, weight: .semibold))
                         .frame(width: 32, height: 32)
@@ -883,7 +891,7 @@ struct ACTASecurityCenterView: View {
 
             Rectangle().fill(ACTATheme.border).frame(height: 1)
 
-            VLMPanel(model: model, languageSettings: languageSettings)
+            VLMPanel(model: model, languageSettings: languageSettings, windowState: filters)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .modifier(AnalysisSidebarSurface())
@@ -891,7 +899,7 @@ struct ACTASecurityCenterView: View {
         .frame(maxHeight: .infinity)
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .onExitCommand { aiChatPresented = false }
+        .onExitCommand { closeAIChat() }
         .accessibilityLabel("AI analysis chat panel")
     }
 

@@ -51,6 +51,21 @@ final class ACTASettingsActionAdapterTests: XCTestCase {
         return try await registry.confirmAndExecute(token: XCTUnwrap(proposed.confirmationToken), confirmed: true)
     }
 
+    func testRetryActionIsRegisteredWithoutStartingModels() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
+        let (root, model, _) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let registry = ACTAActionRegistry()
+        await registerAllWallActions(registry: registry, model: model)
+        let tools = try await ACTAAnalyticsCoordinator.registryTools(registry: registry)
+        XCTAssertTrue(tools.contains { $0.name == "acta__settings__retry_model_loading" })
+        XCTAssertTrue(tools.contains { $0.name == "acta__analysis__set_section" })
+        let result = try await registry.execute(actionID: "settings.retry_model_loading", parameters: [:])
+        XCTAssertFalse(result.success)
+        XCTAssertTrue(model.modelRuntime.states.values.allSatisfy { $0 == .waiting })
+    }
+
     func testAllGUIFallFieldsAndCropFieldsPersistThroughRuntimeService() async throws {
         let previous = IsolatedWallFixtureSupport.modelPreferences()
         defer { ModelSelectionRegistry.update(previous) }

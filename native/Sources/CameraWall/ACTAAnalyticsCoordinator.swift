@@ -1683,10 +1683,10 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
     static func registryTools(registry: ACTAActionRegistry = .shared) async throws -> [ACTAAgentToolSpec] {
         let enabled: Set<String> = ["camera.list", "camera.get", "camera.set_enabled", "camera.set_favorite", "camera.remove", "camera.add_network", "camera.add_local",
             "camera.add_screen", "camera.add_file", "camera.edit", "camera.set_processing",
-            "canvas.set_columns", "canvas.reset_layout", "canvas.set_filter", "canvas.select_cameras", "canvas.set_arrange_mode", "canvas.set_presentation", "camera.toggle_expand", "settings.get_section", "settings.update_system",
+            "canvas.set_columns", "canvas.reset_layout", "canvas.set_filter", "canvas.select_cameras", "canvas.set_arrange_mode", "canvas.set_presentation", "analysis.set_section", "camera.toggle_expand", "settings.get_section", "settings.update_system",
             "settings.update_feature_toggles", "settings.update_permissions", "settings.update_runtime_fall",
             "settings.update_runtime_storage", "settings.update_runtime_crop", "settings.update_events_alerts",
-            "settings.update_memory_policy", "settings.update_schedules", "settings.save_alert_rule", "settings.remove_alert_rule", "settings.run_health_check", "settings.update_ai_budget", "settings.update_ai_config",
+            "settings.update_memory_policy", "settings.update_schedules", "settings.save_alert_rule", "settings.remove_alert_rule", "settings.run_health_check", "settings.retry_model_loading", "settings.update_ai_budget", "settings.update_ai_config",
             "analytics.get_settings", "analytics.set_global_toggle", "analytics.set_threshold",
             "analytics.set_sampling_fps", "analytics.set_overlay", "analytics.set_camera_override",
             "analytics.set_restricted_zone", "analytics.remove_restricted_zone", "analytics.update_restricted_zone",

@@ -11,6 +11,11 @@
 "The frame list changed. Review it and try again." = "Список кадров изменился. Проверьте его и повторите попытку.";
 "Reconnect limit reached; restart the video wall to clear relay registrations." = "Достигнут предел переподключений. Перезапустите видеостену, чтобы очистить регистрации ретранслятора.";
 "Camera is not available for reconnection." = "Камера недоступна для переподключения.";
+"Retrying failed local model preparation; this may use significant resources." = "Повторная подготовка локальных моделей с ошибками может потребовать значительных ресурсов.";
+"Retry failed local model loading" = "Повторить загрузку локальных моделей с ошибками";
+"Set analysis tab" = "Выбрать вкладку анализа";
+"INVALID_ARGUMENT: Provide section." = "INVALID_ARGUMENT: Укажите вкладку.";
+"INVALID_ARGUMENT: section must be chat, schedule, or alerts." = "INVALID_ARGUMENT: Укажите вкладку chat, schedule или alerts.";
 "Switch interface language to English" = "Переключить язык интерфейса на английский";
 "Quit CameraWall" = "Закрыть CameraWall";
 "Edit" = "Правка";

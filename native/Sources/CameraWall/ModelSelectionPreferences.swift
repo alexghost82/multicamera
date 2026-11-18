@@ -36,7 +36,16 @@ struct ModelSelectionPreferences: Codable, Equatable, Sendable {
 enum ModelSelectionRegistry {
     private static let lock = NSLock()
     private static var preferences = ModelSelectionPreferences()
-    static func update(_ value: ModelSelectionPreferences) { lock.lock(); defer { lock.unlock() }; preferences = value }
+    private static var generation = UUID()
+    static func update(_ value: ModelSelectionPreferences) {
+        lock.lock(); defer { lock.unlock() }
+        preferences = value
+        generation = UUID()
+    }
+    static func snapshot() -> (preferences: ModelSelectionPreferences, generation: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        return (preferences, generation)
+    }
     static func isEnabled(_ service: LocalModelService) -> Bool { lock.lock(); defer { lock.unlock() }; return preferences.enabled.contains(service) }
     static func path(_ service: LocalModelService) -> URL? {
         lock.lock(); defer { lock.unlock() }

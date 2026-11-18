@@ -31,6 +31,24 @@ final class ACTACanvasFilterState: ObservableObject {
     @Published var selectedCameraIDs: Set<UUID>?
     @Published var arrangeCameras = false
     @Published var presentation: ACTACameraPresentation = .grid
+    @Published var analysisSection: VLMPanelSection = .ask
+    let analysisVoiceInput: LocalVoiceInput
+    var analysisVoiceBusy: Bool { analysisVoiceInput.isBusy }
+    var analysisScheduleRefreshOnAppear = true
+
+    init(analysisVoiceInput: LocalVoiceInput = LocalVoiceInput()) {
+        self.analysisVoiceInput = analysisVoiceInput
+    }
+
+    func stopAnalysisVoice() {
+        analysisVoiceInput.stop()
+    }
+
+    func selectAnalysisSectionFromGUI(_ section: VLMPanelSection) {
+        if analysisSection == .ask && section != .ask { stopAnalysisVoice() }
+        analysisScheduleRefreshOnAppear = true
+        analysisSection = section
+    }
 
     static func locationGroup(_ location: String?) -> String {
         let trimmed = location?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -59,6 +77,8 @@ final class ACTACanvasFilterBridge {
     private weak var writtenState: ACTACanvasFilterState?
     private weak var arrangeWrittenState: ACTACanvasFilterState?
     private weak var presentationWrittenState: ACTACanvasFilterState?
+    private weak var analysisWrittenState: ACTACanvasFilterState?
+    private var analysisWrittenSection: VLMPanelSection?
     private weak var selectionWrittenState: ACTACanvasFilterState?
     private var selectionInventory: Set<UUID>?
     private var selectionValue: Set<UUID>?
@@ -67,6 +87,8 @@ final class ACTACanvasFilterBridge {
         writtenState = nil
         arrangeWrittenState = nil
         presentationWrittenState = nil
+        analysisWrittenState = nil
+        analysisWrittenSection = nil
         clearSelectionWrite()
         entries.removeAll { $0.state == nil || $0.state === state }
         entries.append(Entry(state: state))
@@ -76,6 +98,8 @@ final class ACTACanvasFilterBridge {
         writtenState = nil
         arrangeWrittenState = nil
         presentationWrittenState = nil
+        analysisWrittenState = nil
+        analysisWrittenSection = nil
         clearSelectionWrite()
         entries.removeAll { $0.state == nil || $0.state === state }
     }
@@ -110,6 +134,16 @@ final class ACTACanvasFilterBridge {
     var presentationWrittenActiveState: ACTACanvasFilterState? {
         guard let state = activeState, state === presentationWrittenState else { return nil }
         return state
+    }
+
+    func recordAnalysisWrite(to state: ACTACanvasFilterState, section: VLMPanelSection) {
+        analysisWrittenState = state
+        analysisWrittenSection = section
+    }
+
+    func verifiesAnalysisSection(_ section: VLMPanelSection) -> Bool {
+        guard let state = activeState, state === analysisWrittenState else { return false }
+        return analysisWrittenSection == section && state.analysisSection == section
     }
 
     private func clearSelectionWrite() {

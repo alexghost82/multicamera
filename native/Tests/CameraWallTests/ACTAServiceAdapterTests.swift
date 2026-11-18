@@ -49,16 +49,14 @@ final class ACTAServiceAdapterTests: XCTestCase {
         await registerAllWallActions(registry: .shared, model: model)
         let store = try LocalTrackingStore(url: directory.appendingPathComponent("agent.sqlite"))
         let script = ActionTransportScript()
-        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .localVLLM, preferredLanguage: .ru),
-            transport: { request in
-                let raw = await script.reply(to: String(decoding: request.httpBody ?? Data(), as: UTF8.self))
-                let payload: [String: Any] = ["choices": [["message": ["content": raw]]]]
-                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-                return (try JSONSerialization.data(withJSONObject: payload), response)
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .mlxInProcess, preferredLanguage: .ru),
+            transport: { _ in
+                XCTFail("Unexpected network request")
+                throw URLError(.notConnectedToInternet)
             }, keyProvider: { _ in
                 XCTFail("Unexpected AI credential access")
                 return nil
-            })
+            }, localAgentInference: { prompt, _ in await script.reply(to: prompt) })
         let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store)
         _ = await coordinator.askACTAChatAgent(question: "Установи семь колонок", maxSteps: 3)
         XCTAssertEqual(model.config.columns, 7)

@@ -420,6 +420,8 @@ func registerAllWallActions(registry: ACTAActionRegistry, model: WallModel, lang
     await registry.register(ACTAISAPIReadAction(provider: ACTAWallISAPIReadProvider(model: model)))
     await registry.register(ACTAReIDCalibrationAction(provider: ACTAWallReIDCalibrationProvider(model: model)))
     await registry.register(ACTARunHealthCheckAction(model: model))
+    await registry.register(ACTARetryModelLoadingAction(model: model))
+    await registry.register(ACTAAnalysisSetSectionAction(bridge: model.canvasFilterBridge))
 
     await registry.register(WallNarrativeAction(pin: true, model: model))
     await registry.register(WallNarrativeAction(pin: false, model: model))

@@ -47,6 +47,7 @@ final class NetworkReconnectSession: ReconnectAttemptSession {
         guard !stopped, registration == nil else { throw CancellationError() }
         registration = Task {
             do {
+                guard !stopped, !Task.isCancelled else { return }
                 let url = try await register()
                 guard !stopped, !Task.isCancelled else { return }
                 startDecoder(session, url)

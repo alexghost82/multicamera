@@ -169,6 +169,7 @@ final class Go2RTC {
     // prove that the relay did not apply the PATCH later.
     func registerReconnect(camera: Camera, expanded: Bool, attemptID: UUID,
                            credentials: Credentials?) async throws -> String {
+        try Task.checkCancellation()
         guard reconnectRegistrations < 64 else {
             throw ConfigurationError.invalid("Reconnect limit reached; restart the video wall to clear relay registrations.")
         }

@@ -41,6 +41,11 @@ authorization policy and agent/GUI parity remain unverified.
 | Crop description / visual similarity | Describe a saved crop or find visually similar crops | Model and privacy controls and evidence semantics require review. |
 | Spoken tactical briefing | Enable or disable speech in AI settings | Not registered: existing briefing generation can send context to a configured external backend. |
 | Grid/list and fullscreen | Change camera display mode or fullscreen | Window-local grid/list is registered; key-window fullscreen is not. |
+| Local camera discovery | Refresh the available local capture devices | Configuration listing is not hardware discovery; permission behavior and device-ID disclosure remain unverified. |
+| Settings navigation | Select a SettingsHub section | Reading a settings section is not GUI navigation; leaving Showcase stops its server. |
+| `analysis.set_section` | Select Chat, Schedule, or Alerts | Registered for the unique attached security center; window state is verified, rendering is not. |
+| Full track-history search | Search all stored track descriptions | The legacy search uses different tokenization and a recent-track limit; sensitive output policy remains unresolved. |
+| Cross-camera history filters | Filter confirmed visits by camera, sequence, period, class, or attributes | Legacy knowledge queries are not equivalent; GUI refresh also mutates proposals and is not a read-only operation. |
 
 ---
 
@@ -69,7 +74,7 @@ authorization policy and agent/GUI parity remain unverified.
 | `camera.set_processing` | Camera context settings | WallModel | `camera_id, feature: yolo/ai_chat, enabled: Bool` | `Reversible` | **Confirm AI flag change** | `testMetadataProcessingAndURLChangesPreserveCredentialAndSourceIdentity` | `IMPLEMENTED — CONFIG/GUI SERVICE TEST` |
 | `camera.set_enabled` | `CameraManager` toggle | `WallModel` | `cameraID: String, enabled: Bool` | `ServiceAffecting` | **Confirm on enable** | `testMetadataProcessingAndURLChangesPreserveCredentialAndSourceIdentity` | `IMPLEMENTED — CONFIG FLAG; STREAM UNVERIFIED` |
 | `camera.remove` | `WallView` remove alert | `WallModel` | `cameraID: String` | `Destructive` | **Confirm** | `testRemovalRequiresReviewAndChecksCredentialDeletion` | `IMPLEMENTED — CONFIG/FAKE CREDENTIAL STORE; LIVE KEYCHAIN UNVERIFIED` |
-| `camera.reconnect` | Camera context menu | `WallModel` | `cameraID: String` | `ServiceAffecting` | Auto | `CameraReconnectAttemptTests` (fake helper only) | `GAP — RELAY CANCELLATION, LATE AVCAPTURE START AND GUI SESSION INSTALLATION UNVERIFIED` |
+| `camera.reconnect` | Camera context menu | `WallModel` | `cameraID: String` | `ServiceAffecting` | Auto | `CameraReconnectAttemptTests`, `CameraReconnectIntegrationTests` | `GAP — NETWORK GUI USES FRESH FRAMES AND UNIQUE RELAY NAMES IN FAKE TESTS; LOCAL SOURCES, REAL NETWORK AND RELAY STOP REMAIN UNVERIFIED` |
 | `camera.set_favorite` | Camera context menu | `UserDefaults` / `ACTACameraFavorites` | `camera_id: UUID or unique name, favorite: Bool` | `Reversible` | Auto | `ACTACameraFavoriteActionTests` | `PARTIAL — SHARED PREFERENCE/READBACK; DISK SYNCHRONIZATION AND LIVE GUI UNVERIFIED` |
 | `camera.snapshot` | Camera action bar | `WallModel` | `cameraID: String` | `ServiceAffecting` | Destination/confirmation policy pending | Not implemented | `GAP — GUI WRITES JPEG THROUGH A SAVE PANEL; NOT A READ-ONLY QUERY` |
 | `camera.toggle_expand` | Video canvas double-click | `WallModel` | `cameraID: String` | `Reversible` | Auto | `testCanvasActionsShareGUIStateAndVerifySavedLayout` | `IMPLEMENTED — UI STATE; STREAM UNVERIFIED` |
@@ -213,6 +218,7 @@ authorization policy and agent/GUI parity remain unverified.
 | `settings.export_diagnostics` | Sec 14: System Diagnostics | `WallModel` | GUI chooses destination | `ServiceAffecting` | Destination/confirmation policy pending | Not implemented | `GAP — FILE EXPORT; NOT A READ-ONLY QUERY` |
 | `settings.run_health_check` | Sec 14: System Diagnostics | `WallModel` | `none` | `ServiceAffecting` | Notice | `ACTARunHealthCheckActionTests` | `PARTIAL — FRESH IN-APP SNAPSHOT/HISTORY TESTED; NO INDEPENDENT WATCHER OR LIVE CAMERAS` |
 | `settings.reload_models` | Sec 14: System Diagnostics | `WallModel` | `none` | `ServiceAffecting` | Auto | `testSettingsReloadModels` | `PLANNED` |
+| `settings.retry_model_loading` | Model status strip / Retry | `LocalModelRuntime` | `none` | `ServiceAffecting` | Notice | `ACTARetryModelLoadingActionTests`; isolated registry test | `PARTIAL — RETRIES FAILED ENABLED MODELS ONLY; VERIFIES RUNTIME READINESS, NOT INFERENCE` |
 
 ---
 
@@ -220,6 +226,7 @@ authorization policy and agent/GUI parity remain unverified.
 
 | Action ID | UI Route / Screen | Service Owner | Typed Arguments | Action Type | Policy | Unit / Parity Test | State |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `analysis.set_section` | Analysis panel tabs | `ACTACanvasFilterState` | `section: chat/schedule/alerts` | `Reversible` | Auto | `ACTAAnalysisSectionActionTests` | `PARTIAL — UNIQUE WINDOW STATE; DOES NOT OPEN PANEL OR REFRESH SCHEDULE; RENDERING UNVERIFIED` |
 | `voice.start_listening` | Mic Button / Push-to-Talk | `LocalVoiceCoordinator` | `locale: String?` | `Reversible` | Auto | `testVoiceStartListening` | `PLANNED` |
 | `voice.stop_listening` | Mic Button Release | `LocalVoiceCoordinator` | `none` | `Reversible` | Auto | `testVoiceStopListening` | `PLANNED` |
 | `voice.cancel_listening` | Keyboard Escape / Reset | `LocalVoiceCoordinator` | `none` | `Reversible` | Auto | `testVoiceCancelListening` | `PLANNED` |

@@ -101,7 +101,8 @@ final class ACTAAnalysisSectionActionTests: XCTestCase {
 
     func testDictationGuardAndScheduleRefreshPolicy() async throws {
         let bridge = ACTACanvasFilterBridge()
-        let voice = LocalVoiceInput(speechPermission: { false }, microphonePermission: { false },
+        var permission: CheckedContinuation<Bool, Never>?
+        let voice = LocalVoiceInput(speechPermission: { await withCheckedContinuation { permission = $0 } }, microphonePermission: { false },
                                     makeCapture: { _, _ in XCTFail("Unexpected capture"); throw CancellationError() })
         let state = ACTACanvasFilterState(analysisVoiceInput: voice)
         bridge.attach(state)
@@ -115,6 +116,7 @@ final class ACTAAnalysisSectionActionTests: XCTestCase {
         let same = try await action.execute(parameters: ["section": "chat"], context: context)
         XCTAssertTrue(same.success)
         voice.stop()
+        permission?.resume(returning: true)
         await pending.value
         let changed = try await action.execute(parameters: ["section": "schedule"], context: context)
         XCTAssertTrue(changed.success)

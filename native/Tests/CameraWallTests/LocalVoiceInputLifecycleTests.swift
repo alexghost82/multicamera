@@ -3,7 +3,7 @@ import XCTest
 
 @MainActor
 final class LocalVoiceInputLifecycleTests: XCTestCase {
-    private final class PermissionGate {
+    @MainActor private final class PermissionGate {
         private(set) var requests: [CheckedContinuation<Bool, Never>?] = []
         private var waiters: [(Int, CheckedContinuation<Void, Never>)] = []
 
@@ -38,7 +38,7 @@ final class LocalVoiceInputLifecycleTests: XCTestCase {
         func cancel() { cancels += 1 }
     }
 
-    private final class Hardware {
+    @MainActor private final class Hardware {
         var captures: [Capture] = []
         func make(_ locale: String, _ callback: @escaping @MainActor (LocalVoiceEvent) -> Void) -> any LocalVoiceCapture {
             let capture = Capture(callback: callback)
@@ -112,6 +112,21 @@ final class LocalVoiceInputLifecycleTests: XCTestCase {
         speech.resolve(0, true)
         await second.value
         XCTAssertFalse(voice.isBusy)
+        XCTAssertFalse(voice.isRecording)
+        XCTAssertTrue(hardware.captures.isEmpty)
+    }
+
+    func testStopDuringMicrophonePermissionRejectsLateGrant() async throws {
+        let mic = PermissionGate(), hardware = Hardware()
+        let voice = LocalVoiceInput(speechPermission: { true },
+            microphonePermission: { await mic.request() }, makeCapture: hardware.make)
+        let state = ACTACanvasFilterState(analysisVoiceInput: voice)
+        let task = try XCTUnwrap(voice.start(localeIdentifier: "en"))
+        await mic.waitForRequests(1)
+        state.stopAnalysisVoice()
+        mic.resolve(0, true)
+        await task.value
+        XCTAssertFalse(state.analysisVoiceBusy)
         XCTAssertFalse(voice.isRecording)
         XCTAssertTrue(hardware.captures.isEmpty)
     }

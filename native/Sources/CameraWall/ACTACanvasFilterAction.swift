@@ -36,8 +36,8 @@ final class ACTACanvasFilterState: ObservableObject {
     var analysisVoiceBusy: Bool { analysisVoiceInput.isBusy }
     var analysisScheduleRefreshOnAppear = true
 
-    init(analysisVoiceInput: LocalVoiceInput = LocalVoiceInput()) {
-        self.analysisVoiceInput = analysisVoiceInput
+    init(analysisVoiceInput: LocalVoiceInput? = nil) {
+        self.analysisVoiceInput = analysisVoiceInput ?? LocalVoiceInput()
     }
 
     func stopAnalysisVoice() {

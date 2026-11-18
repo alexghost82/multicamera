@@ -5,6 +5,104 @@ import XCTest
 @testable import CameraCore
 
 final class AgentMemoryReliabilityTests: XCTestCase {
+    func testReviewSafeContextAndOfflineChainRequireDurableProvenance() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".acta-safe-context-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("tracking.sqlite")
+        let store = try LocalTrackingStore(url: url)
+        let legacy = ACTAChatMessageRecord(threadID: "test", role: "assistant", text: "legacy-review-secret")
+        let debt = [ACTAPendingOutputDebt(callID: "c", outputJSON: #"{"status":"presented"}"#)]
+        try store.appendACTAChatMessage(legacy, terminalResponseID: "old-chain", pendingOutputs: debt)
+        XCTAssertTrue(try store.loadACTAChatMessages(threadID: "test", reviewSafeContextOnly: true).isEmpty)
+        XCTAssertNil(try store.loadACTASafeOfflineChain(threadID: "test"))
+
+        let proposal = ACTAProposedAction(actionType: "rename_identity", title: "sensitive title",
+                                           parameters: ["new_name": "secret"])
+        let unsafeAnswer = ACTAChatPresentAnswer(answerMarkdown: "secret", proposedActions: [proposal])
+        try store.appendACTAChatMessage(ACTAChatMessageRecord(threadID: "test", role: "assistant",
+            text: unsafeAnswer.answerMarkdown, structuredAnswer: unsafeAnswer), reviewSafeContext: true)
+        XCTAssertTrue(try store.loadACTAChatMessages(threadID: "test", reviewSafeContextOnly: true).isEmpty)
+
+        let answer = ACTAChatPresentAnswer(answerMarkdown: "ordinary context", confidence: 0.9)
+        let safe = ACTAChatMessageRecord(threadID: "test", role: "assistant",
+            text: answer.answerMarkdown, structuredAnswer: answer)
+        try store.appendACTAChatMessage(safe, terminalResponseID: "resp_offline_42", pendingOutputs: debt,
+                                        reviewSafeContext: true, trustedOfflineChain: true)
+        let reopened = try LocalTrackingStore(url: url)
+        XCTAssertEqual(try reopened.loadACTAChatMessages(threadID: "test", reviewSafeContextOnly: true).map(\.messageID), [safe.messageID])
+        let chain = try reopened.loadACTASafeOfflineChain(threadID: "test")
+        XCTAssertEqual(chain?.0, "resp_offline_42")
+        XCTAssertEqual(chain?.1, debt)
+        try reopened.appendACTAChatMessage(ACTAChatMessageRecord(threadID: "unsafe-debt", role: "assistant",
+            text: answer.answerMarkdown, structuredAnswer: answer), terminalResponseID: "resp_offline_99",
+            pendingOutputs: [ACTAPendingOutputDebt(callID: "c", outputJSON: "review-secret")],
+            reviewSafeContext: true, trustedOfflineChain: true)
+        XCTAssertNil(try reopened.loadACTASafeOfflineChain(threadID: "unsafe-debt"))
+        try reopened.setACTAThreadChainHead(threadID: "test", lastResponseID: "resp_offline_42",
+            pendingOutputs: [ACTAPendingOutputDebt(callID: "c", outputJSON: "review-secret")])
+        XCTAssertNil(try reopened.loadACTASafeOfflineChain(threadID: "test"))
+        try reopened.setACTAThreadChainHead(threadID: "test", lastResponseID: "resp_offline_42", pendingOutputs: debt)
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(url.path, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        XCTAssertEqual(sqlite3_exec(db, "UPDATE ghost_chat_messages SET safe_offline_debt_json = 'invalid' WHERE thread_id = 'test' AND review_safe_context = 1",
+                                   nil, nil, nil), SQLITE_OK)
+        XCTAssertThrowsError(try reopened.loadACTASafeOfflineChain(threadID: "test"))
+        XCTAssertEqual(sqlite3_exec(db, "UPDATE ghost_chat_messages SET content = 'changed' WHERE review_safe_context = 1",
+                                   nil, nil, nil), SQLITE_OK)
+        XCTAssertTrue(try reopened.loadACTAChatMessages(threadID: "test", reviewSafeContextOnly: true).isEmpty)
+        XCTAssertNil(try reopened.loadACTASafeOfflineChain(threadID: "test"))
+    }
+
+#if DEBUG
+    func testDurableAuditReportsRestoreFailureAfterCommitAndAfterWriteFailure() throws {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".acta-audit-restore-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("audit.sqlite")
+        let store = try LocalTrackingStore(url: url)
+        enum Failure: Error { case restoration }
+        store.durableAuditRestoreTestHook = { throw Failure.restoration }
+        let record = ACTAToolCallAuditRecord(threadID: "test", toolName: "canvas.set_presentation",
+            argsJSON: "{}", resultRows: 0, durationMs: 0, ok: false, error: "BROKER_approved")
+        XCTAssertThrowsError(try store.recordDurableACTAToolCallAudit(record)) {
+            XCTAssertTrue($0.localizedDescription.contains("audit was committed"))
+            XCTAssertTrue($0.localizedDescription.contains("restoration failed"))
+        }
+        XCTAssertEqual(try store.executeReadOnlyACTASQL(
+            "SELECT COUNT(*) AS n FROM ghost_chat_tool_calls WHERE error = 'BROKER_approved'").first?["n"], "1")
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(url.path, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        XCTAssertEqual(sqlite3_exec(db, "CREATE TRIGGER fail_broker_audit BEFORE INSERT ON ghost_chat_tool_calls BEGIN SELECT RAISE(ABORT, 'simulated failure'); END", nil, nil, nil), SQLITE_OK)
+        XCTAssertThrowsError(try store.recordDurableACTAToolCallAudit(record)) {
+            XCTAssertTrue($0.localizedDescription.contains("write and SQLite synchronization mode restoration both failed"))
+        }
+    }
+#endif
+
+    func testDurableToolAuditSurvivesReopenAndPropagatesWriteFailure() throws {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".acta-audit-fixture-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("audit.sqlite")
+        let store = try LocalTrackingStore(url: url)
+        let record = ACTAToolCallAuditRecord(threadID: "test", toolName: "canvas.set_presentation",
+            argsJSON: "{}", resultRows: 0, durationMs: 0, ok: false, error: "BROKER_approved")
+        try store.recordDurableACTAToolCallAudit(record)
+        let reopened = try LocalTrackingStore(url: url)
+        XCTAssertEqual(try reopened.executeReadOnlyACTASQL(
+            "SELECT COUNT(*) AS n FROM ghost_chat_tool_calls WHERE error = 'BROKER_approved'").first?["n"], "1")
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(url.path, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        XCTAssertEqual(sqlite3_exec(db, "CREATE TRIGGER fail_broker_audit BEFORE INSERT ON ghost_chat_tool_calls BEGIN SELECT RAISE(ABORT, 'simulated failure'); END", nil, nil, nil), SQLITE_OK)
+        XCTAssertThrowsError(try store.recordDurableACTAToolCallAudit(
+            ACTAToolCallAuditRecord(threadID: "test", toolName: "canvas.set_presentation",
+                argsJSON: "{}", resultRows: 0, durationMs: 0, ok: false, error: "BROKER_request")))
+    }
+
     func testProcessDeathRollsBackAnApprovedAction() throws {
         let environmentKey = "ACTA_TEST_CRASH_RECOVERY_ROOT"
         if let path = ProcessInfo.processInfo.environment[environmentKey] {

@@ -425,6 +425,7 @@ enum CameraMissionReport {
                 <head>
                     <meta charset="utf-8">
                     <meta name="viewport" content="width=device-width, initial-scale=1">
+                    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
                     <title>CameraWall mission report</title>
                     <style>
                         body { font: 15px -apple-system, BlinkMacSystemFont, sans-serif; margin: 32px auto; max-width: 1000px; padding: 0 20px; color: #17212b; }

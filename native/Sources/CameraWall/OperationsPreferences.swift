@@ -77,7 +77,8 @@ enum OperationsAlertReport {
         alerts: [VLMAlert], reviews: [UUID: OperationsAlertReview], acknowledgements: [UUID: Date],
         generatedAt: Date = Date()
     ) -> String {
-        let rows = OperationsAlertQueue.ordered(alerts, reviews: reviews, acknowledgements: acknowledgements).prefix(100).map { alert in
+        let reportLimit = 100
+        let rows = OperationsAlertQueue.ordered(alerts, reviews: reviews, acknowledgements: acknowledgements).prefix(reportLimit).map { alert in
             let review = reviews[alert.id]
             let status = OperationsAlertQueue.status(for: alert.id, reviews: reviews, acknowledgements: acknowledgements)
             return """
@@ -87,6 +88,9 @@ enum OperationsAlertReport {
             <td>\(alert.id.uuidString)</td></tr>
             """
         }.joined(separator: "\n")
+        let truncationNotice = alerts.count > reportLimit
+            ? "<p>Showing \(reportLimit) of \(alerts.count) stored alerts.</p>"
+            : ""
         return """
         <!doctype html><html lang="en"><head><meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -94,6 +98,7 @@ enum OperationsAlertReport {
         <title>CameraWall operations report</title>
         <style>body{font:15px -apple-system,sans-serif;margin:24px;color:#17212b}table{border-collapse:collapse;width:100%}th,td{text-align:left;vertical-align:top;padding:8px;border-bottom:1px solid #ccd3d9;white-space:pre-wrap;overflow-wrap:anywhere}</style>
         </head><body><h1>CameraWall operations report</h1><p>\(escape(generatedAt.formatted()))</p>
+        \(truncationNotice)
         <table><thead><tr><th>Time</th><th>Camera</th><th>Operator priority</th><th>Status</th><th>Condition</th><th>Evidence</th><th>Operator note</th><th>Alert UUID</th></tr></thead>
         <tbody>\(rows)</tbody></table></body></html>
         """

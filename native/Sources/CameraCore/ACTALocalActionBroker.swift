@@ -5,8 +5,42 @@ public final class ACTABrokerOperator: Sendable {
     fileprivate init() {}
 }
 
-public final class ACTABrokerSession: Sendable {
-    fileprivate init() {}
+public final class ACTABrokerSession: @unchecked Sendable {
+    private let lock = NSLock()
+    private let owner: ACTABrokerOperator
+    private let threadID: String
+    private let inspectionIDs: Set<String>
+    private var revoked = false
+
+    fileprivate init(owner: ACTABrokerOperator, threadID: String, inspectionIDs: Set<String>) {
+        self.owner = owner
+        self.threadID = threadID
+        self.inspectionIDs = inspectionIDs
+    }
+
+    public func permitsInspection(_ inspectionID: String, threadID: String) -> Bool {
+        lock.withLock { !revoked && self.threadID == threadID && inspectionIDs.contains(inspectionID) }
+    }
+
+    public func isActive(threadID: String) -> Bool {
+        lock.withLock { !revoked && self.threadID == threadID }
+    }
+
+    public func withInspection<T>(
+        _ inspectionID: String, threadID: String, operation: () throws -> T
+    ) rethrows -> T? {
+        try lock.withLock {
+            guard !revoked, self.threadID == threadID, inspectionIDs.contains(inspectionID) else { return nil }
+            return try operation()
+        }
+    }
+
+    /// Trusted hosts revoke synchronously before switching thread or cancelling a task.
+    @discardableResult
+    public func invalidate(operatorKey: ACTABrokerOperator) -> Bool {
+        guard owner === operatorKey else { return false }
+        return lock.withLock { revoked = true; return true }
+    }
 }
 
 public final class ACTABrokerReviewHandle: Sendable {
@@ -42,11 +76,14 @@ public struct ACTABrokerAuditEvent: Sendable {
 /// This is not a process boundary and does not protect calls made directly to domain services.
 public actor ACTALocalActionBroker {
     public typealias Audit = @Sendable (ACTABrokerAuditEvent) throws -> Void
+    public enum InspectionAuthorization: Sendable, Equatable {
+        case authorized, unauthorized, auditFailed
+    }
 
     private struct SessionState {
         let session: ACTABrokerSession
-        let requester: ACTALocalPrincipal
-        let reviewer: ACTALocalPrincipal
+        let requester: ACTALocalPrincipal?
+        let reviewer: ACTALocalPrincipal?
         let threadID: String
         let input: ACTABrokerLocalInput
         let actionIDs: Set<String>
@@ -68,27 +105,30 @@ public actor ACTALocalActionBroker {
     private let authority: ACTALocalAuthority
     private let operatorKey: ACTABrokerOperator
     private let allowedActionIDs: Set<String>
+    private let allowedInspectionIDs: Set<String>
     private let audit: Audit
     private var sessions: [ObjectIdentifier: SessionState] = [:]
     private var pending: [ObjectIdentifier: Pending] = [:]
 
     private init(
         registry: ACTAActionRegistry, authority: ACTALocalAuthority, operatorKey: ACTABrokerOperator,
-        allowedActionIDs: Set<String>, audit: @escaping Audit
+        allowedActionIDs: Set<String>, allowedInspectionIDs: Set<String>, audit: @escaping Audit
     ) {
         self.registry = registry
         self.authority = authority
         self.operatorKey = operatorKey
         self.allowedActionIDs = allowedActionIDs
+        self.allowedInspectionIDs = allowedInspectionIDs
         self.audit = audit
     }
 
     /// Only explicitly registered, scoped actions can be used. No scheduler capability is issued.
     public nonisolated static func make(
-        actions: [any ACTAActionProtocol], allowedActionIDs: Set<String>, audit: @escaping Audit
+        actions: [any ACTAActionProtocol], allowedActionIDs: Set<String>,
+        allowedInspectionIDs: Set<String> = [], audit: @escaping Audit
     ) async -> (broker: ACTALocalActionBroker, operatorKey: ACTABrokerOperator)? {
         let ids = actions.map(\.id)
-        guard !allowedActionIDs.isEmpty, Set(ids).count == ids.count,
+        guard (!allowedActionIDs.isEmpty || !allowedInspectionIDs.isEmpty), Set(ids).count == ids.count,
               allowedActionIDs.isSubset(of: Set(ids)) else { return nil }
         let (registry, authority) = ACTAActionRegistry.makeAuthorized(forceMutationConfirmation: true)
         for action in actions {
@@ -96,19 +136,27 @@ public actor ACTALocalActionBroker {
         }
         let operatorKey = ACTABrokerOperator()
         return (ACTALocalActionBroker(registry: registry, authority: authority, operatorKey: operatorKey,
-                                      allowedActionIDs: allowedActionIDs, audit: audit), operatorKey)
+                                      allowedActionIDs: allowedActionIDs, allowedInspectionIDs: allowedInspectionIDs,
+                                      audit: audit), operatorKey)
     }
 
     public func openSession(
-        operatorKey: ACTABrokerOperator, input: ACTABrokerLocalInput, threadID: String, actionIDs: Set<String>
+        operatorKey: ACTABrokerOperator, input: ACTABrokerLocalInput, threadID: String, actionIDs: Set<String>,
+        inspectionIDs: Set<String> = []
     ) async -> ACTABrokerSession? {
-        guard self.operatorKey === operatorKey, !threadID.isEmpty, !actionIDs.isEmpty,
-              actionIDs.isSubset(of: allowedActionIDs) else { return nil }
-        guard let requester = await registry.issuePrincipal(authority: authority, actionIDs: actionIDs,
-                                                            canRequest: true, canReview: false),
-              let reviewer = await registry.issuePrincipal(authority: authority, actionIDs: actionIDs,
-                                                           canRequest: false, canReview: true) else { return nil }
-        let session = ACTABrokerSession()
+        guard self.operatorKey === operatorKey, !threadID.isEmpty, (!actionIDs.isEmpty || !inspectionIDs.isEmpty),
+              actionIDs.isSubset(of: allowedActionIDs), inspectionIDs.isSubset(of: allowedInspectionIDs) else { return nil }
+        var requester: ACTALocalPrincipal?
+        var reviewer: ACTALocalPrincipal?
+        if !actionIDs.isEmpty {
+            guard let issuedRequester = await registry.issuePrincipal(authority: authority, actionIDs: actionIDs,
+                                                                       canRequest: true, canReview: false),
+                  let issuedReviewer = await registry.issuePrincipal(authority: authority, actionIDs: actionIDs,
+                                                                      canRequest: false, canReview: true) else { return nil }
+            requester = issuedRequester
+            reviewer = issuedReviewer
+        }
+        let session = ACTABrokerSession(owner: operatorKey, threadID: threadID, inspectionIDs: inspectionIDs)
         sessions[ObjectIdentifier(session)] = SessionState(session: session, requester: requester,
                                                            reviewer: reviewer, threadID: threadID, input: input,
                                                            actionIDs: actionIDs)
@@ -116,26 +164,56 @@ public actor ACTALocalActionBroker {
     }
 
     public func closeSession(_ session: ACTABrokerSession, operatorKey: ACTABrokerOperator) async {
-        guard self.operatorKey === operatorKey,
+        guard self.operatorKey === operatorKey else { return }
+        session.invalidate(operatorKey: operatorKey)
+        guard
               let state = sessions.removeValue(forKey: ObjectIdentifier(session)), state.session === session else { return }
         pending = pending.filter { $0.value.session !== session }
-        await registry.revoke(state.requester, authority: authority)
-        await registry.revoke(state.reviewer, authority: authority)
+        if let requester = state.requester { await registry.revoke(requester, authority: authority) }
+        if let reviewer = state.reviewer { await registry.revoke(reviewer, authority: authority) }
+    }
+
+    public func beginInspection(
+        session: ACTABrokerSession, inspectionID: String, threadID: String
+    ) -> InspectionAuthorization {
+        guard sessionState(session) != nil, session.permitsInspection(inspectionID, threadID: threadID) else {
+            return .unauthorized
+        }
+        do {
+            try audit(ACTABrokerAuditEvent(phase: .request, actionID: "inspection." + inspectionID,
+                                            threadID: threadID, approved: nil, outcome: nil))
+        } catch { return .auditFailed }
+        return session.permitsInspection(inspectionID, threadID: threadID) ? .authorized : .unauthorized
+    }
+
+    public func endInspection(
+        session: ACTABrokerSession, inspectionID: String, threadID: String, succeeded: Bool
+    ) -> InspectionAuthorization {
+        guard sessionState(session) != nil, session.permitsInspection(inspectionID, threadID: threadID) else {
+            return .unauthorized
+        }
+        do {
+            try audit(ACTABrokerAuditEvent(phase: .result, actionID: "inspection." + inspectionID,
+                                            threadID: threadID, approved: nil,
+                                            outcome: succeeded ? "success" : "failed"))
+        } catch { return .auditFailed }
+        return session.permitsInspection(inspectionID, threadID: threadID) ? .authorized : .unauthorized
     }
 
     public func catalogue(session: ACTABrokerSession) async -> [ACTAActionDescriptor] {
-        guard let state = sessionState(session) else { return [] }
-        let result = await registry.authorizedCatalog(principal: state.requester)
+        guard let state = sessionState(session), let requester = state.requester else { return [] }
+        let result = await registry.authorizedCatalog(principal: requester)
         return sessionState(session) == nil ? [] : result
     }
 
     /// Only the trusted host supplies the session. Model arguments contain no capability.
     /// Mutation results returned here never expose review tokens, titles, or parameters.
     public func request(
-        session: ACTABrokerSession, actionID: String, argumentsJSON: String
+        session: ACTABrokerSession, actionID: String, argumentsJSON: String,
+        expectedThreadID: String? = nil
     ) async -> ACTAActionResult {
         cleanupExpiredReviews()
-        guard let state = sessionState(session) else {
+        guard let state = sessionState(session), expectedThreadID == nil || state.threadID == expectedThreadID else {
             do {
                 try audit(ACTABrokerAuditEvent(phase: .request, actionID: "[unrecognized]",
                                                 threadID: "", approved: nil, outcome: nil))
@@ -148,7 +226,7 @@ public actor ACTALocalActionBroker {
             try audit(ACTABrokerAuditEvent(phase: .request, actionID: auditedActionID, threadID: state.threadID,
                                             approved: nil, outcome: nil))
         } catch { return auditFailed(actionID) }
-        guard state.actionIDs.contains(actionID) else {
+        guard state.actionIDs.contains(actionID), let requester = state.requester else {
             return recordResult(denied(auditedActionID), threadID: state.threadID)
         }
         let arguments = ValidatedArguments()
@@ -158,7 +236,7 @@ public actor ACTALocalActionBroker {
             result = try await registry.executeJSON(actionID: actionID, argumentsJSON: argumentsJSON,
                 context: ACTAActionContext(threadID: state.threadID,
                                            initiator: state.input == .chat ? "text_chat" : "voice_asr"),
-                principal: state.requester, beforeExecution: { parameters in
+                principal: requester, beforeExecution: { parameters in
                     guard try JSONEncoder().encode(parameters).count <= ACTAActionRegistry.maxPreparedReviewSummaryUTF8Bytes else {
                         throw BrokerError.reviewTooLarge
                     }
@@ -217,7 +295,7 @@ public actor ACTALocalActionBroker {
         reviewed: ACTABrokerReview, approved: Bool
     ) async -> ACTAActionResult {
         cleanupExpiredReviews()
-        guard self.operatorKey === operatorKey, let state = sessionState(session),
+        guard self.operatorKey === operatorKey, let state = sessionState(session), let reviewer = state.reviewer,
               let item = pending[ObjectIdentifier(reviewed.handle)], item.session === session,
               item.review.handle === reviewed.handle,
               Self.sameReview(item.review, reviewed) else {
@@ -232,7 +310,12 @@ public actor ACTALocalActionBroker {
             let result = try await registry.confirmAndExecute(token: item.token, confirmed: approved,
                 expectedActionID: item.review.actionID, expectedParameters: item.review.parameters,
                 expectedThreadID: item.review.threadID, expectedReviewTitle: item.review.title,
-                principal: state.reviewer)
+                principal: reviewer)
+            guard sessionState(session) != nil else {
+                _ = recordResult(result, threadID: state.threadID)
+                return .failed(actionID: reviewed.actionID,
+                               error: "UNAUTHORIZED: Session closed; the action may have executed.")
+            }
             return recordResult(result, threadID: state.threadID)
         } catch is CancellationError {
             return recordResult(.failed(actionID: reviewed.actionID, error: "ACTION_CANCELLED: Review did not complete."),
@@ -244,7 +327,8 @@ public actor ACTALocalActionBroker {
     }
 
     private func sessionState(_ session: ACTABrokerSession) -> SessionState? {
-        guard let state = sessions[ObjectIdentifier(session)], state.session === session else { return nil }
+        guard let state = sessions[ObjectIdentifier(session)], state.session === session,
+              session.isActive(threadID: state.threadID) else { return nil }
         return state
     }
 

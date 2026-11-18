@@ -979,6 +979,7 @@ final class WallModel: ObservableObject {
         missionConsultTask = nil
         actaAgentTask?.cancel()
         actaAgentWatchdog?.cancel()
+        closeACTAReviewSession()
         actaAgentGeneration = UUID()
         actaAgentBusy = false
         actaAgentTask = nil
@@ -3891,6 +3892,7 @@ final class WallModel: ObservableObject {
         actaReviewSession = nil
         actaBrokerReviews = []
         if let current {
+            current.session.invalidate(operatorKey: current.key)
             Task { await current.broker.closeSession(current.session, operatorKey: current.key) }
         }
     }
@@ -3918,7 +3920,8 @@ final class WallModel: ObservableObject {
     }
 
     @discardableResult
-    func askACTAAgent(question: String, focusedIdentityID: String? = nil) -> Bool {
+    func askACTAAgent(question: String, focusedIdentityID: String? = nil,
+                      input: ACTABrokerLocalInput = .chat) -> Bool {
         let text = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return false }
         guard text.count <= 2000 else {
@@ -3967,9 +3970,24 @@ final class WallModel: ObservableObject {
                     self.actaAgentWatchdog?.cancel(); self.actaAgentWatchdog = nil
                 }
             }
-            let action = ACTACanvasSetPresentationAction(bridge: self.canvasFilterBridge)
-            let host = await ACTALocalActionBroker.make(actions: [action],
-                allowedActionIDs: [action.id], audit: { event in
+            let presentationAction = ACTACanvasSetPresentationAction(bridge: self.canvasFilterBridge)
+            let filterAction = ACTACanvasSetFilterAction(bridge: self.canvasFilterBridge,
+                locationGroups: { [weak self] in
+                    self.map { model in
+                        Set(model.config.cameras.filter(\.enabled).map {
+                            ACTACanvasFilterState.locationGroup($0.location)
+                        })
+                    }
+                })
+            let arrangeAction = ACTACanvasSetArrangeModeAction(bridge: self.canvasFilterBridge)
+            let selectionAction = ACTACanvasSelectCamerasAction(bridge: self.canvasFilterBridge,
+                enabledCameraIDs: { [weak self] in self.map { $0.config.cameras.filter(\.enabled).map(\.id) } })
+            let analysisAction = ACTAAnalysisSetSectionAction(bridge: self.canvasFilterBridge)
+            let cameraListAction = ACTAScopedCameraListAction(model: self)
+            let actionIDs: Set<String> = [presentationAction.id, filterAction.id, arrangeAction.id, selectionAction.id, analysisAction.id, cameraListAction.id]
+            let host = await ACTALocalActionBroker.make(actions: [presentationAction, filterAction, arrangeAction, selectionAction, analysisAction, cameraListAction],
+                allowedActionIDs: actionIDs, allowedInspectionIDs: ACTAAnalyticsCoordinator.localInspectionIDs,
+                audit: { event in
                     let phase: String
                     switch event.phase {
                     case .request: phase = "request"
@@ -3977,7 +3995,7 @@ final class WallModel: ObservableObject {
                     case .review: phase = event.approved == true ? "approved" : "rejected"
                     case .result: phase = event.outcome ?? "failed"
                     }
-                    try store.recordACTAToolCallAudit(ACTAToolCallAuditRecord(
+                    try store.recordDurableACTAToolCallAudit(ACTAToolCallAuditRecord(
                         threadID: event.threadID, toolName: event.actionID, argsJSON: "{}",
                         resultRows: phase == "success" ? 1 : 0, durationMs: 0,
                         ok: phase == "success", error: "BROKER_\(phase)"))
@@ -3985,7 +4003,8 @@ final class WallModel: ObservableObject {
             guard !Task.isCancelled, self.activeACTAThreadID == threadID,
                   self.actaAgentGeneration == generation, let host,
                   let session = await host.broker.openSession(operatorKey: host.operatorKey,
-                    input: .chat, threadID: threadID, actionIDs: [action.id]) else { return }
+                    input: input, threadID: threadID, actionIDs: actionIDs,
+                    inspectionIDs: ACTAAnalyticsCoordinator.localInspectionIDs) else { return }
             guard !Task.isCancelled, self.activeACTAThreadID == threadID,
                   self.actaAgentGeneration == generation else {
                 await host.broker.closeSession(session, operatorKey: host.operatorKey)

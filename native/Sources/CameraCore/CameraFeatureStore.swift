@@ -1,5 +1,94 @@
 import Foundation
+import CryptoKit
 import SQLite3
+
+struct IdentityStoreSnapshot: Equatable, Sendable {
+    let digest: Data
+}
+
+enum IdentitySnapshotHasher {
+    static func snapshot(database: OpaquePointer, queries: [String]) throws -> IdentityStoreSnapshot {
+        var hash = SHA256()
+        hash.update(data: Data("ACTA identity snapshot v1".utf8))
+
+        func number(_ value: UInt64) {
+            var value = value.bigEndian
+            withUnsafeBytes(of: &value) { hash.update(bufferPointer: $0) }
+        }
+        func byte(_ value: UInt8) {
+            var value = value
+            withUnsafeBytes(of: &value) { hash.update(bufferPointer: $0) }
+        }
+        func error() -> CameraFeatureStoreError {
+            .database(String(cString: sqlite3_errmsg(database)))
+        }
+
+        number(UInt64(queries.count))
+        for query in queries {
+            byte(0x54)
+            let queryBytes = Data(query.utf8)
+            number(UInt64(queryBytes.count))
+            hash.update(data: queryBytes)
+            var prepared: OpaquePointer?
+            guard sqlite3_prepare_v2(database, query, -1, &prepared, nil) == SQLITE_OK,
+                  let statement = prepared else {
+                let failure = error()
+                if let prepared { sqlite3_finalize(prepared) }
+                throw failure
+            }
+            var finalized = false
+            defer { if !finalized { sqlite3_finalize(statement) } }
+            let columnCount = sqlite3_column_count(statement)
+            number(UInt64(columnCount))
+            while true {
+                let step = sqlite3_step(statement)
+                if step == SQLITE_DONE { break }
+                guard step == SQLITE_ROW else { throw error() }
+                byte(0x52)
+                for column in 0..<columnCount {
+                    let type = sqlite3_column_type(statement, column)
+                    switch type {
+                    case SQLITE_NULL:
+                        byte(0)
+                        number(0)
+                    case SQLITE_INTEGER:
+                        byte(1)
+                        number(8)
+                        number(UInt64(bitPattern: sqlite3_column_int64(statement, column)))
+                    case SQLITE_FLOAT:
+                        byte(2)
+                        number(8)
+                        number(sqlite3_column_double(statement, column).bitPattern)
+                    case SQLITE_TEXT, SQLITE_BLOB:
+                        byte(type == SQLITE_TEXT ? 3 : 4)
+                        let pointer: UnsafeRawPointer?
+                        if type == SQLITE_TEXT {
+                            pointer = sqlite3_column_text(statement, column).map(UnsafeRawPointer.init)
+                        } else {
+                            pointer = sqlite3_column_blob(statement, column)
+                        }
+                        guard sqlite3_errcode(database) != SQLITE_NOMEM else { throw error() }
+                        let count = Int(sqlite3_column_bytes(statement, column))
+                        guard sqlite3_errcode(database) != SQLITE_NOMEM,
+                              type != SQLITE_TEXT || pointer != nil,
+                              count == 0 || pointer != nil else { throw error() }
+                        number(UInt64(count))
+                        if let pointer, count > 0 {
+                            hash.update(bufferPointer: UnsafeRawBufferPointer(start: pointer, count: count))
+                        }
+                    default:
+                        throw error()
+                    }
+                }
+            }
+            byte(0x45)
+            let status = sqlite3_finalize(statement)
+            finalized = true
+            guard status == SQLITE_OK else { throw error() }
+        }
+        return IdentityStoreSnapshot(digest: Data(hash.finalize()))
+    }
+}
 
 public enum CameraFeatureJobStatus: String, Codable, CaseIterable, Sendable {
     case queued
@@ -934,6 +1023,7 @@ public final class CameraFeatureStore: @unchecked Sendable {
         preferences: CameraFeaturePreferences,
         expectedProposal: CrossCameraIdentityProposal? = nil,
         expectedGraph: [String]? = nil,
+        expectedStore: IdentityStoreSnapshot? = nil,
         at time: Date = Date()
     ) throws -> CrossCameraIdentityProposal {
         try requireEnabled(.crossCameraIdentity, preferences: preferences)
@@ -947,6 +1037,9 @@ public final class CameraFeatureStore: @unchecked Sendable {
                     throw CameraFeatureStoreError.identityReviewStale
                 }
                 if let expectedGraph, try identityReviewGraph() != expectedGraph {
+                    throw CameraFeatureStoreError.identityReviewStale
+                }
+                if let expectedStore, try identityStoreSnapshot() != expectedStore {
                     throw CameraFeatureStoreError.identityReviewStale
                 }
                 var identityID: UUID?
@@ -987,6 +1080,7 @@ public final class CameraFeatureStore: @unchecked Sendable {
         preferences: CameraFeaturePreferences,
         expectedProposal: CrossCameraIdentityProposal? = nil,
         expectedGraph: [String]? = nil,
+        expectedStore: IdentityStoreSnapshot? = nil,
         at time: Date = Date()
     ) throws {
         try requireEnabled(.crossCameraIdentity, preferences: preferences)
@@ -997,6 +1091,9 @@ public final class CameraFeatureStore: @unchecked Sendable {
                     throw CameraFeatureStoreError.identityReviewStale
                 }
                 if let expectedGraph, try identityReviewGraph() != expectedGraph {
+                    throw CameraFeatureStoreError.identityReviewStale
+                }
+                if let expectedStore, try identityStoreSnapshot() != expectedStore {
                     throw CameraFeatureStoreError.identityReviewStale
                 }
                 guard proposal.status == .accepted else {
@@ -1282,12 +1379,40 @@ public final class CameraFeatureStore: @unchecked Sendable {
         }
     }
 
-    func identityReviewSnapshot() throws -> (proposals: [CrossCameraIdentityProposal], accepted: [CrossCameraIdentityProposal], assignments: [UUID: UUID], graph: [String]) {
+    func identityReviewSnapshot() throws -> (proposals: [CrossCameraIdentityProposal], accepted: [CrossCameraIdentityProposal], assignments: [UUID: UUID], graph: [String], graphTrackIDs: Set<UUID>, store: IdentityStoreSnapshot) {
         try locked {
             try transaction {
                 (try identityProposals(), try identityProposals(status: .accepted),
-                 try crossCameraIdentityAssignments(), try identityReviewGraph())
+                 try crossCameraIdentityAssignments(), try identityReviewGraph(), try identityGraphTrackIDs(),
+                 try identityStoreSnapshot())
             }
+        }
+    }
+
+    // Hash every identity row, including timestamps and audit, without bounded UI queries.
+    private func identityStoreSnapshot() throws -> IdentityStoreSnapshot {
+        let queries = [
+            "SELECT identity_id, category, created_at FROM cross_camera_identities ORDER BY identity_id",
+            "SELECT track_id, identity_id, linked_at FROM cross_camera_identity_links ORDER BY track_id",
+            "SELECT id, track_a, track_b, category, cosine_distance, status, created_at, reviewed_at, identity_id FROM cross_camera_identity_proposals ORDER BY id",
+            "SELECT track_a, track_b, created_at FROM cross_camera_identity_cannot_links ORDER BY track_a, track_b",
+            "SELECT proposal_id, undone_at FROM cross_camera_identity_undos ORDER BY proposal_id",
+            "SELECT id, proposal_id, action, track_a, track_b, identity_id, occurred_at FROM cross_camera_identity_audit ORDER BY id"
+        ]
+        return try IdentitySnapshotHasher.snapshot(database: database, queries: queries)
+    }
+
+    private func identityGraphTrackIDs() throws -> Set<UUID> {
+        let statement = try prepare("SELECT track_a, track_b FROM cross_camera_identity_proposals WHERE status='accepted'")
+        defer { sqlite3_finalize(statement) }
+        var result = Set<UUID>()
+        while true {
+            let step = sqlite3_step(statement)
+            if step == SQLITE_DONE { return result }
+            guard step == SQLITE_ROW, let a = UUID(uuidString: text(statement, 0)),
+                  let b = UUID(uuidString: text(statement, 1)) else { throw databaseError() }
+            result.insert(a)
+            result.insert(b)
         }
     }
 
@@ -1297,7 +1422,8 @@ public final class CameraFeatureStore: @unchecked Sendable {
             UNION ALL
             SELECT 'cannot', track_a, track_b FROM cross_camera_identity_cannot_links
             UNION ALL
-            SELECT 'accepted', p.id, COALESCE(u.proposal_id, '')
+            SELECT 'accepted', p.id,
+                   p.track_a || ':' || p.track_b || ':' || p.category || ':' || COALESCE(u.proposal_id, '')
               FROM cross_camera_identity_proposals p
               LEFT JOIN cross_camera_identity_undos u ON u.proposal_id = p.id
              WHERE p.status = 'accepted'

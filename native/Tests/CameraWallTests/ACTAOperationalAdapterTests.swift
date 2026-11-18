@@ -498,17 +498,17 @@ final class ACTAOperationalAdapterTests: XCTestCase {
         model.reviewACTAChatAction(proposal, confirmed: true)
         XCTAssertEqual(try store.loadACTAChatAction(actionID: proposal.actionID), proposal)
         XCTAssertFalse(model.featurePreferences.allowVoiceInput)
-        XCTAssertTrue(model.notice.contains("Recreate the action request"))
+        XCTAssertTrue(model.notice.contains("cannot be reviewed safely"))
 
-        // The separate, pre-existing identity coordinator flow remains unchanged.
+        // Historical identity proposals also lack live review authority.
         _ = try store.rebuildACTAIdentityDossier(identityID: "fixture-identity", displayName: "Before")
         let identity = ACTAChatActionRecord(actionID: "legacy-identity", threadID: "default",
             actionType: "rename_identity", title: "Rename",
             parameters: ["identity_id": "fixture-identity", "new_name": "After"])
         try store.saveACTAChatAction(identity)
         model.reviewACTAChatAction(identity, confirmed: true)
-        XCTAssertEqual(try store.loadACTAChatAction(actionID: identity.actionID)?.status, "confirmed")
-        XCTAssertEqual(try store.getACTAIdentityDossier(identityID: "fixture-identity")?.displayName, "After")
+        XCTAssertEqual(try store.loadACTAChatAction(actionID: identity.actionID)?.status, "proposed")
+        XCTAssertEqual(try store.getACTAIdentityDossier(identityID: "fixture-identity")?.displayName, "Before")
     }
 
     func testTokenReviewClaimsProposalAndExecutesOnce() async throws {
@@ -533,25 +533,24 @@ final class ACTAOperationalAdapterTests: XCTestCase {
         try store.saveACTAChatAction(changedTitle)
         await model.reviewACTATokenAction(changedTitle, confirmed: true)
         XCTAssertEqual(try store.loadACTAChatAction(actionID: token)?.status, "proposed")
-        XCTAssertTrue(model.notice.contains("no longer matches"))
+        XCTAssertTrue(model.notice.contains("cannot be reviewed safely"))
         try store.saveACTAChatAction(displayed)
 
         var changed = displayed
         changed.parameters["enabled"] = "false"
         await model.reviewACTATokenAction(changed, confirmed: true)
         XCTAssertEqual(try store.loadACTAChatAction(actionID: token)?.status, "proposed")
-        XCTAssertTrue(model.notice.contains("no longer matches"))
+        XCTAssertTrue(model.notice.contains("cannot be reviewed safely"))
         try store.saveACTAChatAction(changed)
         await model.reviewACTATokenAction(displayed, confirmed: true)
         XCTAssertEqual(try store.loadACTAChatAction(actionID: token)?.status, "proposed")
-        XCTAssertTrue(model.notice.contains("proposal changed"))
+        XCTAssertTrue(model.notice.contains("cannot be reviewed safely"))
         try store.saveACTAChatAction(displayed)
         await model.reviewACTATokenAction(displayed, confirmed: true)
         await model.reviewACTATokenAction(displayed, confirmed: true)
         let calls = await recorder.calls
-        XCTAssertEqual(calls, ["true:confirmed"])
-        XCTAssertEqual(try store.loadACTAChatAction(actionID: token)?.status, "confirmed")
-        XCTAssertEqual(model.actaAgentStatus, "Fixture applied")
+        XCTAssertTrue(calls.isEmpty)
+        XCTAssertEqual(try store.loadACTAChatAction(actionID: token)?.status, "proposed")
     }
 }
 

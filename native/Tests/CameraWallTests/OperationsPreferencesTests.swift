@@ -170,6 +170,20 @@ final class OperationsPreferencesTests: XCTestCase {
         XCTAssertTrue(report.contains("default-src 'none'"))
     }
 
+    func testReportDisclosesTruncationAndKeepsQueueOrder() {
+        let alerts = (0..<101).map { index in
+            VLMAlert(createdAt: Date(timeIntervalSince1970: Double(index)), cameraID: UUID(),
+                     cameraName: "Camera \(index)", condition: "Condition", evidence: "Evidence")
+        }
+        let report = OperationsAlertReport.renderHTML(alerts: alerts, reviews: [:], acknowledgements: [:])
+        XCTAssertTrue(report.contains("Showing 100 of 101 stored alerts."))
+        XCTAssertTrue(report.contains("Camera 100"))
+        XCTAssertFalse(report.contains("<td>Camera 0</td>"))
+
+        let complete = OperationsAlertReport.renderHTML(alerts: Array(alerts.prefix(100)), reviews: [:], acknowledgements: [:])
+        XCTAssertFalse(complete.contains("Showing 100 of"))
+    }
+
     func testCrowdAlertsDefaultOffAndPreferencesRoundTripWithPrivatePermissions() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

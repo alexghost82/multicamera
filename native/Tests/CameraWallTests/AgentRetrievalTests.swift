@@ -19,18 +19,19 @@ final class AgentRetrievalTests: XCTestCase {
                                                     observedAt: Date(), answer: query))
         try store.saveAutomaticScan(CameraScanRecord(cameraID: cameraID, cameraName: "Entrance",
                                                     observedAt: Date(), answer: "unrelated"))
+        let (broker, session) = try await makeInspectionTestSession(store: store, threadID: "default",
+                                                                    scopes: ["search_tracked_objects"])
         let result = await coordinator.executeAgentTool(toolName: "search_tracked_objects",
-                                                         arguments: ["query": query, "limit": "3"])
+            arguments: ["query": query, "limit": "3"], broker: broker, brokerSession: session)
         XCTAssertEqual(result.resultRows, 1)
         XCTAssertTrue(result.outputJSON.contains(query))
         XCTAssertFalse(result.outputJSON.contains("unrelated"))
         let rows = try store.executeReadOnlyACTASQL(
-            "SELECT args_json FROM ghost_chat_tool_calls WHERE tool_name = 'search_tracked_objects'"
+            "SELECT args_json FROM ghost_chat_tool_calls WHERE tool_name = 'inspection.search_tracked_objects'"
         )
         let json = try XCTUnwrap(rows.first?["args_json"])
         let arguments = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: String])
-        XCTAssertEqual(arguments["query"], "[redacted]")
-        XCTAssertEqual(arguments["limit"], "3")
+        XCTAssertTrue(arguments.isEmpty)
         XCTAssertFalse(json.contains(query))
     }
 
@@ -62,7 +63,10 @@ final class AgentRetrievalTests: XCTestCase {
                 return String(decoding: try JSONEncoder().encode(reply), as: UTF8.self)
             })
             let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store, memoryFrameStore: archive)
-            let answer = await coordinator.askACTAChatAgent(question: "Что было у входа?", threadID: validCitation ? "valid" : "invalid", now: now)
+            let thread = validCitation ? "valid" : "invalid"
+            let (broker, session) = try await makeInspectionTestSession(store: store, threadID: thread)
+            let answer = await coordinator.askACTAChatAgent(question: "Что было у входа?", threadID: thread,
+                                                            now: now, broker: broker, brokerSession: session)
             if validCitation {
                 XCTAssertEqual(answer.evidenceReferences.first?.recordID, frame.id.uuidString)
                 XCTAssertEqual(answer.evidenceReferences.first?.cameraID, frame.cameraID.uuidString)

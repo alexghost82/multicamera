@@ -287,6 +287,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
     private let lock = NSRecursiveLock()
 #if DEBUG
     var narrativeJPEGWriteTestHook: ((FileHandle, URL, Data) throws -> Void)?
+    var durableAuditRestoreTestHook: (() throws -> Void)?
 #endif
 
     public static var defaultURL: URL {
@@ -1533,6 +1534,18 @@ public final class LocalTrackingStore: @unchecked Sendable {
             """)
         try ensureTableColumn(table: "ghost_chat_messages", column: "clip_id", declaration: "TEXT")
         try ensureTableColumn(table: "ghost_chat_messages", column: "call_id", declaration: "TEXT")
+        try ensureTableColumn(table: "ghost_chat_messages", column: "review_safe_context", declaration: "INTEGER NOT NULL DEFAULT 0")
+        try ensureTableColumn(table: "ghost_chat_messages", column: "safe_offline_chain_id", declaration: "TEXT")
+        try ensureTableColumn(table: "ghost_chat_messages", column: "safe_offline_debt_json", declaration: "TEXT")
+        try execute("""
+            CREATE TRIGGER IF NOT EXISTS ghost_chat_context_invalidate
+            AFTER UPDATE OF content, role, structured_json ON ghost_chat_messages
+            BEGIN
+                UPDATE ghost_chat_messages SET review_safe_context = 0,
+                    safe_offline_chain_id = NULL, safe_offline_debt_json = NULL
+                    WHERE message_id = NEW.message_id;
+            END
+            """)
         try execute("CREATE INDEX IF NOT EXISTS ghost_chat_messages_thread ON ghost_chat_messages(thread_id, created_at ASC)")
 
         try execute("""
@@ -2951,7 +2964,9 @@ public final class LocalTrackingStore: @unchecked Sendable {
     public func appendACTAChatMessage(
         _ message: ACTAChatMessageRecord,
         terminalResponseID: String? = nil,
-        pendingOutputs: [ACTAPendingOutputDebt]? = nil
+        pendingOutputs: [ACTAPendingOutputDebt]? = nil,
+        reviewSafeContext: Bool = false,
+        trustedOfflineChain: Bool = false
     ) throws -> ACTAChatMessageRecord {
         _ = try ensureACTAChatThread(threadID: message.threadID, now: message.createdAt)
         var sanitized = message
@@ -2972,8 +2987,9 @@ public final class LocalTrackingStore: @unchecked Sendable {
         do {
         let stmt = try prepare("""
             INSERT OR REPLACE INTO ghost_chat_messages(
-                message_id, thread_id, role, content, structured_json, created_at, clip_id, call_id
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                message_id, thread_id, role, content, structured_json, created_at, clip_id, call_id, review_safe_context,
+                safe_offline_chain_id, safe_offline_debt_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """)
         defer { sqlite3_finalize(stmt) }
         bind(sanitized.messageID, at: 1, to: stmt)
@@ -2984,6 +3000,24 @@ public final class LocalTrackingStore: @unchecked Sendable {
         sqlite3_bind_double(stmt, 6, sanitized.createdAt.timeIntervalSince1970)
         if let clipID = sanitized.clipID { bind(clipID, at: 7, to: stmt) } else { sqlite3_bind_null(stmt, 7) }
         if let callID = sanitized.callID { bind(callID, at: 8, to: stmt) } else { sqlite3_bind_null(stmt, 8) }
+        let safe = reviewSafeContext && sanitized.role == "assistant"
+            && sanitized.structuredAnswer.map { $0.proposedActions.isEmpty } == true
+        sqlite3_bind_int(stmt, 9, safe ? 1 : 0)
+        let safeDebt = pendingOutputs.map { !$0.isEmpty && $0.allSatisfy {
+            !$0.callID.isEmpty && $0.callID.utf8.count <= 256
+                && $0.callID.utf8.allSatisfy { (0x21...0x7E).contains($0) }
+                && ($0.outputJSON == #"{"status":"presented"}"# || $0.outputJSON == #"{"status":"skipped"}"#)
+        } } == true
+        if safe && trustedOfflineChain && safeDebt,
+           let terminalResponseID, terminalResponseID.hasPrefix("resp_offline_"),
+           terminalResponseID.utf8.count <= 256,
+           terminalResponseID.utf8.allSatisfy({ (0x21...0x7E).contains($0) }), let pendingJSON {
+            bind(terminalResponseID, at: 10, to: stmt)
+            bind(pendingJSON, at: 11, to: stmt)
+        } else {
+            sqlite3_bind_null(stmt, 10)
+            sqlite3_bind_null(stmt, 11)
+        }
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
 
         let upd = try prepare("UPDATE ghost_chat_threads SET updated_at = MAX(updated_at, ?) WHERE thread_id = ?")
@@ -3007,19 +3041,52 @@ public final class LocalTrackingStore: @unchecked Sendable {
         }
     }
 
-    public func loadACTAChatMessages(threadID: String, limit: Int = 200) throws -> [ACTAChatMessageRecord] {
+    /// Opaque legacy server chains have no trustworthy provenance; only locally recorded offline chains qualify.
+    public func loadACTASafeOfflineChain(threadID: String) throws -> (String, [ACTAPendingOutputDebt])? {
+        lock.lock()
+        defer { lock.unlock() }
+        let stmt = try prepare("""
+            SELECT m.safe_offline_chain_id, m.safe_offline_debt_json, t.last_response_id, t.pending_outputs_json
+            FROM ghost_chat_messages m JOIN ghost_chat_threads t ON t.thread_id = m.thread_id
+            WHERE m.thread_id = ? AND m.role = 'assistant' AND m.review_safe_context = 1
+                AND m.safe_offline_chain_id IS NOT NULL
+            ORDER BY m.rowid DESC LIMIT 1
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(threadID, at: 1, to: stmt)
+        let status = sqlite3_step(stmt)
+        if status == SQLITE_DONE { return nil }
+        guard status == SQLITE_ROW else { throw databaseError() }
+        guard sqlite3_column_type(stmt, 1) != SQLITE_NULL, sqlite3_column_type(stmt, 2) != SQLITE_NULL,
+              sqlite3_column_type(stmt, 3) != SQLITE_NULL, text(stmt, 0) == text(stmt, 2) else { return nil }
+        let debt: [ACTAPendingOutputDebt]
+        let current: [ACTAPendingOutputDebt]
+        do {
+            debt = try JSONDecoder().decode([ACTAPendingOutputDebt].self, from: Data(text(stmt, 1).utf8))
+            current = try JSONDecoder().decode([ACTAPendingOutputDebt].self, from: Data(text(stmt, 3).utf8))
+        } catch {
+            throw LocalTrackingStoreError.query("Stored offline chain data is invalid.")
+        }
+        guard debt == current else { return nil }
+        return (text(stmt, 0), debt)
+    }
+
+    public func loadACTAChatMessages(
+        threadID: String, limit: Int = 200, reviewSafeContextOnly: Bool = false
+    ) throws -> [ACTAChatMessageRecord] {
         lock.lock()
         defer { lock.unlock() }
         let stmt = try prepare("""
             SELECT message_id, thread_id, role, content, structured_json, created_at, clip_id, call_id
             FROM ghost_chat_messages
-            WHERE thread_id = ?
+            WHERE thread_id = ? AND (? = 0 OR role = 'user' OR (role = 'assistant' AND review_safe_context = 1))
             ORDER BY created_at ASC
             LIMIT ?
             """)
         defer { sqlite3_finalize(stmt) }
         bind(threadID, at: 1, to: stmt)
-        sqlite3_bind_int(stmt, 2, Int32(max(1, min(1000, limit))))
+        sqlite3_bind_int(stmt, 2, reviewSafeContextOnly ? 1 : 0)
+        sqlite3_bind_int(stmt, 3, Int32(max(1, min(1000, limit))))
         var messages: [ACTAChatMessageRecord] = []
         let decoder = JSONDecoder()
         while sqlite3_step(stmt) == SQLITE_ROW {
@@ -3323,6 +3390,46 @@ public final class LocalTrackingStore: @unchecked Sendable {
         if let err = record.error { bind(err, at: 8, to: stmt) } else { sqlite3_bind_null(stmt, 8) }
         sqlite3_bind_double(stmt, 9, record.createdAt.timeIntervalSince1970)
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
+    }
+
+    /// Commits the audit independently with SQLite's full-sync durability before returning.
+    public func recordDurableACTAToolCallAudit(_ record: ACTAToolCallAuditRecord) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard sqlite3_get_autocommit(database) != 0 else {
+            throw LocalTrackingStoreError.query("A durable audit cannot join an existing transaction.")
+        }
+        let journal = try prepare("PRAGMA journal_mode")
+        let validJournal = sqlite3_step(journal) == SQLITE_ROW
+            && sqlite3_column_text(journal, 0).map { !["off", "memory"].contains(String(cString: $0).lowercased()) } == true
+        sqlite3_finalize(journal)
+        guard validJournal else {
+            throw LocalTrackingStoreError.query("A durable audit requires an on-disk journal.")
+        }
+        let sync = try prepare("PRAGMA synchronous")
+        let previousSync = sqlite3_step(sync) == SQLITE_ROW ? sqlite3_column_int(sync, 0) : -1
+        sqlite3_finalize(sync)
+        guard (0...3).contains(previousSync) else {
+            throw LocalTrackingStoreError.query("Cannot determine the SQLite synchronization mode.")
+        }
+        try execute("PRAGMA synchronous=FULL")
+        var writeError: Error?
+        do {
+            try recordACTAToolCallAudit(record)
+        } catch {
+            writeError = error
+        }
+        do {
+#if DEBUG
+            try durableAuditRestoreTestHook?()
+#endif
+            try execute("PRAGMA synchronous=\(previousSync)")
+        } catch {
+            throw LocalTrackingStoreError.query(writeError == nil
+                ? "The audit was committed, but SQLite synchronization mode restoration failed."
+                : "The audit write and SQLite synchronization mode restoration both failed.")
+        }
+        if let writeError { throw writeError }
     }
 
     public func saveACTAChatAction(_ action: ACTAChatActionRecord) throws {

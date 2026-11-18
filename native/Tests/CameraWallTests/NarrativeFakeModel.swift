@@ -1,6 +1,7 @@
 @testable import CameraCore
 @testable import CameraWall
 import Foundation
+import XCTest
 
 let narrativeFakeTransport: ACTAHTTPTransport = { request in
     let result = ACTATemporalNarrativeResult(chapterTitle: "Test", summary: "Observed",
@@ -12,5 +13,6 @@ let narrativeFakeTransport: ACTAHTTPTransport = { request in
 
 func narrativeFakeClient(store: LocalTrackingStore?) -> ACTAAIClient {
     ACTAAIClient(config: ACTAAIConfiguration(mode: .localVLLM), cacheStore: store,
-                 transport: narrativeFakeTransport)
+                 transport: narrativeFakeTransport,
+                 keyProvider: { _ in XCTFail("Unexpected credential access"); return nil })
 }

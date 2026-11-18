@@ -1,4 +1,13 @@
 "Switch interface language to Russian" = "Переключить язык интерфейса на русский";
+"UNAVAILABLE: No unique active camera view." = "НЕДОСТУПНО: Нет единственного активного представления камер.";
+"UNAVAILABLE: Dictation is starting or recording." = "НЕДОСТУПНО: Диктовка запускается или выполняется запись.";
+"INVALID_ARGUMENT: Provide a camera and boolean favorite." = "НЕВЕРНЫЙ АРГУМЕНТ: Укажите камеру и логическое значение избранного.";
+"UNAVAILABLE: Favorite preference cannot be safely reviewed." = "НЕДОСТУПНО: Настройку избранного невозможно безопасно проверить.";
+"UNAVAILABLE: Camera is missing or ambiguous." = "НЕДОСТУПНО: Камера отсутствует или указана неоднозначно.";
+"UNAVAILABLE: Camera location inventory is unavailable." = "НЕДОСТУПНО: Список расположений камер недоступен.";
+"INVALID_ARGUMENT: Location is not an enabled camera group." = "НЕВЕРНЫЙ АРГУМЕНТ: Расположение не является группой включённых камер.";
+"UNAVAILABLE: No unique active camera view or valid enabled-camera inventory." = "НЕДОСТУПНО: Нет единственного активного представления камер или корректного списка включённых камер.";
+"INVALID_ARGUMENT: Camera IDs must be currently enabled." = "НЕВЕРНЫЙ АРГУМЕНТ: Указанные камеры должны быть включены.";
 "Memory frames changed since confirmation; review them again." = "Набор кадров памяти изменился после подтверждения. Проверьте его снова.";
 "Memory deletion is incomplete. Retry recovery before modifying memory." = "Удаление кадров памяти не завершено. Повторите восстановление перед изменением памяти.";
 "Memory deletion recovery conflicts with the current index; no further frames were removed." = "Восстановление удаления конфликтует с текущим индексом; другие кадры не удалены.";
@@ -1783,6 +1792,9 @@
 "Complete review" = "Полный текст проверки";
 "Exact review uses escaped Unicode; no characters are omitted." = "Точная проверка показывает Unicode в экранированном виде; символы не пропущены.";
 "I reviewed the complete request" = "Я полностью проверил запрос";
+"Historical proposals cannot be reviewed safely. Create a new request." = "Исторические предложения нельзя безопасно проверить. Создайте новый запрос.";
+"This historical proposal cannot be reviewed safely. Create a new request." = "Это историческое предложение нельзя безопасно проверить. Создайте новый запрос.";
+"UNAVAILABLE: No unique active security center." = "НЕДОСТУПНО: Нет единственного активного центра безопасности.";
 "REVIEW_TOO_LARGE: Parameters exceed the review limit." = "REVIEW_TOO_LARGE: Параметры превышают допустимый размер для проверки.";
 "AUDIT_FAILED: Action was not executed." = "AUDIT_FAILED: Действие не выполнено.";
 "REVIEW_UNDISPLAYABLE: Request cannot be safely reviewed." = "REVIEW_UNDISPLAYABLE: Запрос невозможно безопасно проверить.";

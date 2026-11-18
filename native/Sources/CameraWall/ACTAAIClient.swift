@@ -1291,8 +1291,10 @@ public final class ACTAAIClient: @unchecked Sendable {
     public func runAgentStep(
         lane: ACTAAILane = .chat,
         request: ACTAAgentRequest,
-        pinnedBackend: ACTAAgentBackend? = nil
+        pinnedBackend: ACTAAgentBackend? = nil,
+        authorization: (@Sendable () -> Bool)? = nil
     ) async throws -> ACTAAgentTurnResult {
+        guard authorization?() ?? true else { throw ACTARequestAuthorizationError.revoked }
         let (currentConfig, revision) = configurationSnapshot()
         guard currentConfig.mode == .mlxInProcess,
               pinnedBackend == nil || pinnedBackend == .mlx else {
@@ -1300,13 +1302,17 @@ public final class ACTAAIClient: @unchecked Sendable {
         }
         return try await limiter(for: lane).withPermit {
             try Task.checkCancellation()
+            guard authorization?() ?? true else { throw ACTARequestAuthorizationError.revoked }
             guard self.isCurrentConfiguration(revision) else { throw ACTAAgentError.noBackendAvailable }
-            return try await self.agentStepLocal(request: request)
+            let result = try await self.agentStepLocal(request: request, authorization: authorization)
+            guard authorization?() ?? true else { throw ACTARequestAuthorizationError.revoked }
+            return result
         }
     }
 
     private func agentStepLocal(
-        request: ACTAAgentRequest
+        request: ACTAAgentRequest,
+        authorization: (@Sendable () -> Bool)?
     ) async throws -> ACTAAgentTurnResult {
         let forceAnswer: Bool
         if case .function("present_answer") = request.toolChoice { forceAnswer = true } else { forceAnswer = false }
@@ -1337,6 +1343,7 @@ public final class ACTAAIClient: @unchecked Sendable {
         }
         let recentImages = Array(images.suffix(4))
         let raw: String
+        guard authorization?() ?? true else { throw ACTARequestAuthorizationError.revoked }
         if let localAgentInference {
             raw = try await localAgentInference(prompt, recentImages)
         } else {
@@ -1344,6 +1351,7 @@ public final class ACTAAIClient: @unchecked Sendable {
             if recentImages.isEmpty { raw = try await localVLM.analyze(text: prompt, maxTokens: 2048, requestWorkload: .interactive) }
             else { raw = try await localVLM.analyze(images: recentImages, prompt: prompt, maxTokens: 2048, requestWorkload: .interactive) }
         }
+        guard authorization?() ?? true else { throw ACTARequestAuthorizationError.revoked }
         agentTrace?("RESPONSE chars=\(raw.count) backend=mlx")
         let parsed = Self.parseLocalAgentReply(raw)
         return ACTAAgentTurnResult(responseID: nil, text: parsed.text, functionCalls: parsed.calls, backend: .mlx)

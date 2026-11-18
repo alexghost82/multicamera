@@ -12,7 +12,7 @@ enum ACTACameraScope: String, CaseIterable, Identifiable {
     var title: LocalizedStringKey { LocalizedStringKey(rawValue) }
 }
 
-enum ACTACameraPresentation: String, CaseIterable, Identifiable {
+enum ACTACameraPresentation: String, CaseIterable, Identifiable, Sendable {
     case grid
     case list
 
@@ -167,7 +167,16 @@ final class ACTACanvasFilterBridge {
     }
 }
 
-struct ACTACanvasSetFilterAction: ACTAActionProtocol {
+struct ACTACanvasSetFilterAction: ACTAPreparedConfirmationAction {
+    struct ConfirmationSnapshot: Sendable {
+        let lifecycleRevision: UUID
+        let search: String
+        let location: String?
+        let status: String
+        let favorites: Bool
+        let events: Bool
+        let locationGroups: Set<String>?
+    }
     let id = "canvas.set_filter"
     let title = "Set camera canvas filters"
     let description = "Update only supplied filters in the unique attached security center, even if another section is visible. Search matches camera name and location; events means stored VLM alerts or ISAPI events, not live events. Location names must match an enabled camera group; an empty location clears it. Camera-picker selection is unchanged. Verification checks GUI state, not rendering or camera connectivity."
@@ -212,6 +221,73 @@ struct ACTACanvasSetFilterAction: ACTAActionProtocol {
 
     func validate(parameters: [String: String]) throws {
         _ = try parsed(parameters)
+    }
+
+    func prepareConfirmation(parameters: [String: String], context: ACTAActionContext) async throws
+        -> ACTAPreparedConfirmation<ConfirmationSnapshot> {
+        let (_, location, _, _, _) = try parsed(parameters)
+        return try await MainActor.run {
+            try Task.checkCancellation()
+            guard let state = bridge.activeState else {
+                throw ConfigurationError.invalid("UNAVAILABLE: No unique active camera view.")
+            }
+            let groups = locationGroups()
+            if let location, !location.isEmpty {
+                guard let groups else {
+                    throw ConfigurationError.invalid("UNAVAILABLE: Camera location inventory is unavailable.")
+                }
+                guard groups.contains(location) else {
+                    throw ConfigurationError.invalid("INVALID_ARGUMENT: Location is not an enabled camera group.")
+                }
+            }
+            let snapshot = ConfirmationSnapshot(
+                lifecycleRevision: bridge.lifecycleRevision, search: state.searchText,
+                location: state.locationFilter, status: state.cameraScope.rawValue,
+                favorites: state.favoritesOnly, events: state.alertsOnly, locationGroups: groups)
+            let previous: [String: Any] = [
+                "search": snapshot.search, "location": snapshot.location as Any? ?? NSNull(),
+                "status": snapshot.status, "favorites_only": snapshot.favorites,
+                "events_only": snapshot.events
+            ]
+            let encoded = try JSONSerialization.data(withJSONObject: previous, options: [.sortedKeys])
+            return ACTAPreparedConfirmation(snapshot: snapshot,
+                reviewSummary: "Unique active camera view. Previous filters: \(String(decoding: encoded, as: UTF8.self)). Only the supplied parameters will change.")
+        }
+    }
+
+    func executeConfirmed(parameters: [String: String], context: ACTAActionContext,
+                          snapshot: ConfirmationSnapshot) async throws -> ACTAActionResult {
+        let (search, location, status, favorites, events) = try parsed(parameters)
+        return try await MainActor.run {
+            try Task.checkCancellation()
+            let sameLocation: Bool
+            switch (bridge.activeState?.locationFilter, snapshot.location) {
+            case (nil, nil): sameLocation = true
+            case let (left?, right?): sameLocation = left.utf8.elementsEqual(right.utf8)
+            default: sameLocation = false
+            }
+            guard bridge.lifecycleRevision == snapshot.lifecycleRevision, let state = bridge.activeState,
+                  state.searchText.utf8.elementsEqual(snapshot.search.utf8), sameLocation,
+                  state.cameraScope.rawValue == snapshot.status, state.favoritesOnly == snapshot.favorites,
+                  state.alertsOnly == snapshot.events, locationGroups() == snapshot.locationGroups else {
+                return .failed(actionID: id, error: "STALE_REVIEW: Camera filters, inventory or window changed.")
+            }
+            if let location, !location.isEmpty, snapshot.locationGroups?.contains(location) != true {
+                return .failed(actionID: id, error: "STALE_REVIEW: Camera location inventory changed.")
+            }
+            if let search { state.searchText = search }
+            if let location { state.locationFilter = location.isEmpty ? nil : location }
+            if let status { state.cameraScope = status }
+            if let favorites { state.favoritesOnly = favorites }
+            if let events { state.alertsOnly = events }
+            bridge.recordWrite(to: state)
+            guard matches(state, search: search, location: location, status: status, favorites: favorites, events: events) else {
+                return .failed(actionID: id, error: "Camera filter state readback failed.")
+            }
+            return ACTAActionResult(actionID: id, success: true,
+                summary: "Camera view filter state updated; rendering and camera connectivity were not verified.",
+                outputJSON: "{}")
+        }
     }
 
     func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {

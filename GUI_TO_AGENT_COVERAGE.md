@@ -8,7 +8,7 @@ Version: 1.0.0-baseline
 
 ## 1. Executive Summary
 
-Current implementation checkpoint: **59 previously advertised actions plus `reid.calibrate`, `settings.update_reid_calibration`, `settings.run_health_check`, `settings.update_ai_budget`, `settings.update_ai_config`, `camera.set_favorite`, `canvas.set_filter`, `canvas.select_cameras`, `canvas.set_arrange_mode`, `canvas.set_presentation`, `settings.retry_model_loading`, `analysis.set_section`, and network-only `camera.reconnect`**, with row-specific limitations below. The original baseline inventory is not proof of exhaustive UI coverage.
+Current implementation checkpoint: the shared registry contains numerous adapters, but the model-facing broker currently advertises only `camera.list`, `canvas.set_filter`, `canvas.select_cameras`, `canvas.set_arrange_mode`, `canvas.set_presentation`, and `analysis.set_section`; scoped legacy inspections are separate. The model-facing camera list omits stream addresses, paths and device identifiers. Other registry actions are not enabled for model execution. Earlier checkpoints below describe historic registry availability, not current model access. The original baseline inventory is not proof of exhaustive UI coverage.
 
 This working inventory maps currently identified UI/domain operations to agent action contracts. Exhaustive control-by-control parity has not been established.
 
@@ -72,7 +72,7 @@ authorization policy and agent/GUI parity remain unverified.
 
 | Action ID | UI Route / Screen | Service Owner | Typed Arguments | Action Type | Policy | Unit / Parity Test | State |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `camera.list` | `WallView` / `CameraManager` | `WallModel` | `includeDisabled: Bool?` | `Inspect` | Auto | `testDisabledSourceRegistrationAndInspectionDoNotStartCaptureOrWriteCredentials` | `IMPLEMENTED — CONFIGURATION INSPECTION` |
+| `camera.list` | `WallView` / `CameraManager` | `WallModel` | `include_disabled: Bool?` | `Inspect` | Scoped broker | `ACTACameraListBrokerTests` | `PARTIAL — MINIMAL MODEL-FACING INVENTORY; CONNECTION NOT VERIFIED` |
 | `camera.get` | `CameraEditor` | `WallModel` | `cameraID: String` | `Inspect` | Auto | `testDisabledSourceRegistrationAndInspectionDoNotStartCaptureOrWriteCredentials` | `IMPLEMENTED — CONFIGURATION; NOT HARDWARE INVENTORY` |
 | `camera.add_network` | `CameraEditor` sheet | `WallModel` | `name, url, mainstream?; no credentials/query/fragment; always disabled` | `ServiceAffecting` | Auto | `testDisabledSourceRegistrationAndInspectionDoNotStartCaptureOrWriteCredentials` | `PARTIAL — ANONYMOUS/DISABLED; DISCOVERY UNVERIFIED` |
 | `camera.add_local` | `LocalCameraEditor` sheet | `WallModel` | `device_id, name; always disabled` | `ServiceAffecting` | Auto | `testDisabledSourceRegistrationAndInspectionDoNotStartCaptureOrWriteCredentials` | `PARTIAL — DISABLED CONFIG; CAPTURE UNVERIFIED` |
@@ -88,10 +88,10 @@ authorization policy and agent/GUI parity remain unverified.
 | `camera.toggle_expand` | Video canvas double-click | `WallModel` | `cameraID: String` | `Reversible` | Auto | `testCanvasActionsShareGUIStateAndVerifySavedLayout` | `IMPLEMENTED — UI STATE; STREAM UNVERIFIED` |
 | `canvas.set_columns` | SystemSettings / Canvas | `WallModel` | `columns: Int (1...16)` | `Reversible` | Auto | `testCanvasSetColumns` | `IMPLEMENTED — SERVICE TEST` |
 | `canvas.reset_layout` | Window menu / Toolbar | `WallModel` | `none` | `Reversible` | Auto | `testCanvasActionsShareGUIStateAndVerifySavedLayout` | `IMPLEMENTED — DISK/FAILURE TEST` |
-| `canvas.set_filter` | Camera view | `ACTACanvasFilterState` | `search?, location?, status: all/live/offline?, favorites_only?, events_only?` | `Reversible` | Auto | `ACTACanvasFilterActionTests` | `PARTIAL — UNIQUE ATTACHED VIEW STATE; LIVE RENDER UNVERIFIED` |
-| `canvas.select_cameras` | Camera picker | `ACTACanvasFilterState` | `mode: all/none/subset, camera_ids: CSV UUIDs for subset` | `Reversible` | Auto | `ACTACanvasSelectCamerasActionTests` | `PARTIAL — ENABLED CAMERA SNAPSHOT; LIVE RENDER AND CONNECTIVITY UNVERIFIED` |
-| `canvas.set_arrange_mode` | Camera view menu | `ACTACanvasFilterState` | `enabled: Bool` | `Reversible` | Auto | `ACTACanvasArrangeActionTests` | `PARTIAL — WINDOW-LOCAL TOGGLE; RENDER AND TILE GEOMETRY UNVERIFIED` |
-| `canvas.set_presentation` | Camera view grid/list picker | `ACTACanvasFilterState` | `mode: grid/list` | `Reversible` | Auto | `ACTACanvasPresentationActionTests` | `PARTIAL — WINDOW-LOCAL STATE; RENDER UNVERIFIED` |
+| `canvas.set_filter` | Camera view | `ACTACanvasFilterState` | `search?, location?, status: all/live/offline?, favorites_only?, events_only?` | `Reversible` | Broker review | `ACTACanvasFilterActionTests`, `ACTABrokerReviewViewTests` | `PARTIAL — UNIQUE ATTACHED VIEW STATE; LIVE RENDER UNVERIFIED` |
+| `canvas.select_cameras` | Camera picker | `ACTACanvasFilterState` | `mode: all/none/subset, camera_ids: CSV UUIDs for subset` | `Reversible` | Broker review | `ACTACanvasSelectCamerasActionTests`, `ACTABrokerReviewViewTests` | `PARTIAL — ENABLED CAMERA SNAPSHOT; LIVE RENDER AND CONNECTIVITY UNVERIFIED` |
+| `canvas.set_arrange_mode` | Camera view menu | `ACTACanvasFilterState` | `enabled: Bool` | `Reversible` | Broker review | `ACTACanvasArrangeActionTests`, `ACTABrokerReviewViewTests` | `PARTIAL — WINDOW-LOCAL TOGGLE; RENDER AND TILE GEOMETRY UNVERIFIED` |
+| `canvas.set_presentation` | Camera view grid/list picker | `ACTACanvasFilterState` | `mode: grid/list` | `Reversible` | Broker review | `ACTACanvasPresentationActionTests`, `ACTABrokerReviewViewTests` | `PARTIAL — WINDOW-LOCAL STATE; RENDER UNVERIFIED` |
 
 ---
 
@@ -196,7 +196,7 @@ authorization policy and agent/GUI parity remain unverified.
 | `monitor.clear_isapi_events`| No current GUI control; unused `WallModel.clearISAPIEvents` | `WallModel` | `none` | `Destructive` | Confirmation required | `ACTAClearISAPIEventsActionTests` (isolated service only) | `GAP — SERVICE NOT INTEGRATED; LIVE BASELINE AND PARTIAL-FAILURE HANDLING REQUIRED` |
 | `monitor.get_operational_events`| Unified Timeline | `ACTAAnalyticsCoordinator` | `cameraID: String?, kind: String?, limit: Int?` | `Inspect` | Auto | `testMonitorGetOperationalEvents` | `EXISTING` |
 | `monitor.live_look` | Unified Chat | `ACTAAnalyticsCoordinator` | `camera: String?` | `Inspect` | Auto | `testMonitorLiveLook` | `EXISTING` |
-| `monitor.export_report_html`| Reports | `WallModel` | GUI chooses report and destination | `ServiceAffecting` | Report/destination/confirmation policy pending | Not implemented | `GAP — TWO SENSITIVE REPORT TYPES USE SEPARATE SAVE PANELS; NO SHARED SAFE DESTINATION CONTRACT` |
+| `monitor.export_report_html`| Reports | `WallModel` | GUI chooses report and destination | `ServiceAffecting` | Report/destination/confirmation policy pending | `CameraMissionTests`, `OperationsPreferencesTests` (renderer only) | `GAP — RENDERERS HARDENED; TWO SAVE PANELS LACK SHARED TRUSTED DESTINATION AND SAFE PUBLICATION CONTRACT` |
 
 ---
 
@@ -234,7 +234,7 @@ authorization policy and agent/GUI parity remain unverified.
 
 | Action ID | UI Route / Screen | Service Owner | Typed Arguments | Action Type | Policy | Unit / Parity Test | State |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `analysis.set_section` | Analysis panel tabs | `ACTACanvasFilterState` | `section: chat/schedule/alerts` | `Reversible` | Auto | `ACTAAnalysisSectionActionTests` | `PARTIAL — UNIQUE WINDOW STATE; DOES NOT OPEN PANEL OR REFRESH SCHEDULE; RENDERING UNVERIFIED` |
+| `analysis.set_section` | Analysis panel tabs | `ACTACanvasFilterState` | `section: chat/schedule/alerts` | `Reversible` | Broker review | `ACTAAnalysisSectionActionTests`, `ACTABrokerReviewViewTests` | `PARTIAL — UNIQUE WINDOW STATE; DOES NOT OPEN PANEL OR REFRESH SCHEDULE; RENDERING UNVERIFIED` |
 | `voice.start_listening` | Mic Button / Push-to-Talk | `LocalVoiceCoordinator` | `locale: String?` | `Reversible` | Auto | `testVoiceStartListening` | `PLANNED` |
 | `voice.stop_listening` | Mic Button Release | `LocalVoiceCoordinator` | `none` | `Reversible` | Auto | `testVoiceStopListening` | `PLANNED` |
 | `voice.cancel_listening` | Keyboard Escape / Reset | `LocalVoiceCoordinator` | `none` | `Reversible` | Auto | `testVoiceCancelListening` | `PLANNED` |

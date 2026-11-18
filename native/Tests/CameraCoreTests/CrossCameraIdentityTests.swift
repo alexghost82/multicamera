@@ -211,7 +211,7 @@ final class CrossCameraIdentityTests: XCTestCase {
         XCTAssertEqual(sqlite3_prepare_v2(database, "PRAGMA user_version", -1, &versionStatement, nil), SQLITE_OK)
         defer { sqlite3_finalize(versionStatement) }
         XCTAssertEqual(sqlite3_step(versionStatement), SQLITE_ROW)
-        XCTAssertEqual(sqlite3_column_int(versionStatement, 0), 6)
+        XCTAssertEqual(sqlite3_column_int(versionStatement, 0), 7)
 
         var tableStatement: OpaquePointer?
         XCTAssertEqual(sqlite3_prepare_v2(

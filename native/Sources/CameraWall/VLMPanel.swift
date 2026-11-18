@@ -17,6 +17,7 @@ struct VLMPanel: View {
     @State private var draft = VLMPreferences()
     @State private var operationsDraft = OperationsPreferences()
     @State private var questionBeforeVoice = ""
+    @State private var questionUsesVoice = false
     @State private var saveError = ""
     @State private var descriptionJobs: [CameraFeatureJob] = []
     @State private var voiceOwner = UUID()
@@ -202,7 +203,10 @@ struct VLMPanel: View {
             if let voiceError = voiceInput.errorMessage { Text(languageSettings.localizedMessage(voiceError)).foregroundStyle(ACTATheme.danger) }
         }
         .onChange(of: voiceInput.transcript) { _, text in
-            if voiceInput.isRecording { model.actaQuestionDraft = [questionBeforeVoice, text].filter { !$0.isEmpty }.joined(separator: " ") }
+            if voiceInput.isRecording {
+                if !text.isEmpty { questionUsesVoice = true }
+                model.actaQuestionDraft = [questionBeforeVoice, text].filter { !$0.isEmpty }.joined(separator: " ")
+            }
         }
         .onDisappear { voiceInput.stop(owner: voiceOwner) }
     }
@@ -210,7 +214,10 @@ struct VLMPanel: View {
     private func submitHistoryQuestion() {
         let trimmed = model.actaQuestionDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        if model.askACTAAgent(question: trimmed) { model.actaQuestionDraft = "" }
+        if model.askACTAAgent(question: trimmed, input: questionUsesVoice ? .voice : .chat) {
+            model.actaQuestionDraft = ""
+            questionUsesVoice = false
+        }
     }
 
     private var scheduleTab: some View {

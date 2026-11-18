@@ -33,9 +33,9 @@ final class ACTALegacyReviewIntegrityTests: XCTestCase {
         XCTAssertEqual(try store.getACTAIdentityDossier(identityID: "synthetic")?.displayName, "Original")
         XCTAssertEqual(try store.loadACTAChatAction(actionID: displayed.actionID)?.status, "proposed")
         try store.saveACTAChatAction(displayed)
-        XCTAssertEqual(coordinator.reviewAndExecuteChatAction(actionID: displayed.actionID, confirmed: true,
-            expectedAction: displayed)?.status, "confirmed")
-        XCTAssertEqual(try store.getACTAIdentityDossier(identityID: "synthetic")?.displayName, "Reviewed")
+        XCTAssertNil(coordinator.reviewAndExecuteChatAction(actionID: displayed.actionID, confirmed: true,
+            expectedAction: displayed))
+        XCTAssertEqual(try store.getACTAIdentityDossier(identityID: "synthetic")?.displayName, "Original")
         XCTAssertNil(coordinator.reviewAndExecuteChatAction(actionID: displayed.actionID, confirmed: true, expectedAction: displayed))
     }
 }

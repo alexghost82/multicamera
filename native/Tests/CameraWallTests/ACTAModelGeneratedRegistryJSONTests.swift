@@ -26,6 +26,32 @@ private struct ModelJSONProtectedAction: ACTAActionProtocol {
 }
 
 final class ACTAModelGeneratedRegistryJSONTests: XCTestCase {
+    func testLiveLookKeepsSyntheticClipForGUI() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".acta-live-clip-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try LocalTrackingStore(url: root.appendingPathComponent("tracking.sqlite"))
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), transport: { _ in
+            XCTFail("Unexpected network request")
+            throw URLError(.notConnectedToInternet)
+        }, keyProvider: { _ in XCTFail("Unexpected Keychain access"); return nil })
+        let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store)
+        let (broker, session) = try await makeInspectionTestSession(store: store, threadID: "test", scopes: ["live_look"])
+        let cameraID = UUID()
+        let image = Data("synthetic image".utf8)
+        let call = ACTAAgentFunctionCall(callID: "live", name: "live_look", argumentsJSON: "{}")
+        let result = await coordinator.executeModelGeneratedAgentTool(call, threadID: "test",
+            requestToolNames: ["live_look"],
+            liveFrames: [ACTALiveCameraFrame(cameraID: cameraID, cameraName: "Fixture", jpegData: image)],
+            broker: broker, brokerSession: session)
+        let clipID = try XCTUnwrap(result.savedClipID)
+        XCTAssertEqual(result.attachedImages, [image])
+        let clip = try XCTUnwrap(store.loadACTAChatClips(threadID: "test").first)
+        XCTAssertEqual(clip.clipID, clipID)
+        XCTAssertEqual(clip.cameraID, cameraID.uuidString)
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("identity-crops").appendingPathComponent(clip.filePath)), image)
+    }
+
     func testRequestCatalogueEnforcedForModelAndDirectCalls() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(".acta-catalogue-tests-\(UUID().uuidString)", isDirectory: true)
@@ -76,18 +102,15 @@ final class ACTAModelGeneratedRegistryJSONTests: XCTestCase {
         let modelResult = await coordinator.executeModelGeneratedAgentTool(allowed, threadID: "test",
             requestToolNames: advertised, registry: registry)
         let modelJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(modelResult.outputJSON.utf8)) as? [String: Any])
-        XCTAssertEqual(modelJSON["requires_operator_confirmation"] as? Bool, true)
+        XCTAssertTrue((modelJSON["error"] as? String)?.hasPrefix("UNSUPPORTED:") == true)
         let directAllowed = await coordinator.executeAgentTool(toolName: "settings.update_permissions",
             arguments: ["value": "1"], threadID: "test", registry: registry)
-        XCTAssertTrue(directAllowed.outputJSON.contains("confirmation_required"))
+        XCTAssertTrue(directAllowed.outputJSON.contains("UNSUPPORTED:"))
         let beforeApproval = await allowedProbe.count
         XCTAssertEqual(beforeApproval, 0)
-        let proposal = try XCTUnwrap(store.listACTAChatActions(threadID: "test").first)
-        let approved = try await registry.confirmAndExecute(token: proposal.actionID, confirmed: true,
-            expectedActionID: proposal.actionType, expectedParameters: proposal.parameters, expectedThreadID: "test")
-        XCTAssertTrue(approved.success)
+        XCTAssertTrue(try store.listACTAChatActions(threadID: "test").isEmpty)
         let afterApproval = await allowedProbe.count
-        XCTAssertEqual(afterApproval, 1)
+        XCTAssertEqual(afterApproval, 0)
     }
 
     func testCoordinatorAndLegacyReviewCannotUseAuthorizedRegistryWithoutBroker() async throws {
@@ -157,7 +180,7 @@ final class ACTAModelGeneratedRegistryJSONTests: XCTestCase {
             let output = await coordinator.executeModelGeneratedAgentTool(call, threadID: thread,
                 requestToolNames: [call.name], registry: registry)
             let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(output.outputJSON.utf8)) as? [String: Any])
-            XCTAssertTrue((json["error"] as? String)?.hasPrefix("INVALID_ARGUMENT:") == true, raw)
+            XCTAssertTrue((json["error"] as? String)?.hasPrefix("UNSUPPORTED:") == true, raw)
             XCTAssertNil(json["confirmation_token"])
             XCTAssertEqual(output.resultRows, 0)
         }
@@ -168,7 +191,7 @@ final class ACTAModelGeneratedRegistryJSONTests: XCTestCase {
         let localOutput = await coordinator.executeModelGeneratedAgentTool(localCall, threadID: thread,
             requestToolNames: [localCall.name], registry: registry)
         let localJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(localOutput.outputJSON.utf8)) as? [String: Any])
-        XCTAssertTrue((localJSON["error"] as? String)?.hasPrefix("INVALID_ARGUMENT:") == true)
+        XCTAssertTrue((localJSON["error"] as? String)?.hasPrefix("UNSUPPORTED:") == true)
         XCTAssertTrue(try store.listACTAChatActions(threadID: thread).isEmpty)
         let audit = try store.executeReadOnlyACTASQL("SELECT COUNT(*) AS n FROM ghost_chat_tool_calls")
         XCTAssertEqual(audit.first?["n"], "7")
@@ -184,14 +207,10 @@ final class ACTAModelGeneratedRegistryJSONTests: XCTestCase {
         let output = await coordinator.executeModelGeneratedAgentTool(valid, threadID: thread,
             requestToolNames: [valid.name], registry: registry)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(output.outputJSON.utf8)) as? [String: Any])
-        let token = try XCTUnwrap(json["confirmation_token"] as? String)
-        let action = try XCTUnwrap(store.listACTAChatActions(threadID: thread).first)
-        XCTAssertEqual(action.parameters["value"], "1")
-        let approved = try await registry.confirmAndExecute(token: token, confirmed: true,
-            expectedActionID: action.actionType, expectedParameters: action.parameters, expectedThreadID: thread)
-        XCTAssertTrue(approved.success)
+        XCTAssertTrue((json["error"] as? String)?.hasPrefix("UNSUPPORTED:") == true)
+        XCTAssertTrue(try store.listACTAChatActions(threadID: thread).isEmpty)
         let finalExecutions = await probe.count
-        XCTAssertEqual(finalExecutions, 1)
+        XCTAssertEqual(finalExecutions, 0)
     }
 
     func testEmptyAndInvalidRawArgumentsSurviveParsingWithoutChangingLegacyArguments() throws {
@@ -241,15 +260,22 @@ final class ACTAModelGeneratedRegistryJSONTests: XCTestCase {
     }
 
     func testLegacyToolStillUsesFlattenedArguments() async throws {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".acta-legacy-arguments-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try LocalTrackingStore(url: root.appendingPathComponent("tracking.sqlite"))
         let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), transport: { _ in
             throw URLError(.notConnectedToInternet)
         })
-        let coordinator = ACTAAnalyticsCoordinator(aiClient: client)
+        let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store)
+        let (broker, session) = try await makeInspectionTestSession(store: store, threadID: "test",
+                                                                    scopes: ["live_look"])
         let now = Date(timeIntervalSince1970: 1_000)
         let call = ACTAAgentFunctionCall(callID: "legacy", name: "live_look", argumentsJSON: "")
         let fromModel = await coordinator.executeModelGeneratedAgentTool(call, threadID: "test",
-            requestToolNames: [call.name], now: now)
-        let direct = await coordinator.executeAgentTool(toolName: "live_look", arguments: [:], threadID: "test", now: now)
+            requestToolNames: [call.name], now: now, broker: broker, brokerSession: session)
+        let direct = await coordinator.executeAgentTool(toolName: "live_look", arguments: [:], threadID: "test",
+                                                        now: now, broker: broker, brokerSession: session)
         let modelJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(fromModel.outputJSON.utf8)) as? NSDictionary)
         let directJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(direct.outputJSON.utf8)) as? NSDictionary)
         XCTAssertEqual(modelJSON, directJSON)

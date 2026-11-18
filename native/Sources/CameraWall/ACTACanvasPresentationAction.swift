@@ -1,7 +1,11 @@
 import CameraCore
 import Foundation
 
-struct ACTACanvasSetPresentationAction: ACTAActionProtocol {
+struct ACTACanvasSetPresentationAction: ACTAPreparedConfirmationAction {
+    struct ConfirmationSnapshot: Sendable {
+        let lifecycleRevision: UUID
+        let previousMode: String
+    }
     let id = "canvas.set_presentation"
     let title = "Set camera presentation"
     let description = "Set grid or list in the unique attached security center, even if another section is visible. This window-local setting is not persisted and does not change fullscreen or filters. Verification checks state, not rendering."
@@ -21,6 +25,40 @@ struct ACTACanvasSetPresentationAction: ACTAActionProtocol {
 
     func validate(parameters: [String: String]) throws {
         _ = try mode(parameters)
+    }
+
+    func prepareConfirmation(parameters: [String: String], context: ACTAActionContext) async throws
+        -> ACTAPreparedConfirmation<ConfirmationSnapshot> {
+        let requested = try mode(parameters)
+        return try await MainActor.run {
+            try Task.checkCancellation()
+            guard let state = bridge.activeState else {
+                throw ConfigurationError.invalid("UNAVAILABLE: No unique active security center.")
+            }
+            let previous = state.presentation.rawValue
+            return ACTAPreparedConfirmation(
+                snapshot: ConfirmationSnapshot(lifecycleRevision: bridge.lifecycleRevision, previousMode: previous),
+                reviewSummary: "Unique active security center: change camera presentation from \(previous) to \(requested.rawValue).")
+        }
+    }
+
+    func executeConfirmed(parameters: [String: String], context: ACTAActionContext,
+                          snapshot: ConfirmationSnapshot) async throws -> ACTAActionResult {
+        let requested = try mode(parameters)
+        return try await MainActor.run {
+            try Task.checkCancellation()
+            guard bridge.lifecycleRevision == snapshot.lifecycleRevision, let state = bridge.activeState,
+                  state.presentation.rawValue == snapshot.previousMode else {
+                return .failed(actionID: id, error: "STALE_REVIEW: Camera presentation or window changed.")
+            }
+            state.presentation = requested
+            bridge.recordPresentationWrite(to: state)
+            guard state.presentation == requested else {
+                return .failed(actionID: id, error: "Camera presentation state readback failed.")
+            }
+            return ACTAActionResult(actionID: id, success: true,
+                summary: "Camera presentation state updated in this window; rendering was not verified.")
+        }
     }
 
     func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {

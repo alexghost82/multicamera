@@ -5,6 +5,8 @@ public struct CrossCameraIdentityReviewSnapshot: Sendable {
     public let accepted: [CrossCameraIdentityProposal]
     public let assignments: [UUID: UUID]
     fileprivate let graph: [String]
+    fileprivate let graphTrackIDs: Set<UUID>
+    fileprivate let store: IdentityStoreSnapshot
 }
 
 /// A frozen GUI review request; constructing it does not itself constitute approval.
@@ -17,6 +19,7 @@ public struct CrossCameraIdentityPreparedReview: Identifiable, Sendable {
     public let affectedTrackIDs: [UUID]
     fileprivate let snapshot: CrossCameraIdentityReviewSnapshot
     fileprivate let preferences: CameraFeaturePreferences
+    fileprivate let affectedRecords: [UUID: TrackedObjectRecord]
 }
 
 public struct CrossCameraIdentityPolicyPreparedReview: Identifiable, Sendable {
@@ -97,7 +100,8 @@ public struct CrossCameraIdentityReviewService: Sendable {
         let snapshot = try features.identityReviewSnapshot()
         return CrossCameraIdentityReviewSnapshot(
             proposals: snapshot.proposals, accepted: snapshot.accepted,
-            assignments: snapshot.assignments, graph: snapshot.graph
+            assignments: snapshot.assignments, graph: snapshot.graph, graphTrackIDs: snapshot.graphTrackIDs,
+            store: snapshot.store
         )
     }
 
@@ -148,9 +152,19 @@ public struct CrossCameraIdentityReviewService: Sendable {
         let affected = Set(snapshot.assignments.compactMap { identities.contains($0.value) ? $0.key : nil })
             .union([a.trackID, b.trackID])
             .sorted { $0.uuidString < $1.uuidString }
+        var affectedRecords: [UUID: TrackedObjectRecord] = [:]
+        for id in affected {
+            guard let record = try tracking.track(trackID: id) else {
+                throw CameraFeatureStoreError.identityReviewStale
+            }
+            affectedRecords[id] = record
+        }
+        guard affectedRecords[a.trackID] == a, affectedRecords[b.trackID] == b else {
+            throw CameraFeatureStoreError.identityReviewStale
+        }
         return CrossCameraIdentityPreparedReview(
             proposal: proposal, trackA: a, trackB: b, accept: accept, affectedTrackIDs: affected,
-            snapshot: snapshot, preferences: preferences
+            snapshot: snapshot, preferences: preferences, affectedRecords: affectedRecords
         )
     }
 
@@ -190,13 +204,14 @@ public struct CrossCameraIdentityReviewService: Sendable {
                 throw CameraFeatureStoreError.identityReviewStale
             }
             for trackID in prepared.affectedTrackIDs {
-                guard try tracking.contains(trackID: trackID) else {
+                guard try tracking.track(trackID: trackID) == prepared.affectedRecords[trackID] else {
                     throw CameraFeatureStoreError.identityReviewStale
                 }
             }
             return try features.reviewIdentityProposal(
                 id: proposal.id, accept: prepared.accept, preferences: preferences,
-                expectedProposal: proposal, expectedGraph: prepared.snapshot.graph
+                expectedProposal: proposal, expectedGraph: prepared.snapshot.graph,
+                expectedStore: prepared.snapshot.store
             )
         }
     }
@@ -217,7 +232,7 @@ public struct CrossCameraIdentityReviewService: Sendable {
             guard try tracking.track(trackID: original.trackA) == prepared.trackA,
                   try tracking.track(trackID: original.trackB) == prepared.trackB else { return false }
             for id in prepared.affectedTrackIDs {
-                guard try tracking.contains(trackID: id) else { return false }
+                guard try tracking.track(trackID: id) == prepared.affectedRecords[id] else { return false }
             }
             let before = try snapshot()
             guard try features.identityProposals(status: expectedStatus, limit: 1000).contains(result) else {
@@ -246,13 +261,15 @@ public struct CrossCameraIdentityReviewService: Sendable {
                      preferences: CameraFeaturePreferences) throws {
         guard snapshot.accepted.contains(proposal) else { throw CameraFeatureStoreError.identityReviewStale }
         try tracking.withIdentityReadReservation {
-            guard try tracking.contains(trackID: proposal.trackA),
-                  try tracking.contains(trackID: proposal.trackB) else {
-                throw CameraFeatureStoreError.identityReviewStale
+            // Undo rebuilds the entire sidecar graph, including unrelated components.
+            for trackID in snapshot.graphTrackIDs.union(snapshot.assignments.keys) {
+                guard try tracking.contains(trackID: trackID) else {
+                    throw CameraFeatureStoreError.identityReviewStale
+                }
             }
             try features.undoIdentityProposal(
                 id: proposal.id, preferences: preferences,
-                expectedProposal: proposal, expectedGraph: snapshot.graph
+                expectedProposal: proposal, expectedGraph: snapshot.graph, expectedStore: snapshot.store
             )
         }
     }

@@ -397,6 +397,7 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
     private var reservedNarrativesByCamera: [UUID: ACTAReservedNarrativeBatch] = [:]
 #if DEBUG
     var narrativeBeforeGenerationTestHook: (@Sendable () async -> Void)?
+    var narrativeBeforePreviousReadTestHook: (@Sendable () throws -> Void)?
     var narrativeAfterGenerationTestHook: (@Sendable () async -> Void)?
     var narrativePostCommitTestHook: (@Sendable () throws -> Void)?
     var alertMonotonicClockForTesting: (@Sendable () -> TimeInterval)?
@@ -1308,13 +1309,21 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         }
         guard let collage = ACTACollageBuilder.buildCollage(kind: .narrative, cells: cells) else { return .notStarted }
 
-        // If previousSummary is nil in RAM (e.g. after app restart), fetch the latest chapter for this camera from SQLite
-        let effectivePreviousSummary: String? = batch.previousSummary ?? {
-            guard let latest = try? trackingStore.loadACTANarrativeChapterRecords(cameraID: cameraID, limit: 1).first else {
-                return nil
+        let effectivePreviousSummary: String?
+        if let previousSummary = batch.previousSummary {
+            effectivePreviousSummary = previousSummary
+        } else {
+            do {
+#if DEBUG
+                try narrativeBeforePreviousReadTestHook?()
+#endif
+                effectivePreviousSummary = try trackingStore.loadACTANarrativeChapterRecords(
+                    cameraID: cameraID, limit: 1).first?.effectiveSummary
+            } catch {
+                reportStorageFailure(error)
+                return .notStarted
             }
-            return latest.effectiveSummary
-        }()
+        }
 
         let lang = aiClient.configuration().preferredLanguage
         let prompt = ACTAPromptLibrary.narrativeChapterPrompt(
@@ -1694,20 +1703,25 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
             "watch.list", "watch.create", "watch.cancel", "memory.delete_frame", "incident.delete_evidence",
             "alert.vlm_list", "alert.vlm_acknowledge", "alert.vlm_review", "monitor.get_isapi_events", "reid.calibrate", "settings.update_reid_calibration", "memory.toggle_pin", "memory.set_chapter_text", "mission.list", "mission.create", "mission.edit",
             "mission.delete", "mission.history", "mission.clear_consult", "mission.run_now", "mission.ask_consult"]
-        return try await registry.allActions().filter { enabled.contains($0.id) }.map { action in
-            var properties: [String: Any] = [:]
-            for field in action.parameters {
-                var property: [String: Any] = ["type": field.type, "description": field.description]
-                if let values = field.allowedValues { property["enum"] = values }
-                properties[field.name] = property
-            }
-            let schema: [String: Any] = ["type": "object", "properties": properties,
-                "required": action.parameters.filter(\.isRequired).map(\.name), "additionalProperties": false]
-            let data = try JSONSerialization.data(withJSONObject: schema, options: [.sortedKeys])
-            return ACTAAgentToolSpec(name: "acta__" + action.id.replacingOccurrences(of: ".", with: "__"),
-                description: action.description + " Never claim execution before receiving a successful verified result; approval_required is not success.",
-                parametersSchemaJSON: String(decoding: data, as: UTF8.self))
+        return try await registry.allActions().filter { enabled.contains($0.id) }.map {
+            try agentToolSpec(id: $0.id, description: $0.description, parameters: $0.parameters)
         }
+    }
+
+    private static func agentToolSpec(id: String, description: String,
+                                      parameters: [ACTAActionParameterSchema]) throws -> ACTAAgentToolSpec {
+        var properties: [String: Any] = [:]
+        for field in parameters {
+            var property: [String: Any] = ["type": field.type, "description": field.description]
+            if let values = field.allowedValues { property["enum"] = values }
+            properties[field.name] = property
+        }
+        let schema: [String: Any] = ["type": "object", "properties": properties,
+            "required": parameters.filter(\.isRequired).map(\.name), "additionalProperties": false]
+        let data = try JSONSerialization.data(withJSONObject: schema, options: [.sortedKeys])
+        return ACTAAgentToolSpec(name: "acta__" + id.replacingOccurrences(of: ".", with: "__"),
+            description: description + " Never claim execution before receiving a successful verified result; approval_required is not success.",
+            parametersSchemaJSON: String(decoding: data, as: UTF8.self))
     }
 
     private static let legacyAgentToolNames: Set<String> = [
@@ -1717,6 +1731,61 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         "get_timeline", "get_camera_alert_history", "search_tracked_objects", "get_operational_events",
         "live_look", "run_readonly_sql"
     ]
+    // Both history scopes authorize all retained cameras: bootstrap includes focus, galleries,
+    // dossiers, chapters, tracks, scans and operational snapshots; overview performs cross-camera search.
+    static let historyBootstrapInspection = "history.bootstrap"
+    static let historyOverviewInspection = "history.overview"
+    static let localInspectionIDs = legacyAgentToolNames.subtracting(["run_readonly_sql"])
+        .union([historyBootstrapInspection, historyOverviewInspection])
+    private static let brokerActionIDs = [
+        "acta__canvas__set_presentation": "canvas.set_presentation",
+        "acta__canvas__set_filter": "canvas.set_filter",
+        "acta__canvas__set_arrange_mode": "canvas.set_arrange_mode",
+        "acta__canvas__select_cameras": "canvas.select_cameras",
+        "acta__analysis__set_section": "analysis.set_section",
+        "acta__camera__list": "camera.list"
+    ]
+
+    enum InspectionFailure: Error {
+        case unauthorized, auditFailed, invalidOutput
+    }
+
+    private static func requireInspection(
+        _ authorization: ACTALocalActionBroker.InspectionAuthorization
+    ) throws {
+        switch authorization {
+        case .authorized: return
+        case .unauthorized: throw InspectionFailure.unauthorized
+        case .auditFailed: throw InspectionFailure.auditFailed
+        }
+    }
+
+    private static func requireActiveInspection(
+        _ session: ACTABrokerSession, threadID: String, inspectionID: String
+    ) throws {
+        guard !Task.isCancelled, session.permitsInspection(inspectionID, threadID: threadID) else {
+            throw InspectionFailure.unauthorized
+        }
+    }
+
+    static func requireAuthorizedToolOutput(_ json: String) throws {
+        let value: Any
+        do {
+            value = try JSONSerialization.jsonObject(with: Data(json.utf8))
+        } catch {
+            throw InspectionFailure.invalidOutput
+        }
+        guard let object = value as? [String: Any] else {
+            throw InspectionFailure.invalidOutput
+        }
+        guard let error = object["error"] as? String else {
+            if object["error"] != nil { throw InspectionFailure.invalidOutput }
+            return
+        }
+        if error.hasPrefix("UNAUTHORIZED:") { throw InspectionFailure.unauthorized }
+        if error.hasPrefix("AUDIT_FAILED:") { throw InspectionFailure.auditFailed }
+        if error.hasPrefix("TOOL_OUTPUT_INVALID:") { throw InspectionFailure.invalidOutput }
+    }
 
     private func rejectUnadvertisedTool(
         name: String, threadID: String, now: Date,
@@ -1726,14 +1795,20 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         if let store = trackingStore {
             do {
                 try store.recordACTAToolCallAudit(ACTAToolCallAuditRecord(
-                    threadID: threadID, toolName: name, argsJSON: "{}", resultRows: 0,
+                    threadID: reason.hasPrefix("UNAUTHORIZED:") ? "" : threadID,
+                    toolName: Self.legacyAgentToolNames.contains(name) || Self.brokerActionIDs[name] != nil
+                        ? name : "[unrecognized]", argsJSON: "{}", resultRows: 0,
                     durationMs: 0, ok: false, error: error, createdAt: now))
             } catch let auditError {
                 reportStorageFailure(auditError)
-                error = "AUDIT_FAILED: Could not record rejected action."
+                if !reason.hasPrefix("UNAUTHORIZED:") {
+                    error = "AUDIT_FAILED: Could not record rejected action."
+                }
             }
         } else {
-            error = "AUDIT_FAILED: Action audit store is unavailable."
+            if !reason.hasPrefix("UNAUTHORIZED:") {
+                error = "AUDIT_FAILED: Action audit store is unavailable."
+            }
         }
         let output = (try? JSONSerialization.data(withJSONObject: ["tool": name, "error": error])) ?? Data("{}".utf8)
         return (String(decoding: output, as: UTF8.self), 0, nil, [])
@@ -1749,17 +1824,37 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         guard requestToolNames.contains(call.name) else {
             return rejectUnadvertisedTool(name: call.name, threadID: threadID, now: now)
         }
+        if call.name == "run_readonly_sql" {
+            return rejectUnadvertisedTool(name: call.name, threadID: threadID, now: now,
+                reason: "UNSUPPORTED: Unscoped SQL inspection is unavailable.")
+        }
         if Self.legacyAgentToolNames.contains(call.name) {
             return await executeAgentTool(toolName: call.name, arguments: call.arguments, threadID: threadID,
-                                          liveFrames: liveFrames, cameraNames: cameraNames, now: now)
+                                          liveFrames: liveFrames, cameraNames: cameraNames, now: now,
+                                          broker: broker, brokerSession: brokerSession)
         }
 
-        guard call.name == "acta__canvas__set_presentation", let broker, let brokerSession else {
+        if Self.brokerActionIDs[call.name] == nil {
+            let tools: [ACTAAgentToolSpec]
+            do { tools = try await Self.registryTools(registry: registry) }
+            catch {
+                return rejectUnadvertisedTool(name: call.name, threadID: threadID, now: now,
+                    reason: "CATALOGUE_ERROR: Could not load the action catalogue.")
+            }
+            guard tools.contains(where: { $0.name == call.name }) else {
+                return rejectUnadvertisedTool(name: call.name, threadID: threadID, now: now)
+            }
+        }
+        guard let actionID = Self.brokerActionIDs[call.name], let broker, let brokerSession else {
             return rejectUnadvertisedTool(name: call.name, threadID: threadID, now: now,
                 reason: "UNSUPPORTED: This action has no authorized local review.")
         }
-        let result = await broker.request(session: brokerSession, actionID: "canvas.set_presentation",
-                                          argumentsJSON: call.rawArgumentsJSON)
+        let result = await broker.request(session: brokerSession, actionID: actionID,
+                                          argumentsJSON: call.rawArgumentsJSON, expectedThreadID: threadID)
+        guard !Task.isCancelled, brokerSession.isActive(threadID: threadID) else {
+            return rejectUnadvertisedTool(name: call.name, threadID: threadID, now: now,
+                reason: "UNAUTHORIZED: Local session was revoked.")
+        }
         var response: [String: Any] = ["tool": call.name, "action_success": result.success,
                                        "action_verified": result.verified]
         if result.requiresOperatorConfirmation {
@@ -1768,6 +1863,17 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         } else {
             response["action_result"] = result.success ? "Action completed." : "Action failed."
             if let error = result.error { response["error"] = error }
+            if actionID == "camera.list", result.success, result.verified {
+                do {
+                    guard let output = try JSONSerialization.jsonObject(with: Data(result.outputJSON.utf8)) as? [String: Any] else {
+                        throw InspectionFailure.invalidOutput
+                    }
+                    response["action_output"] = output
+                } catch {
+                    return rejectUnadvertisedTool(name: call.name, threadID: threadID, now: now,
+                        reason: "TOOL_OUTPUT_INVALID: Camera list output could not be decoded.")
+                }
+            }
         }
         let data = (try? JSONSerialization.data(withJSONObject: response)) ?? Data("{}".utf8)
         return (String(decoding: data, as: UTF8.self), result.success ? 1 : 0, nil, [])
@@ -1783,9 +1889,25 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         liveFrames: [ACTALiveCameraFrame] = [],
         cameraNames: [UUID: String] = [:],
         now: Date = Date(),
-        registry: ACTAActionRegistry = .shared
+        registry: ACTAActionRegistry = .shared,
+        broker: ACTALocalActionBroker? = nil,
+        brokerSession: ACTABrokerSession? = nil
     ) async -> (outputJSON: String, resultRows: Int, savedClipID: String?, attachedImages: [Data]) {
-        let start = Date()
+        if Self.legacyAgentToolNames.contains(toolName), toolName != "run_readonly_sql" {
+            guard let broker, let brokerSession else {
+                return rejectUnadvertisedTool(name: toolName, threadID: threadID, now: now,
+                    reason: "UNAUTHORIZED: Local inspection session is unavailable.")
+            }
+            let authorization = await broker.beginInspection(session: brokerSession, inspectionID: toolName, threadID: threadID)
+            guard authorization == .authorized, !Task.isCancelled,
+                  brokerSession.permitsInspection(toolName, threadID: threadID) else {
+                return rejectUnadvertisedTool(name: toolName, threadID: threadID, now: now,
+                    reason: authorization == .auditFailed && !Task.isCancelled
+                        && brokerSession.permitsInspection(toolName, threadID: threadID)
+                        ? "AUDIT_FAILED: Inspection was not performed."
+                        : "UNAUTHORIZED: Local inspection is outside scope or revoked.")
+            }
+        }
         var outputDict: [String: Any] = ["tool": toolName]
         var rowsCount = 0
         var savedClipID: String?
@@ -1793,7 +1915,6 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         var errorMsg: String?
         let registryID = toolName.hasPrefix("acta__")
             ? String(toolName.dropFirst(6)).replacingOccurrences(of: "__", with: ".") : toolName
-        let auditArguments = actaActionAuditArguments(registryID, arguments)
 
         let allLiveFrames = liveFrames + liveCameraImages.map { ACTALiveCameraFrame(cameraID: nil, cameraName: "live", jpegData: $0) }
         let camera = Self.resolveAgentCamera(arguments["camera"] ?? arguments["camera_id"], cameraNames: cameraNames)
@@ -2434,13 +2555,16 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
                 attachedImages.append(contentsOf: selected.prefix(4).map(\.jpegData))
                 rowsCount = 1
                 if visualHit && conf >= 0.55, let firstFrame = selected.first, let store = trackingStore {
-                    let clip = try store.saveACTAChatClip(
-                        threadID: threadID,
-                        cameraID: firstFrame.cameraID?.uuidString ?? (camera.raw ?? "live"),
-                        clipData: firstFrame.jpegData,
-                        fileExtension: "jpg",
-                        createdAt: now
-                    )
+                    guard let brokerSession, let clip = try brokerSession.withInspection(
+                        toolName, threadID: threadID, operation: {
+                            try store.saveACTAChatClip(
+                                threadID: threadID,
+                                cameraID: firstFrame.cameraID?.uuidString ?? (camera.raw ?? "live"),
+                                clipData: firstFrame.jpegData,
+                                fileExtension: "jpg",
+                                createdAt: now
+                            )
+                        }) else { throw InspectionFailure.unauthorized }
                     savedClipID = clip.clipID
                     outputDict["clip_id"] = clip.clipID
                     outputDict["camera_id"] = firstFrame.cameraID?.uuidString ?? ""
@@ -2448,12 +2572,15 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
                 }
 
             case "run_readonly_sql":
-                let sql = arguments["sql"] ?? "SELECT identity_id, summary_line FROM ghost_identity_dossiers LIMIT 10"
-                let rows = (try trackingStore?.executeReadOnlyACTASQL(sql)) ?? []
-                rowsCount = rows.count
-                outputDict["rows"] = rows
+                return rejectUnadvertisedTool(name: toolName, threadID: threadID, now: now,
+                    reason: "UNSUPPORTED: Unscoped SQL inspection is unavailable.")
 
             default:
+                let canonicalName = "acta__" + registryID.replacingOccurrences(of: ".", with: "__")
+                let tools = try await Self.registryTools(registry: registry)
+                guard tools.contains(where: { $0.name == canonicalName }) else {
+                    return rejectUnadvertisedTool(name: toolName, threadID: threadID, now: now)
+                }
                 return rejectUnadvertisedTool(name: toolName, threadID: threadID, now: now,
                     reason: "UNSUPPORTED: Registry actions require an authorized local review.")
             }
@@ -2462,25 +2589,31 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
             outputDict["error"] = error.localizedDescription
         }
 
-        let elapsedMs = max(1, Int(Date().timeIntervalSince(start) * 1000.0))
-        let argsJSON = (try? String(data: JSONEncoder().encode(auditArguments), encoding: .utf8)) ?? "{}"
-        let outputData = (try? JSONSerialization.data(withJSONObject: outputDict)) ?? Data("{}".utf8)
-        let outputJSON = String(data: outputData, encoding: .utf8) ?? "{}"
-
+        guard let broker, let brokerSession else {
+            return rejectUnadvertisedTool(name: toolName, threadID: threadID, now: now,
+                reason: "UNAUTHORIZED: Local inspection session is unavailable.")
+        }
+        let outputJSON: String
         do {
-        try trackingStore?.recordACTAToolCallAudit(
-            ACTAToolCallAuditRecord(
-                threadID: threadID,
-                toolName: toolName,
-                argsJSON: argsJSON,
-                resultRows: rowsCount,
-                durationMs: elapsedMs,
-                ok: errorMsg == nil,
-                error: errorMsg,
-                createdAt: now
-            )
-        )
-        } catch { reportStorageFailure(error) }
+            let data = try JSONSerialization.data(withJSONObject: outputDict)
+            outputJSON = String(decoding: data, as: UTF8.self)
+        } catch {
+            errorMsg = "TOOL_OUTPUT_INVALID: Inspection result could not be encoded."
+            outputJSON = #"{"error":"TOOL_OUTPUT_INVALID: Inspection result could not be encoded; a prior side effect may have occurred."}"#
+            rowsCount = 0
+            savedClipID = nil
+            attachedImages = []
+        }
+        let authorization = await broker.endInspection(session: brokerSession, inspectionID: toolName,
+                                                        threadID: threadID, succeeded: errorMsg == nil)
+        guard authorization == .authorized, !Task.isCancelled,
+              brokerSession.permitsInspection(toolName, threadID: threadID) else {
+            return rejectUnadvertisedTool(name: toolName, threadID: threadID, now: now,
+                reason: authorization == .auditFailed && !Task.isCancelled
+                    && brokerSession.permitsInspection(toolName, threadID: threadID)
+                    ? "AUDIT_FAILED: Inspection result was not released."
+                    : "UNAUTHORIZED: Local inspection is outside scope or revoked.")
+        }
         return (outputJSON, rowsCount, savedClipID, attachedImages)
     }
 
@@ -2506,49 +2639,58 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
             from: strippedQuestion,
             fallback: aiClient.configuration().preferredLanguage
         )
+        guard let broker, let brokerSession,
+              brokerSession.permitsInspection(Self.historyBootstrapInspection, threadID: threadID),
+              brokerSession.permitsInspection(Self.historyOverviewInspection, threadID: threadID) else {
+            return ACTAChatPresentAnswer(answerMarkdown: "UNAUTHORIZED: Local inspection session is unavailable or out of scope.", confidence: 0)
+        }
         guard let trackingStore else {
             return ACTAChatPresentAnswer(answerMarkdown: detectedLang == .ru
                 ? "История недоступна: хранилище памяти не подключено."
                 : "History is unavailable: the memory store is not connected.", confidence: 0)
         }
         do {
+        try Self.requireInspection(await broker.beginInspection(session: brokerSession,
+            inspectionID: Self.historyBootstrapInspection, threadID: threadID))
+        try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyBootstrapInspection)
+        try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyOverviewInspection)
         let expandedTerms = ACTALexicon.expandQueryTerms(strippedQuestion)
         let allLiveFrames = liveFrames + liveCameraImages.map { ACTALiveCameraFrame(cameraID: nil, cameraName: "live", jpegData: $0) }
 
         // 1. Ensure thread exists, record user message, and push explicit focus if supplied
-        _ = try trackingStore.ensureACTAChatThread(
-            threadID: threadID,
-            title: String(strippedQuestion.prefix(60)),
-            now: now
-        )
-        if recordUserMessage {
-            _ = try trackingStore.appendACTAChatMessage(
-                ACTAChatMessageRecord(threadID: threadID, role: "user", text: strippedQuestion, createdAt: now))
-        }
-        if let focusedIdentityID, !focusedIdentityID.isEmpty {
-            try trackingStore.pushACTAThreadFocus(
+        guard try brokerSession.withInspection(Self.historyBootstrapInspection, threadID: threadID, operation: {
+            try Task.checkCancellation()
+            _ = try trackingStore.ensureACTAChatThread(
                 threadID: threadID,
-                kind: "identity",
-                refID: focusedIdentityID,
-                pinned: true,
+                title: String(strippedQuestion.prefix(60)),
                 now: now
             )
-        }
+            if recordUserMessage {
+                _ = try trackingStore.appendACTAChatMessage(
+                    ACTAChatMessageRecord(threadID: threadID, role: "user", text: strippedQuestion, createdAt: now))
+            }
+            if let focusedIdentityID, !focusedIdentityID.isEmpty {
+                try trackingStore.pushACTAThreadFocus(
+                    threadID: threadID, kind: "identity", refID: focusedIdentityID, pinned: true, now: now
+                )
+            }
+            return true
+        }) == true else { throw InspectionFailure.unauthorized }
 
-        // 2. Read (without consuming) the chain head and owed outputs; they are replaced only after a successful turn.
-        let storedThread = try trackingStore.loadACTAChatThread(threadID: threadID)
-        var chainHead: String? = storedThread?.lastResponseID
-        let debtItems: [ACTAAgentItem] = (storedThread?.pendingOutputs ?? []).map {
+        // Only a locally attested offline chain is replayable; opaque legacy server chains are not.
+        let safeChain = aiClient.configuration().mode == .dryRun
+            ? try trackingStore.loadACTASafeOfflineChain(threadID: threadID) : nil
+        var chainHead: String? = safeChain?.0
+        let debtItems: [ACTAAgentItem] = (safeChain?.1 ?? []).map {
             .functionOutput(callID: $0.callID, output: $0.outputJSON)
         }
 
         // 3. Focus block, prior conversation (sent only when the server-side chain is unavailable)
         let focusBlock = try trackingStore.loadACTAThreadFocusBlock(threadID: threadID, limit: 6)
-        let priorMessages = try trackingStore.loadACTAChatMessages(threadID: threadID)
-        let history: [ACTAAgentItem] = priorMessages.dropLast().filter {
-            $0.role != "assistant" || ($0.structuredAnswer?.confidence ?? 1) > 0
-        }.suffix(12).map { message in
-            message.role == "assistant" ? .assistantText(message.text) : .user(text: message.text, images: [])
+        let priorMessages = try trackingStore.loadACTAChatMessages(threadID: threadID, reviewSafeContextOnly: true)
+        let safePrior = priorMessages.dropLast()
+        let history: [ACTAAgentItem] = safePrior.suffix(12).map {
+            $0.role == "assistant" ? .assistantText($0.text) : .user(text: $0.text, images: [])
         }
 
         let cameraDirectory = cameraNames.sorted { $0.value < $1.value }.map { id, name in
@@ -2620,10 +2762,22 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
             )
         }
 
+        try Self.requireInspection(await broker.endInspection(session: brokerSession,
+            inspectionID: Self.historyBootstrapInspection, threadID: threadID, succeeded: true))
+        try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyBootstrapInspection)
+        try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyOverviewInspection)
         onProgress?("Searching saved history across cameras…")
         let localMode = ![ACTAAIBackendMode.openAI, .dryRun].contains(aiClient.configuration().mode)
+        try Self.requireInspection(await broker.beginInspection(session: brokerSession,
+            inspectionID: Self.historyOverviewInspection, threadID: threadID))
+        try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyBootstrapInspection)
+        try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyOverviewInspection)
         let overview = try UnifiedHistoryEvidence.load(store: trackingStore, question: strippedQuestion,
-            prior: Array(priorMessages.dropLast()), cameras: cameraNames, now: now)
+            prior: Array(safePrior), cameras: cameraNames, now: now)
+        try Self.requireInspection(await broker.endInspection(session: brokerSession,
+            inspectionID: Self.historyOverviewInspection, threadID: threadID, succeeded: true))
+        try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyBootstrapInspection)
+        try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyOverviewInspection)
         var evidenceLedger = AgentEvidenceLedger()
         evidenceLedger.record(outputJSON: overview.json, tool: "history_overview")
         var retrievedBlocks = [overview.json]
@@ -2632,7 +2786,8 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         scopeArguments["until"] = Self.agentISO(overview.until ?? now)
         if let camera = overview.cameraID { scopeArguments["camera"] = camera.uuidString }
         for tool in ["get_timeline", "list_memory_frames", "get_operational_events", "search_identities_by_attributes"] {
-            try Task.checkCancellation()
+            try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyBootstrapInspection)
+            guard brokerSession.permitsInspection(tool, threadID: threadID) else { continue }
             var args = scopeArguments
             args["limit"] = localMode ? "4" : "12"
             if tool == "search_identities_by_attributes" { args["query"] = strippedQuestion }
@@ -2640,33 +2795,47 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
                 args["kind"] = "missions"; args["mission_id"] = mission.id.uuidString
             }
             let output = await executeAgentTool(toolName: tool, arguments: args, threadID: threadID,
-                cameraNames: cameraNames, now: now)
+                cameraNames: cameraNames, now: now, broker: broker, brokerSession: brokerSession)
+            try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyBootstrapInspection)
+            try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyOverviewInspection)
+            try Self.requireAuthorizedToolOutput(output.outputJSON)
             evidenceLedger.record(outputJSON: output.outputJSON, tool: tool)
             retrievedBlocks.append(output.outputJSON)
         }
         var initialImages: [Data] = []
         let explicitlyLive = ["сейчас", "now", "current", "live"].contains { strippedQuestion.localizedCaseInsensitiveContains($0) }
         let needsLiveView = explicitlyLive || (overview.since == nil && ["кадр", "видишь", "обстановк", "see"].contains { strippedQuestion.localizedCaseInsensitiveContains($0) })
-        if localMode && needsLiveView && !allLiveFrames.isEmpty {
+        if localMode && needsLiveView && !allLiveFrames.isEmpty
+            && brokerSession.permitsInspection("live_look", threadID: threadID) {
             var liveArguments: [String: String] = [:]
             if let named = allLiveFrames.first(where: { strippedQuestion.localizedCaseInsensitiveContains($0.cameraName) }) {
                 liveArguments["camera"] = named.cameraID?.uuidString ?? named.cameraName
             }
             let output = await executeAgentTool(toolName: "live_look", arguments: liveArguments, threadID: threadID,
-                liveFrames: allLiveFrames, cameraNames: cameraNames, now: now)
+                liveFrames: allLiveFrames, cameraNames: cameraNames, now: now,
+                broker: broker, brokerSession: brokerSession)
+            try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyBootstrapInspection)
+            try Self.requireAuthorizedToolOutput(output.outputJSON)
             evidenceLedger.record(outputJSON: output.outputJSON, tool: "live_look")
             retrievedBlocks.append(output.outputJSON)
             initialImages = Array(output.attachedImages.prefix(4))
         }
         let wantsArchiveImage = ["покажи", "посмотри", "изображен", "кадр", "фото", "image", "picture", "show"].contains { strippedQuestion.localizedCaseInsensitiveContains($0) }
-        if localMode && wantsArchiveImage {
+        if localMode && wantsArchiveImage && brokerSession.permitsInspection("list_memory_frames", threadID: threadID)
+            && brokerSession.permitsInspection("view_memory_frame", threadID: threadID) {
             var args = scopeArguments; args["limit"] = "2"
-            let list = await executeAgentTool(toolName: "list_memory_frames", arguments: args, threadID: threadID, cameraNames: cameraNames, now: now)
+            let list = await executeAgentTool(toolName: "list_memory_frames", arguments: args, threadID: threadID,
+                cameraNames: cameraNames, now: now, broker: broker, brokerSession: brokerSession)
+            try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyBootstrapInspection)
+            try Self.requireAuthorizedToolOutput(list.outputJSON)
             if let root = try? JSONSerialization.jsonObject(with: Data(list.outputJSON.utf8)) as? [String: Any],
                let rows = root["frames"] as? [[String: Any]] {
                 let ids = rows.compactMap { $0["frame_id"] as? String }.prefix(2)
                 if !ids.isEmpty {
-                    let output = await executeAgentTool(toolName: "view_memory_frame", arguments: ["frame_ids": ids.joined(separator: ",")], threadID: threadID, cameraNames: cameraNames, now: now)
+                    let output = await executeAgentTool(toolName: "view_memory_frame", arguments: ["frame_ids": ids.joined(separator: ",")], threadID: threadID, cameraNames: cameraNames, now: now,
+                        broker: broker, brokerSession: brokerSession)
+                    try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyBootstrapInspection)
+                    try Self.requireAuthorizedToolOutput(output.outputJSON)
                     evidenceLedger.record(outputJSON: output.outputJSON, tool: "view_memory_frame")
                     retrievedBlocks.append(output.outputJSON)
                     initialImages = Array(initialImages.prefix(2)) + Array(output.attachedImages.prefix(2))
@@ -2689,17 +2858,20 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         var finalResponseID: String?
         var finalBackend: ACTAAgentBackend?
         var liveLookClipID: String?
-        let actionTools: [ACTAAgentToolSpec]
-        if let broker, let brokerSession,
-           await broker.catalogue(session: brokerSession).contains(where: { $0.id == "canvas.set_presentation" }) {
-            actionTools = [ACTAAgentToolSpec(
-                name: "acta__canvas__set_presentation",
-                description: "Propose changing the camera presentation. Operator review is required.",
-                parametersSchemaJSON: #"{"type":"object","properties":{"mode":{"type":"string","enum":["grid","list"]}},"required":["mode"],"additionalProperties":false}"#)]
-        } else {
-            actionTools = []
+        let catalogue = await broker.catalogue(session: brokerSession)
+        try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyBootstrapInspection)
+        try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyOverviewInspection)
+        let actionTools = try catalogue.filter {
+            Self.brokerActionIDs["acta__" + $0.id.replacingOccurrences(of: ".", with: "__")] == $0.id
+        }.map { try Self.agentToolSpec(id: $0.id, description: $0.description, parameters: $0.parameters) }
+        let requestTools = Self.agentTools.filter {
+            $0.name == Self.presentAnswerToolName
+                || ($0.name != "run_readonly_sql" && brokerSession.permitsInspection($0.name, threadID: threadID))
+        } + actionTools
+        let inspectionIsCurrent: @Sendable () -> Bool = {
+            brokerSession.permitsInspection(Self.historyBootstrapInspection, threadID: threadID)
+                && brokerSession.permitsInspection(Self.historyOverviewInspection, threadID: threadID)
         }
-        let requestTools = Self.agentTools + actionTools
         let stepBudget = localMode ? min(4, max(2, maxSteps)) : max(1, maxSteps)
         var generationError: String?
         let localInstructions = """
@@ -2711,6 +2883,8 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
 
 
         stepLoop: for step in 0..<stepBudget {
+            try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyBootstrapInspection)
+            try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyOverviewInspection)
             let isLastStep = step == stepBudget - 1
             func makeRequest(previous: String?) -> ACTAAgentRequest {
                 ACTAAgentRequest(
@@ -2730,19 +2904,26 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
                 result = offlineAgentStep(step: step, question: strippedQuestion, hasLiveFrames: !allLiveFrames.isEmpty, fallback: fallbackAnswer)
             } else {
                 do {
-                    result = try await aiClient.runAgentStep(lane: .chat, request: makeRequest(previous: chainHead), pinnedBackend: pinnedBackend)
+                    result = try await aiClient.runAgentStep(lane: .chat, request: makeRequest(previous: chainHead),
+                                                             pinnedBackend: pinnedBackend, authorization: inspectionIsCurrent)
                 } catch ACTAAgentError.chainRejected {
+                    try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyBootstrapInspection)
+                    try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyOverviewInspection)
                     chainHead = nil
                     serverKnownCount = 0
-                    guard let retried = try? await aiClient.runAgentStep(lane: .chat, request: makeRequest(previous: nil), pinnedBackend: pinnedBackend) else {
+                    guard let retried = try? await aiClient.runAgentStep(lane: .chat, request: makeRequest(previous: nil),
+                                                                         pinnedBackend: pinnedBackend, authorization: inspectionIsCurrent) else {
                         break stepLoop
                     }
                     result = retried
                 } catch {
+                    try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyBootstrapInspection)
                     generationError = error.localizedDescription
                     break stepLoop
                 }
             }
+            try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyBootstrapInspection)
+            try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyOverviewInspection)
 
             pinnedBackend = result.backend
             finalBackend = result.backend
@@ -2788,6 +2969,9 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
                     broker: broker,
                     brokerSession: brokerSession
                 )
+                try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyBootstrapInspection)
+                try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyOverviewInspection)
+                try Self.requireAuthorizedToolOutput(output.outputJSON)
                 evidenceLedger.record(outputJSON: output.outputJSON, tool: call.name)
                 if let clip = output.savedClipID { liveLookClipID = clip }
                 let trimmedOutput = output.outputJSON.count > 12_000 ? String(output.outputJSON.prefix(12_000)) + "…" : output.outputJSON
@@ -2802,7 +2986,8 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
             }
         }
 
-        try Task.checkCancellation()
+        try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyBootstrapInspection)
+        try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyOverviewInspection)
         var answer = modelAnswer ?? (isOffline ? fallbackAnswer() : ACTAChatPresentAnswer(answerMarkdown: detectedLang == .ru
             ? "Не удалось завершить анализ сохранённых данных. \(generationError ?? "Модель не вернула ответ.")"
             : "The saved-data request failed. \(generationError ?? "The model returned no answer.")", confidence: 0))
@@ -2817,6 +3002,8 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
             sanitized.proposedActions = []
         }
 
+        guard let completed = try brokerSession.withInspection(Self.historyBootstrapInspection, threadID: threadID, operation: {
+        try Task.checkCancellation()
         // 5. Auto-update thread focus with cited identities and bind cited cameras
         for citedID in sanitized.citedIdentityIDs {
             try trackingStore.pushACTAThreadFocus(
@@ -2859,13 +3046,37 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         _ = try trackingStore.appendACTAChatMessage(
             ACTAChatMessageRecord(threadID: threadID, role: "assistant", text: sanitized.answerMarkdown,
                 structuredAnswer: sanitized, clipID: liveLookClipID, callID: presentCall?.callID, createdAt: now),
-            terminalResponseID: usesChain ? finalResponseID : nil, pendingOutputs: debt
+            terminalResponseID: usesChain ? finalResponseID : nil, pendingOutputs: debt,
+            reviewSafeContext: sanitized.proposedActions.isEmpty,
+            trustedOfflineChain: isOffline && usesChain
         )
 
         return sanitized
+        }) else { throw InspectionFailure.unauthorized }
+        try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyBootstrapInspection)
+        try Self.requireActiveInspection(brokerSession, threadID: threadID, inspectionID: Self.historyOverviewInspection)
+        return completed
+        } catch InspectionFailure.unauthorized {
+            return ACTAChatPresentAnswer(answerMarkdown: "UNAUTHORIZED: Local inspection session is unavailable or revoked.", confidence: 0)
+        } catch InspectionFailure.auditFailed {
+            if Task.isCancelled || !brokerSession.isActive(threadID: threadID) {
+                return ACTAChatPresentAnswer(answerMarkdown: "UNAUTHORIZED: Local inspection session is unavailable or revoked.", confidence: 0)
+            }
+            return ACTAChatPresentAnswer(answerMarkdown: "AUDIT_FAILED: Inspection could not be durably audited.", confidence: 0)
+        } catch InspectionFailure.invalidOutput {
+            if Task.isCancelled || !brokerSession.isActive(threadID: threadID) {
+                return ACTAChatPresentAnswer(answerMarkdown: "UNAUTHORIZED: Local inspection session is unavailable or revoked.", confidence: 0)
+            }
+            return ACTAChatPresentAnswer(answerMarkdown: "TOOL_OUTPUT_INVALID: Inspection returned an invalid result.", confidence: 0)
         } catch is CancellationError {
+            if !brokerSession.isActive(threadID: threadID) {
+                return ACTAChatPresentAnswer(answerMarkdown: "UNAUTHORIZED: Local inspection session is unavailable or revoked.", confidence: 0)
+            }
             return ACTAChatPresentAnswer(answerMarkdown: detectedLang == .ru ? "Запрос отменён." : "Request cancelled.", confidence: 0)
         } catch {
+            if Task.isCancelled || !brokerSession.isActive(threadID: threadID) {
+                return ACTAChatPresentAnswer(answerMarkdown: "UNAUTHORIZED: Local inspection session is unavailable or revoked.", confidence: 0)
+            }
             reportStorageFailure(error)
             return ACTAChatPresentAnswer(answerMarkdown: detectedLang == .ru
                 ? "Ошибка хранилища памяти. Ответ или история могли не сохраниться; проверьте диагностику."

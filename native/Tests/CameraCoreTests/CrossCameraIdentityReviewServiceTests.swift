@@ -5,6 +5,54 @@ import XCTest
 @testable import CameraCore
 
 final class CrossCameraIdentityReviewServiceTests: XCTestCase {
+    func testSnapshotDigestSeparatesTypesLengthsRowsAndTables() throws {
+        var connection: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(":memory:", &connection), SQLITE_OK)
+        let db = try XCTUnwrap(connection)
+        defer { sqlite3_close(db) }
+        func exec(_ sql: String) throws {
+            guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else {
+                throw CameraFeatureStoreError.database(String(cString: sqlite3_errmsg(db)))
+            }
+        }
+        try exec("CREATE TABLE a(x, y); CREATE TABLE b(x, y)")
+        let queries = ["SELECT x, y FROM a ORDER BY rowid", "SELECT x, y FROM b ORDER BY rowid"]
+        func digest(_ rows: String) throws -> IdentityStoreSnapshot {
+            try exec("DELETE FROM a; DELETE FROM b; " + rows)
+            return try IdentitySnapshotHasher.snapshot(database: db, queries: queries)
+        }
+        let cases: [(String, String)] = [
+            ("INSERT INTO a VALUES(NULL, NULL)", "INSERT INTO a VALUES('', NULL)"),
+            ("INSERT INTO a VALUES(NULL, NULL)", "INSERT INTO a VALUES(X'', NULL)"),
+            ("INSERT INTO a VALUES(1, NULL)", "INSERT INTO a VALUES('1', NULL)"),
+            ("INSERT INTO a VALUES(1, NULL)", "INSERT INTO a VALUES(1.0, NULL)"),
+            ("INSERT INTO a VALUES('a', NULL)", "INSERT INTO a VALUES(X'61', NULL)"),
+            ("INSERT INTO a VALUES('ab', 'c')", "INSERT INTO a VALUES('a', 'bc')"),
+            ("INSERT INTO a VALUES(CAST(X'610062' AS TEXT), 'c')", "INSERT INTO a VALUES('a', CAST(X'006263' AS TEXT))"),
+            ("INSERT INTO a VALUES('a', 'b'), ('c', 'd')", "INSERT INTO a VALUES('a', 'bc'), ('d', NULL)"),
+            ("INSERT INTO a VALUES('a', 'b')", "INSERT INTO b VALUES('a', 'b')")
+        ]
+        for (lhs, rhs) in cases {
+            let first = try digest(lhs)
+            XCTAssertEqual(first.digest.count, 32)
+            XCTAssertEqual(first, try digest(lhs))
+            XCTAssertNotEqual(first, try digest(rhs), "\(lhs) versus \(rhs)")
+        }
+    }
+
+    func testSnapshotDigestReportsSQLitePrepareAndStepErrors() throws {
+        var connection: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(":memory:", &connection), SQLITE_OK)
+        let db = try XCTUnwrap(connection)
+        defer { sqlite3_close(db) }
+        XCTAssertThrowsError(try IdentitySnapshotHasher.snapshot(database: db, queries: ["SELECT * FROM absent"]))
+        XCTAssertEqual(sqlite3_create_function_v2(db, "snapshot_failure", 0, SQLITE_UTF8, nil,
+            { context, _, _ in sqlite3_result_error(context, "injected failure", -1) },
+            nil, nil, nil), SQLITE_OK)
+        XCTAssertThrowsError(try IdentitySnapshotHasher.snapshot(database: db, queries: ["SELECT snapshot_failure()"]))
+        XCTAssertNoThrow(try IdentitySnapshotHasher.snapshot(database: db, queries: ["SELECT 1"]))
+    }
+
     private struct Fixture {
         let root: URL
         let tracking: LocalTrackingStore
@@ -127,6 +175,28 @@ final class CrossCameraIdentityReviewServiceTests: XCTestCase {
         XCTAssertEqual(try f.features.identityProposals().map(\.id), [bc.id])
     }
 
+    func testReviewRejectsChangedRecordInMergedComponent() throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let a = try f.track(), b = try f.track(), c = try f.track()
+        let ab = try f.propose(a, b)
+        _ = try f.service.review(
+            f.service.prepareReview(proposalID: ab.id, accept: true, preferences: f.preferences),
+            preferences: f.preferences)
+        let bc = try f.propose(b, c)
+        let prepared = try f.service.prepareReview(proposalID: bc.id, accept: true, preferences: f.preferences)
+        let object = DetectedObject(id: 0, label: "person", confidence: 0.9, box: a.box, trackID: a.trackID)
+        _ = try f.tracking.record(object, cameraID: a.cameraID, cameraName: a.cameraName)
+
+        XCTAssertThrowsError(try f.service.review(prepared, preferences: f.preferences)) {
+            guard case CameraFeatureStoreError.identityReviewStale = $0 else {
+                return XCTFail("Unexpected error: \($0)")
+            }
+        }
+        XCTAssertEqual(try f.features.identityProposals().map(\.id), [bc.id])
+        XCTAssertNil(try f.features.crossCameraIdentityID(for: c.trackID))
+    }
+
     func testTrackingReservationBlocksOtherSQLiteWriters() throws {
         let f = try Fixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
@@ -178,6 +248,167 @@ final class CrossCameraIdentityReviewServiceTests: XCTestCase {
                 XCTAssertFalse(try f.service.verifyReview(prepared, result: result))
             }
         }
+    }
+
+    func testUndoRejectsDeletedTrackInAnotherRebuiltComponent() throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let a = try f.track(), b = try f.track(), c = try f.track(), d = try f.track()
+        let ab = try f.propose(a, b)
+        let acceptedAB = try f.service.review(
+            f.service.prepareReview(proposalID: ab.id, accept: true, preferences: f.preferences),
+            preferences: f.preferences)
+        let cd = try f.propose(c, d)
+        _ = try f.service.review(
+            f.service.prepareReview(proposalID: cd.id, accept: true, preferences: f.preferences),
+            preferences: f.preferences)
+        let snapshot = try f.service.snapshot()
+        try f.tracking.delete(trackID: c.trackID)
+
+        XCTAssertThrowsError(try f.service.undo(proposal: acceptedAB, snapshot: snapshot, preferences: f.preferences))
+        XCTAssertEqual(try f.features.identityProposals(status: .accepted).count, 2)
+        XCTAssertFalse(try f.features.crossCameraIdentityAudit().contains { $0.action == .undone })
+        XCTAssertEqual(try f.features.crossCameraIdentityAssignments(), snapshot.assignments)
+    }
+
+    func testUndoRejectsChangedAcceptedEdgeEvenWhenAssignmentsAreUnchanged() throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let a = try f.track(), b = try f.track(), c = try f.track(), d = try f.track()
+        let ab = try f.propose(a, b)
+        let acceptedAB = try f.service.review(
+            f.service.prepareReview(proposalID: ab.id, accept: true, preferences: f.preferences),
+            preferences: f.preferences)
+        let cd = try f.propose(c, d)
+        let acceptedCD = try f.service.review(
+            f.service.prepareReview(proposalID: cd.id, accept: true, preferences: f.preferences),
+            preferences: f.preferences)
+        let snapshot = try f.service.snapshot()
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(f.root.appendingPathComponent("features.sqlite").path, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        let sql = "UPDATE cross_camera_identity_proposals SET category='vehicle' WHERE id='\(acceptedCD.id.uuidString)'"
+        XCTAssertEqual(sqlite3_exec(db, sql, nil, nil, nil), SQLITE_OK)
+
+        XCTAssertThrowsError(try f.service.undo(proposal: acceptedAB, snapshot: snapshot, preferences: f.preferences)) {
+            guard case CameraFeatureStoreError.identityReviewStale = $0 else {
+                return XCTFail("Unexpected error: \($0)")
+            }
+        }
+        XCTAssertEqual(try f.features.crossCameraIdentityAssignments(), snapshot.assignments)
+        XCTAssertFalse(try f.features.crossCameraIdentityAudit().contains { $0.action == .undone })
+    }
+
+    func testReviewRejectsChangesOutsidePreviouslyComparedGraph() throws {
+        for change in [
+            "UPDATE cross_camera_identity_proposals SET cosine_distance=0.2 WHERE id='%@'",
+            "UPDATE cross_camera_identities SET created_at=created_at+1",
+            "UPDATE cross_camera_identity_links SET linked_at=linked_at+1",
+            "UPDATE cross_camera_identity_audit SET occurred_at=occurred_at+1"
+        ] {
+            let f = try Fixture()
+            defer { try? FileManager.default.removeItem(at: f.root) }
+            let a = try f.track(), b = try f.track(), c = try f.track()
+            let ab = try f.propose(a, b)
+            _ = try f.service.review(
+                f.service.prepareReview(proposalID: ab.id, accept: true, preferences: f.preferences),
+                preferences: f.preferences)
+            let bc = try f.propose(b, c)
+            let prepared = try f.service.prepareReview(proposalID: bc.id, accept: true, preferences: f.preferences)
+            var db: OpaquePointer?
+            XCTAssertEqual(sqlite3_open(f.root.appendingPathComponent("features.sqlite").path, &db), SQLITE_OK)
+            defer { sqlite3_close(db) }
+            let sql = change.replacingOccurrences(of: "%@", with: ab.id.uuidString)
+            XCTAssertEqual(sqlite3_exec(db, sql, nil, nil, nil), SQLITE_OK)
+            XCTAssertThrowsError(try f.service.review(prepared, preferences: f.preferences)) {
+                guard case CameraFeatureStoreError.identityReviewStale = $0 else {
+                    return XCTFail("Unexpected error: \($0)")
+                }
+            }
+            XCTAssertEqual(try f.features.identityProposals().map(\.id), [bc.id])
+            XCTAssertNil(try f.features.crossCameraIdentityID(for: c.trackID))
+        }
+    }
+
+    func testUndoRejectsUnrelatedPendingProposalChange() throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let a = try f.track(), b = try f.track(), c = try f.track(), d = try f.track()
+        let ab = try f.propose(a, b)
+        let accepted = try f.service.review(
+            f.service.prepareReview(proposalID: ab.id, accept: true, preferences: f.preferences),
+            preferences: f.preferences)
+        let pending = try f.propose(c, d)
+        let snapshot = try f.service.snapshot()
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(f.root.appendingPathComponent("features.sqlite").path, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        let sql = "UPDATE cross_camera_identity_proposals SET cosine_distance=0.2 WHERE id='\(pending.id.uuidString)'"
+        XCTAssertEqual(sqlite3_exec(db, sql, nil, nil, nil), SQLITE_OK)
+
+        XCTAssertThrowsError(try f.service.undo(proposal: accepted, snapshot: snapshot, preferences: f.preferences)) {
+            guard case CameraFeatureStoreError.identityReviewStale = $0 else {
+                return XCTFail("Unexpected error: \($0)")
+            }
+        }
+        XCTAssertEqual(try f.features.crossCameraIdentityAssignments(), snapshot.assignments)
+        XCTAssertFalse(try f.features.crossCameraIdentityAudit().contains { $0.action == .undone })
+    }
+
+    func testReviewSnapshotIncludesProposalsBeyondUIPage() throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let proposal = try f.propose(f.track(), f.track())
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(f.root.appendingPathComponent("features.sqlite").path, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        var oldestID = UUID()
+        for index in 0..<201 {
+            let id = UUID()
+            oldestID = id
+            let sql = """
+                INSERT INTO cross_camera_identity_proposals
+                    (id, track_a, track_b, category, cosine_distance, status, created_at)
+                VALUES ('\(id.uuidString)', '\(UUID().uuidString)', '\(UUID().uuidString)',
+                        'person', 0.1, 'pending', \(-index - 1))
+                """
+            XCTAssertEqual(sqlite3_exec(db, sql, nil, nil, nil), SQLITE_OK)
+        }
+        let snapshot = try f.service.snapshot()
+        XCTAssertEqual(snapshot.proposals.count, 200)
+        XCTAssertFalse(snapshot.proposals.contains { $0.id == oldestID })
+        let prepared = try f.service.prepareReview(proposalID: proposal.id, accept: false, preferences: f.preferences)
+        let sql = "UPDATE cross_camera_identity_proposals SET cosine_distance=0.2 WHERE id='\(oldestID.uuidString)'"
+        XCTAssertEqual(sqlite3_exec(db, sql, nil, nil, nil), SQLITE_OK)
+        XCTAssertThrowsError(try f.service.review(prepared, preferences: f.preferences)) {
+            guard case CameraFeatureStoreError.identityReviewStale = $0 else {
+                return XCTFail("Unexpected error: \($0)")
+            }
+        }
+        XCTAssertEqual(try f.features.crossCameraIdentityAudit().map(\.action), [.proposed])
+    }
+
+    func testUndoRollsBackGraphWhenAuditWriteFails() throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let proposal = try f.propose(f.track(), f.track())
+        let accepted = try f.service.review(
+            f.service.prepareReview(proposalID: proposal.id, accept: true, preferences: f.preferences),
+            preferences: f.preferences)
+        let snapshot = try f.service.snapshot()
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(f.root.appendingPathComponent("features.sqlite").path, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        let sql = """
+            CREATE TRIGGER fail_undo_audit BEFORE INSERT ON cross_camera_identity_audit
+            WHEN NEW.action='undone' BEGIN SELECT RAISE(ABORT, 'injected failure'); END
+            """
+        XCTAssertEqual(sqlite3_exec(db, sql, nil, nil, nil), SQLITE_OK)
+
+        XCTAssertThrowsError(try f.service.undo(proposal: accepted, snapshot: snapshot, preferences: f.preferences))
+        XCTAssertEqual(try f.features.crossCameraIdentityAssignments(), snapshot.assignments)
+        XCTAssertEqual(try f.features.identityProposals(status: .accepted).map(\.id), [proposal.id])
+        XCTAssertFalse(try f.features.crossCameraIdentityAudit().contains { $0.action == .undone })
     }
 
     func testPrepareAndVerifyFailForDeletedRelatedTrack() throws {

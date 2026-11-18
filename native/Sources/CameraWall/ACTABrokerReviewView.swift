@@ -25,7 +25,7 @@ enum ACTABrokerReviewRendering {
 @MainActor
 final class ACTABrokerReviewController: ObservableObject, Identifiable {
     let review: ACTABrokerReview
-    var id: ObjectIdentifier { ObjectIdentifier(review.handle) }
+    nonisolated let id: ObjectIdentifier
     @Published var reviewedAll = false
     @Published private(set) var resolving = false
     private let broker: ACTALocalActionBroker
@@ -40,6 +40,7 @@ final class ACTABrokerReviewController: ObservableObject, Identifiable {
         self.operatorKey = operatorKey
         self.session = session
         self.review = review
+        self.id = ObjectIdentifier(review.handle)
         self.isCurrent = isCurrent
     }
 

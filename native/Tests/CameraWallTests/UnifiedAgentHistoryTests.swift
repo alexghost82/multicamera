@@ -121,8 +121,9 @@ final class UnifiedAgentHistoryTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .mlxInProcess, preferredLanguage: .ru), localVLM: LocalVLMClient(model: model, workload: .interactive), agentTrace: { FileHandle.standardError.write(Data(("AGENT_TRACE " + $0 + "\n").utf8)) })
         let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store)
+        let (broker, session) = try await makeInspectionTestSession(store: store, threadID: "default")
         let started = Date()
-        let answer = await coordinator.askACTAChatAgent(question: "Проверь историю за всё время и расскажи, что происходило на всех камерах. Отдельно по каждой камере.", cameraNames: Dictionary(uniqueKeysWithValues: scans.map { ($0.cameraID, $0.cameraName) }))
+        let answer = await coordinator.askACTAChatAgent(question: "Проверь историю за всё время и расскажи, что происходило на всех камерах. Отдельно по каждой камере.", cameraNames: Dictionary(uniqueKeysWithValues: scans.map { ($0.cameraID, $0.cameraName) }), broker: broker, brokerSession: session)
         print("REAL_AGENT_QA elapsed=\(Date().timeIntervalSince(started)) sources=\(answer.evidenceReferences.count) answer=\(answer.answerMarkdown)")
         XCTAssertGreaterThan(answer.confidence, 0, answer.answerMarkdown)
         for scan in scans { XCTAssertTrue(answer.answerMarkdown.contains(scan.cameraName), answer.answerMarkdown) }
@@ -130,7 +131,7 @@ final class UnifiedAgentHistoryTests: XCTestCase {
         XCTAssertTrue(answer.answerMarkdown.lowercased().contains("велосип"), answer.answerMarkdown)
         XCTAssertFalse(answer.evidenceReferences.isEmpty)
         XCTAssertEqual(try store.loadACTAChatMessages(threadID: "default").count, 2)
-        let followUp = await coordinator.askACTAChatAgent(question: "Какого цвета был автомобиль у входа и когда его заметили?", cameraNames: Dictionary(uniqueKeysWithValues: scans.map { ($0.cameraID, $0.cameraName) }))
+        let followUp = await coordinator.askACTAChatAgent(question: "Какого цвета был автомобиль у входа и когда его заметили?", cameraNames: Dictionary(uniqueKeysWithValues: scans.map { ($0.cameraID, $0.cameraName) }), broker: broker, brokerSession: session)
         print("REAL_AGENT_FOLLOWUP sources=\(followUp.evidenceReferences.count) answer=\(followUp.answerMarkdown)")
         XCTAssertTrue(followUp.answerMarkdown.lowercased().contains("крас"), followUp.answerMarkdown)
         XCTAssertFalse(followUp.evidenceReferences.isEmpty)
@@ -142,7 +143,8 @@ final class UnifiedAgentHistoryTests: XCTestCase {
         let liveID = UUID()
         let mixed = await coordinator.askACTAChatAgent(question: "Что видно сейчас на текущем кадре и какого цвета автомобиль был у входа в сохранённой истории?",
             liveFrames: [ACTALiveCameraFrame(cameraID: liveID, cameraName: "Текущая камера", jpegData: image)],
-            cameraNames: Dictionary(uniqueKeysWithValues: scans.map { ($0.cameraID, $0.cameraName) } + [(liveID, "Текущая камера")]))
+            cameraNames: Dictionary(uniqueKeysWithValues: scans.map { ($0.cameraID, $0.cameraName) } + [(liveID, "Текущая камера")]),
+            broker: broker, brokerSession: session)
         print("REAL_AGENT_MIXED sources=\(mixed.evidenceReferences.count) answer=\(mixed.answerMarkdown)")
         XCTAssertTrue((mixed.answerMarkdown.localizedCaseInsensitiveContains("автобус") || mixed.answerMarkdown.localizedCaseInsensitiveContains("электробус")), mixed.answerMarkdown)
         XCTAssertTrue(mixed.answerMarkdown.localizedCaseInsensitiveContains("крас"), mixed.answerMarkdown)
@@ -163,7 +165,8 @@ final class UnifiedAgentHistoryTests: XCTestCase {
         coordinator.updateOperationalMemorySnapshot(snapshot)
         let start = Date()
         let threadID = "real-history-qa-" + UUID().uuidString
-        let answer = await coordinator.askACTAChatAgent(question: "Проверь историю за всё время и расскажи, что вообще происходило на всех камерах.", threadID: threadID)
+        let (broker, session) = try await makeInspectionTestSession(store: store, threadID: threadID)
+        let answer = await coordinator.askACTAChatAgent(question: "Проверь историю за всё время и расскажи, что вообще происходило на всех камерах.", threadID: threadID, broker: broker, brokerSession: session)
         let elapsed = Date().timeIntervalSince(start)
         try JSONEncoder().encode(answer).write(to: root.appendingPathComponent("verified-answer.json"), options: .atomic)
         print("PRIVATE_HISTORY_QA elapsed=\(elapsed) citedRecords=\(answer.evidenceReferences.count) citedCameras=\(Set(answer.evidenceReferences.compactMap(\.cameraID)).count) answerChars=\(answer.answerMarkdown.count)")

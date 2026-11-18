@@ -339,6 +339,7 @@ final class CameraMissionTests: XCTestCase {
         XCTAssertFalse(html.contains("<img"))
         XCTAssertFalse(html.localizedCaseInsensitiveContains("data:image"))
         XCTAssertFalse(html.contains("<script"))
+        XCTAssertTrue(html.contains("default-src 'none'; style-src 'unsafe-inline'"))
     }
 
     func testMissionPDFContainsLocalTextAndUsesPrivatePermissions() throws {

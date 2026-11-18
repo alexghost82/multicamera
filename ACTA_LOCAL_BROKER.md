@@ -1,9 +1,11 @@
-# Local action broker (not connected)
+# Local action broker (partial integration)
 
-`ACTALocalActionBroker` is an isolated opt-in foundation, not production
-authorization. Existing chat, voice, GUI and scheduled work still use their
-current paths; direct domain calls and the legacy shared registry are not
-protected by this broker.
+`ACTALocalActionBroker` is connected to local chat and voice inspections and
+to the model-requested `canvas.set_presentation`, `canvas.set_filter`,
+`canvas.set_arrange_mode`, `canvas.select_cameras` and `analysis.set_section` actions,
+and to a minimal read-only `camera.list`. Other model-requested
+registry mutations and legacy action confirmations are rejected. Direct GUI
+and domain calls and scheduled work are not protected by this broker.
 
 The intended UX is that model-requested inspections run only in a scoped local
 session, while **every model-requested mutation needs operator approval**.
@@ -28,13 +30,11 @@ every possible secret; the view must remain private and the host must not log,
 persist or send its review to the model. Review approval does not prove a human
 saw the display.
 
-**Integration blocker:** the existing production GUI and legacy confirmation
-paths do not use this component or broker; they expose only redacted details.
-Connecting only this view would leave shared-registry and legacy identity paths
-able to bypass it. Production integration must migrate all model execution and
-confirmation paths together, validate inspection output privacy, and retain
-trusted classifications and domain-level freshness checks. Approval of
-parameters alone is not a state snapshot.
+**Integration limitation:** local sessions currently receive named inspection
+capabilities for all retained cameras, not an operator-selected camera subset.
+The review component is used for these window-local actions only. Remaining actions need
+their own authorized integration, privacy review and domain-level freshness
+checks. Approval of parameters alone is not a state snapshot.
 
 Capabilities are not an OS security boundary. Closing a session revokes future
 work; it cannot undo an operation already started. Reviews are in-memory and

@@ -1,4 +1,13 @@
 "Switch interface language to Russian" = "Switch interface language to Russian";
+"UNAVAILABLE: No unique active camera view." = "UNAVAILABLE: No unique active camera view.";
+"UNAVAILABLE: Dictation is starting or recording." = "UNAVAILABLE: Dictation is starting or recording.";
+"INVALID_ARGUMENT: Provide a camera and boolean favorite." = "INVALID_ARGUMENT: Provide a camera and boolean favorite.";
+"UNAVAILABLE: Favorite preference cannot be safely reviewed." = "UNAVAILABLE: Favorite preference cannot be safely reviewed.";
+"UNAVAILABLE: Camera is missing or ambiguous." = "UNAVAILABLE: Camera is missing or ambiguous.";
+"UNAVAILABLE: Camera location inventory is unavailable." = "UNAVAILABLE: Camera location inventory is unavailable.";
+"INVALID_ARGUMENT: Location is not an enabled camera group." = "INVALID_ARGUMENT: Location is not an enabled camera group.";
+"UNAVAILABLE: No unique active camera view or valid enabled-camera inventory." = "UNAVAILABLE: No unique active camera view or valid enabled-camera inventory.";
+"INVALID_ARGUMENT: Camera IDs must be currently enabled." = "INVALID_ARGUMENT: Camera IDs must be currently enabled.";
 "Switch interface language to English" = "Switch interface language to English";
 "Quit CameraWall" = "Quit CameraWall";
 "Edit" = "Edit";
@@ -707,6 +716,9 @@
 "Complete review" = "Complete review";
 "Exact review uses escaped Unicode; no characters are omitted." = "Exact review uses escaped Unicode; no characters are omitted.";
 "I reviewed the complete request" = "I reviewed the complete request";
+"Historical proposals cannot be reviewed safely. Create a new request." = "Historical proposals cannot be reviewed safely. Create a new request.";
+"This historical proposal cannot be reviewed safely. Create a new request." = "This historical proposal cannot be reviewed safely. Create a new request.";
+"UNAVAILABLE: No unique active security center." = "UNAVAILABLE: No unique active security center.";
 "Confirm" = "Confirm";
 "Reject" = "Reject";
 "REVIEW_TOO_LARGE: Parameters exceed the review limit." = "REVIEW_TOO_LARGE: Parameters exceed the review limit.";

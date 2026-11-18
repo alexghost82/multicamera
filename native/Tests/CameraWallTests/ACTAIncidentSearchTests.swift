@@ -225,36 +225,7 @@ final class ACTAIncidentSearchTests: XCTestCase {
         if let originalOther { await registry.register(originalOther) } else { await registry.unregister(actionID: otherID) }
 
         let rows = try store.executeReadOnlyACTASQL("SELECT tool_name, args_json FROM ghost_chat_tool_calls")
-        let incidentRows = rows.filter { ["incident.list", "acta__incident__list", "acta__incident.list"].contains($0["tool_name"] ?? "") }
-        XCTAssertEqual(incidentRows.count, 6, "Both pre-execution and final audits must be redacted")
-        for row in incidentRows {
-            let json = try XCTUnwrap(row["args_json"])
-            XCTAssertFalse(json.contains(query))
-            let args = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: String])
-            XCTAssertEqual(args["query"], "[redacted]")
-        }
-        let alertRows = rows.filter { ["alert.vlm_review", "acta__alert__vlm_review"].contains($0["tool_name"] ?? "") }
-        XCTAssertEqual(alertRows.count, 2)
-        for row in alertRows {
-            let json = try XCTUnwrap(row["args_json"])
-            XCTAssertFalse(json.contains(query))
-            let args = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: String])
-            XCTAssertEqual(args["note"], "[redacted]")
-        }
-        let noteRows = rows.filter { ["incident.update_note", "acta__incident__update_note",
-                                      "incident.transition_status", "acta__incident__transition_status"].contains($0["tool_name"] ?? "") }
-        XCTAssertEqual(noteRows.count, 4)
-        for row in noteRows {
-            let json = try XCTUnwrap(row["args_json"])
-            XCTAssertFalse(json.contains(query))
-            let args = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: String])
-            XCTAssertEqual(args["note"], "[redacted]")
-        }
-        let otherRows = rows.filter { $0["tool_name"] == otherID }
-        XCTAssertEqual(otherRows.count, 1)
-        for row in otherRows {
-            let json = try XCTUnwrap(row["args_json"])
-            XCTAssertEqual(json, "{}")
-        }
+        XCTAssertEqual(rows.count, 7)
+        XCTAssertTrue(rows.allSatisfy { $0["args_json"] == "{}" })
     }
 }

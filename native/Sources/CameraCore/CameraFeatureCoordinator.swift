@@ -5,6 +5,12 @@ public enum OpenAlertStateError: Error {
     case featureDisabled
 }
 
+public struct DescriptionJobPolicySnapshot: Sendable {
+    public let job: DescriptionJobRevision
+    fileprivate let preferences: CameraFeaturePreferences
+    fileprivate let policyRevision: String
+}
+
 public final class CameraFeatureCoordinator: @unchecked Sendable {
     private let preferencesURL: URL
     private let databaseURL: URL
@@ -231,6 +237,47 @@ public final class CameraFeatureCoordinator: @unchecked Sendable {
             let preferences = try loadPreferences()
             try openStore().retryFailedJob(id: id, preferences: preferences, at: time)
         }
+    }
+
+    /// Storage primitive only; the caller must authorize before reading or retrying.
+    public func descriptionJobSnapshot(id: UUID) throws -> DescriptionJobPolicySnapshot {
+        try locked {
+            try CameraFeaturePreferencesStore.withLockedSnapshot(from: preferencesURL) { policy in
+                guard let revision = policy.revision, policy.preferences == (try loadPreferences()) else {
+                    throw CameraFeatureStoreError.descriptionJobStale
+                }
+                guard policy.preferences.enabledFeatures.contains(.visionDescriptions) else {
+                    throw CameraFeatureStoreError.featureDisabled(.visionDescriptions)
+                }
+                let job = try openStore().descriptionJobRevision(id: id)
+                guard job.status == .failed else { throw CameraFeatureStoreError.jobNotFailed(id) }
+                return DescriptionJobPolicySnapshot(job: job, preferences: policy.preferences, policyRevision: revision)
+            }
+        }
+    }
+
+    /// An operation ID supplied before calling allows reconciliation after an uncertain commit.
+    public func retryDescriptionJob(
+        snapshot: DescriptionJobPolicySnapshot, operationID: UUID, at time: Date = Date()
+    ) throws -> DescriptionRetryReceipt {
+        try locked {
+            try CameraFeaturePreferencesStore.withLockedSnapshot(from: preferencesURL) { policy in
+                guard policy.revision == snapshot.policyRevision,
+                      policy.preferences == snapshot.preferences,
+                      policy.preferences == (try loadPreferences()) else {
+                    throw CameraFeatureStoreError.descriptionJobStale
+                }
+                return try openStore().retryDescriptionJob(
+                    expected: snapshot.job, preferences: policy.preferences,
+                    operationID: operationID, at: time, beforeCommit: { try Task.checkCancellation() }
+                )
+            }
+        }
+    }
+
+    /// Authorization must also be checked by the caller before receipt readback.
+    public func hasDescriptionRetryReceipt(_ receipt: DescriptionRetryReceipt) throws -> Bool {
+        try locked { try openStore().hasDescriptionRetryReceipt(receipt) }
     }
 
     private func loadPreferences() throws -> CameraFeaturePreferences {

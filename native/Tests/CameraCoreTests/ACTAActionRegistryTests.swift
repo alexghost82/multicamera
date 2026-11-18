@@ -667,7 +667,7 @@ struct ACTAActionRegistryTests {
         var id = "test.snapshot"
         let title = "Snapshot"
         let description = "Fake snapshot action"
-        let classification = ACTAActionClassification.destructive
+        var classification: ACTAActionClassification { protected ? .destructive : .reversible }
         let parameters = [ACTAActionParameterSchema(name: "value", type: "string", description: "Fake value", isRequired: true)]
         let state: SnapshotState
         var latch: MutationLatch? = nil
@@ -703,6 +703,194 @@ struct ACTAActionRegistryTests {
         }
 
         func verify(parameters: [String: String], context: ACTAActionContext) async throws -> Bool { true }
+    }
+
+    struct CriticalOverrideAction: ACTAActionProtocol {
+        let id = "test.critical"
+        let title = "Critical action"
+        let description = "Fake critical action"
+        let classification: ACTAActionClassification
+        let parameters: [ACTAActionParameterSchema] = []
+        let state: SnapshotState
+
+        func requiresConfirmation(parameters: [String: String]) -> Bool { false }
+        func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
+            _ = await state.check(1)
+            return ACTAActionResult(actionID: id, success: true, summary: "executed")
+        }
+        func verify(parameters: [String: String], context: ACTAActionContext) async throws -> Bool { true }
+    }
+
+    @Test func criticalClassificationsCannotOptOutOfConfirmation() async throws {
+        for classification in [ACTAActionClassification.destructive, .securitySensitive] {
+            let state = SnapshotState()
+            let registry = ACTAActionRegistry()
+            await registry.register(CriticalOverrideAction(classification: classification, state: state))
+            let first = try await registry.execute(actionID: "test.critical", parameters: [:],
+                                                   context: ACTAActionContext(isConfirmed: true))
+            let second = try await registry.executeJSON(actionID: "test.critical", argumentsJSON: "{}")
+            #expect(first.requiresOperatorConfirmation)
+            #expect(second.requiresOperatorConfirmation)
+            #expect(await state.confirmedCalls == 0)
+            let approved = try await registry.confirmAndExecute(token: try #require(first.confirmationToken),
+                                                                 confirmed: true)
+            #expect(approved.success)
+            #expect(await state.confirmedCalls == 1)
+
+            let (protectedRegistry, authority) = ACTAActionRegistry.makeAuthorized()
+            #expect(await protectedRegistry.register(
+                CriticalOverrideAction(classification: classification, state: state), authority: authority))
+            let requester = try #require(await protectedRegistry.issuePrincipal(
+                authority: authority, actionIDs: ["test.critical"], canRequest: true, canReview: false))
+            let reviewer = try #require(await protectedRegistry.issuePrincipal(
+                authority: authority, actionIDs: ["test.critical"], canRequest: false, canReview: true))
+            let protected = try await protectedRegistry.execute(actionID: "test.critical", parameters: [:],
+                                                                principal: requester)
+            #expect(protected.requiresOperatorConfirmation)
+            #expect(await state.confirmedCalls == 1)
+            let result = try await protectedRegistry.confirmAndExecute(
+                token: try #require(protected.confirmationToken), confirmed: true, expectedActionID: "test.critical",
+                expectedParameters: [:], expectedThreadID: "default", expectedReviewTitle: protected.summary,
+                principal: reviewer)
+            #expect(result.success)
+            #expect(await state.confirmedCalls == 2)
+        }
+    }
+
+    @Test func authorizedCatalogueIsScopedRevocableAndDoesNotExposeActions() async throws {
+        let (registry, authority) = ACTAActionRegistry.makeAuthorized()
+        let (other, otherAuthority) = ACTAActionRegistry.makeAuthorized()
+        let state = SnapshotState()
+        #expect(await registry.register(ContextProbeAction(), authority: authority))
+        #expect(await registry.register(SnapshotAction(state: state), authority: authority))
+        let requester = try #require(await registry.issuePrincipal(
+            authority: authority, actionIDs: ["test.snapshot"], canRequest: true, canReview: false))
+        let reviewer = try #require(await registry.issuePrincipal(
+            authority: authority, actionIDs: ["test.snapshot"], canRequest: false, canReview: true))
+        let foreign = try #require(await other.issuePrincipal(
+            authority: otherAuthority, actionIDs: ["test.snapshot"], canRequest: true, canReview: true))
+        let catalogue = await registry.authorizedCatalog(principal: requester)
+        #expect(catalogue.map(\.id) == ["test.snapshot"])
+        #expect(catalogue.first?.parameters.first?.name == "value")
+        #expect(await registry.authorizedCatalog(principal: reviewer).isEmpty)
+        #expect(await registry.authorizedCatalog(principal: foreign).isEmpty)
+        #expect(await registry.action(for: "test.snapshot") == nil)
+        #expect(await registry.revoke(requester, authority: authority))
+        #expect(await registry.authorizedCatalog(principal: requester).isEmpty)
+    }
+
+    @Test func authorizedRegistryRejectsSpoofingAndCrossRegistryCapabilities() async throws {
+        let (registry, authority) = ACTAActionRegistry.makeAuthorized()
+        let (other, otherAuthority) = ACTAActionRegistry.makeAuthorized()
+        let state = SnapshotState()
+        await registry.register(SnapshotAction(state: state))
+        #expect(await registry.action(for: "test.snapshot") == nil)
+        #expect(await registry.allActions().isEmpty)
+        #expect(await registry.openAITools().isEmpty)
+        #expect(!(await registry.register(SnapshotAction(state: state), authority: otherAuthority)))
+        #expect(await registry.register(SnapshotAction(state: state), authority: authority))
+        let requester = try #require(await registry.issuePrincipal(
+            authority: authority, actionIDs: ["test.snapshot"], canRequest: true, canReview: false))
+        let foreign = try #require(await other.issuePrincipal(
+            authority: otherAuthority, actionIDs: ["test.snapshot"], canRequest: true, canReview: true))
+        let context = ACTAActionContext(threadID: "operator", initiator: "ui_direct", isConfirmed: true)
+        let unauthenticated = try await registry.execute(
+            actionID: "test.snapshot", parameters: ["value": "fake"], context: context)
+        let forgedJSON = try await registry.executeJSON(actionID: "test.snapshot",
+            argumentsJSON: #"{"value":"fake"}"#, context: context)
+        let wrongRegistry = try await registry.execute(
+            actionID: "test.snapshot", parameters: ["value": "fake"], context: context, principal: foreign)
+        let wrongAction = try await registry.execute(
+            actionID: "test.context", parameters: [:], context: context, principal: requester)
+        for result in [unauthenticated, forgedJSON, wrongRegistry, wrongAction] {
+            #expect(result.error?.hasPrefix("AUTHORIZATION_DENIED:") == true)
+        }
+        #expect(await state.confirmedCalls == 0)
+    }
+
+    @Test func authorizedReviewRequiresScopedCapabilityAndExactIntent() async throws {
+        let (registry, authority) = ACTAActionRegistry.makeAuthorized()
+        let state = SnapshotState()
+        #expect(await registry.register(SnapshotAction(state: state), authority: authority))
+        let requester = try #require(await registry.issuePrincipal(
+            authority: authority, actionIDs: ["test.snapshot"], canRequest: true, canReview: false))
+        let reviewer = try #require(await registry.issuePrincipal(
+            authority: authority, actionIDs: ["test.snapshot"], canRequest: false, canReview: true))
+        let args = ["value": "fake"]
+        let proposal = try await registry.executeJSON(actionID: "test.snapshot", argumentsJSON: #"{"value":"fake"}"#,
+                                                      principal: requester)
+        let token = try #require(proposal.confirmationToken)
+        let legacy = try await registry.confirmAndExecute(token: token, confirmed: true)
+        let forged = try await registry.confirmAndExecute(token: token, confirmed: true,
+            expectedActionID: "test.snapshot", expectedParameters: args, expectedThreadID: "default",
+            expectedReviewTitle: proposal.summary, principal: requester)
+        let mismatch = try await registry.confirmAndExecute(token: token, confirmed: true,
+            expectedActionID: "test.snapshot", expectedParameters: args, expectedThreadID: "default",
+            expectedReviewTitle: "different", principal: reviewer)
+        #expect(legacy.error?.hasPrefix("AUTHORIZATION_DENIED:") == true)
+        #expect(forged.error?.hasPrefix("AUTHORIZATION_DENIED:") == true)
+        #expect(mismatch.error?.hasPrefix("CONFIRMATION_MISMATCH:") == true)
+        #expect(await state.confirmedCalls == 0)
+        let approved = try await registry.confirmAndExecute(token: token, confirmed: true,
+            expectedActionID: "test.snapshot", expectedParameters: args, expectedThreadID: "default",
+            expectedReviewTitle: proposal.summary, principal: reviewer)
+        #expect(approved.success)
+        #expect(await state.confirmedCalls == 1)
+        let replay = try await registry.confirmAndExecute(token: token, confirmed: true,
+            expectedActionID: "test.snapshot", expectedParameters: args, expectedThreadID: "default",
+            expectedReviewTitle: proposal.summary, principal: reviewer)
+        #expect(!replay.success)
+    }
+
+    @Test func revocationDuringPreparationCannotIssueReview() async throws {
+        for useJSON in [false, true] {
+            let (registry, authority) = ACTAActionRegistry.makeAuthorized()
+            let state = SnapshotState()
+            let latch = MutationLatch()
+            #expect(await registry.register(SnapshotAction(state: state, latch: latch), authority: authority))
+            let requester = try #require(await registry.issuePrincipal(
+                authority: authority, actionIDs: ["test.snapshot"], canRequest: true, canReview: false))
+            let task = Task {
+                if useJSON {
+                    return try await registry.executeJSON(actionID: "test.snapshot",
+                        argumentsJSON: #"{"value":"fake"}"#, principal: requester)
+                }
+                return try await registry.execute(actionID: "test.snapshot",
+                    parameters: ["value": "fake"], principal: requester)
+            }
+            await latch.waitUntilStarted()
+            #expect(await registry.revoke(requester, authority: authority))
+            await latch.release()
+            let result = try await task.value
+            #expect(result.error?.hasPrefix("AUTHORIZATION_DENIED:") == true)
+            #expect(!result.requiresOperatorConfirmation)
+            #expect(result.confirmationToken == nil)
+            #expect(await state.confirmedCalls == 0)
+        }
+    }
+
+    @Test func revocationInvalidatesPendingConfirmation() async throws {
+        let (registry, authority) = ACTAActionRegistry.makeAuthorized()
+        let state = SnapshotState()
+        #expect(await registry.register(SnapshotAction(state: state), authority: authority))
+        let next = try #require(await registry.issuePrincipal(
+            authority: authority, actionIDs: ["test.snapshot"], canRequest: true, canReview: false))
+        let reviewer = try #require(await registry.issuePrincipal(
+            authority: authority, actionIDs: ["test.snapshot"], canRequest: false, canReview: true))
+        let proposal = try await registry.execute(actionID: "test.snapshot", parameters: ["value": "fake"], principal: next)
+        #expect(await registry.revoke(reviewer, authority: authority))
+        let revokedReview = try await registry.confirmAndExecute(token: try #require(proposal.confirmationToken), confirmed: true,
+            expectedActionID: "test.snapshot", expectedParameters: ["value": "fake"], expectedThreadID: "default",
+            expectedReviewTitle: proposal.summary, principal: reviewer)
+        #expect(revokedReview.error?.hasPrefix("AUTHORIZATION_DENIED:") == true)
+        let replacementReviewer = try #require(await registry.issuePrincipal(
+            authority: authority, actionIDs: ["test.snapshot"], canRequest: false, canReview: true))
+        #expect(await registry.revoke(next, authority: authority))
+        let rejected = try await registry.confirmAndExecute(token: try #require(proposal.confirmationToken), confirmed: true,
+            expectedActionID: "test.snapshot", expectedParameters: ["value": "fake"], expectedThreadID: "default",
+            expectedReviewTitle: proposal.summary, principal: replacementReviewer)
+        #expect(!rejected.success)
+        #expect(await state.confirmedCalls == 0)
     }
 
     @Test func preparedSnapshotsBindToTokenAndReviewedContext() async throws {

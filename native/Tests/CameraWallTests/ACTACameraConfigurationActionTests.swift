@@ -6,7 +6,7 @@ import XCTest
 @MainActor
 final class ACTACameraConfigurationActionTests: XCTestCase {
     private func fixture() throws -> (URL, WallModel, TestCameraCredentials, Camera) {
-        let root = FileManager.default.temporaryDirectory
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
             .appendingPathComponent(".camera-action-fixture-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         let camera = Camera(name: "Entrance", location: "Old location", substream: "rtsp://127.0.0.1/original?channel=1", enabled: false)
@@ -164,6 +164,129 @@ final class ACTACameraConfigurationActionTests: XCTestCase {
         XCTAssertEqual(credentials.removeCount, 0)
     }
 
+    func testEditDisabledSourceIDsThroughRegisteredTypedActionsAndAudit() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
+        let (root, model, credentials, _) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        var local = Camera(name: "Local", location: "Room", substream: "", enabled: false,
+                           localDeviceID: "device-old", yoloEnabled: true, aiChatEnabled: false)
+        var screen = Camera(name: "Screen", substream: "", enabled: false, screenDisplayID: "10")
+        try model.saveLocalCamera(local, startAfterSave: false)
+        try model.saveScreenCamera(screen, startAfterSave: false)
+        credentials.values[local.id] = Credentials(username: "fixture-local", password: "fixture-secret")
+        credentials.readCount = 0
+        let registry = ACTAActionRegistry()
+        await registerAllWallActions(registry: registry, model: model)
+        let store = try LocalTrackingStore(url: root.appendingPathComponent("action-audit.sqlite"))
+        let coordinator = ACTAAnalyticsCoordinator(aiClient: IsolatedWallFixtureSupport.client(), trackingStore: store)
+        let call = ACTAAgentFunctionCall(callID: "edit", name: "acta__camera__edit",
+            argumentsJSON: #"{"camera_id":"\#(local.id.uuidString)","device_id":"device-new","name":"Updated"}"#)
+        let output = await coordinator.executeModelGeneratedAgentTool(call, threadID: "source-edit",
+            requestToolNames: [call.name], registry: registry)
+        let result = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(output.outputJSON.utf8)) as? [String: Any])
+        XCTAssertEqual(result["action_success"] as? Bool, true)
+        XCTAssertEqual(result["action_verified"] as? Bool, true)
+        XCTAssertEqual(result["connection_verified"] as? Bool, false)
+        local.localDeviceID = "device-new"
+        local.name = "Updated"
+        XCTAssertEqual(try ConfigurationStore.load(from: model.configURL).cameras.first { $0.id == local.id }, local)
+        let screenResult = try await registry.executeJSON(actionID: "camera.edit",
+            argumentsJSON: #"{"camera_id":"\#(screen.id.uuidString)","display_id":42}"#)
+        XCTAssertTrue(screenResult.success, screenResult.summary)
+        XCTAssertTrue(screenResult.verified)
+        screen.screenDisplayID = "42"
+        XCTAssertEqual(try ConfigurationStore.load(from: model.configURL).cameras.first { $0.id == screen.id }, screen)
+        XCTAssertEqual(credentials.values[local.id]?.password, "fixture-secret")
+        XCTAssertEqual(credentials.readCount, 0)
+        XCTAssertEqual(credentials.saveCount, 0)
+        XCTAssertEqual(credentials.removeCount, 0)
+        XCTAssertFalse(model.running)
+        XCTAssertTrue(model.tiles.values.allSatisfy { $0.session == nil })
+        let audit = try store.executeReadOnlyACTASQL("SELECT tool_name, args_json FROM ghost_chat_tool_calls")
+        XCTAssertTrue(audit.contains { $0["tool_name"] == "camera.edit" && ($0["args_json"] ?? "").contains("device-new") })
+        XCTAssertFalse(audit.contains { ($0["args_json"] ?? "").contains("fixture-secret") })
+        let unaudited = ACTAAnalyticsCoordinator(aiClient: IsolatedWallFixtureSupport.client())
+        let rejected = await unaudited.executeModelGeneratedAgentTool(
+            ACTAAgentFunctionCall(callID: "no-audit", name: "acta__camera__edit",
+                argumentsJSON: #"{"camera_id":"\#(local.id.uuidString)","device_id":"not-saved"}"#),
+            threadID: "source-edit", requestToolNames: ["acta__camera__edit"], registry: registry)
+        let failure = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(rejected.outputJSON.utf8)) as? [String: Any])
+        XCTAssertEqual(failure["action_success"] as? Bool, false)
+        XCTAssertEqual(try ConfigurationStore.load(from: model.configURL).cameras.first { $0.id == local.id }, local)
+    }
+
+    func testSourceIDEditsRejectInvalidTypesDuplicatesAndActiveWallWithoutWriting() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
+        let (root, model, credentials, network) = try fixture()
+        defer { model.running = false; model.connecting = false; model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let local = Camera(name: "Local", substream: "", enabled: false, localDeviceID: "device-a")
+        let duplicate = Camera(name: "Other", substream: "", enabled: false, localDeviceID: "device-b")
+        let screen = Camera(name: "Screen", substream: "", enabled: false, screenDisplayID: "10")
+        let enabled = Camera(name: "Enabled", substream: "", enabled: true, screenDisplayID: "20")
+        for camera in [local, duplicate, screen, enabled] {
+            try model.saveCameraConfigurationChecked(camera)
+        }
+        let registry = ACTAActionRegistry()
+        await registerAllWallActions(registry: registry, model: model)
+        let bytes = try Data(contentsOf: model.configURL)
+        let cases: [[String: String]] = [
+            ["camera_id": local.id.uuidString, "device_id": " "],
+            ["camera_id": local.id.uuidString, "device_id": "device-b"],
+            ["camera_id": screen.id.uuidString, "display_id": "0"],
+            ["camera_id": screen.id.uuidString, "display_id": "4294967296"],
+            ["camera_id": screen.id.uuidString, "display_id": "20"],
+            ["camera_id": enabled.id.uuidString, "display_id": "21"],
+            ["camera_id": local.id.uuidString, "display_id": "21"],
+            ["camera_id": screen.id.uuidString, "device_id": "device-c"],
+            ["camera_id": network.id.uuidString, "device_id": "device-c"],
+            ["camera_id": local.id.uuidString, "device_id": "device-c", "display_id": "21"],
+            ["camera_id": local.id.uuidString, "device_id": "device-c", "url": "rtsp://example.test/live"]
+        ]
+        for arguments in cases {
+            let result = try await registry.execute(actionID: "camera.edit", parameters: arguments)
+            XCTAssertFalse(result.success, "\(arguments): \(result.summary)")
+            XCTAssertFalse(result.requiresOperatorConfirmation)
+            XCTAssertEqual(try Data(contentsOf: model.configURL), bytes)
+        }
+        for raw in [
+            #"{"camera_id":"\#(screen.id.uuidString)","display_id":"42"}"#,
+            #"{"camera_id":"\#(screen.id.uuidString)","display_id":true}"#,
+            #"{"camera_id":"\#(local.id.uuidString)","device_id":42}"#
+        ] {
+            let result = try await registry.executeJSON(actionID: "camera.edit", argumentsJSON: raw)
+            XCTAssertFalse(result.success)
+            XCTAssertEqual(try Data(contentsOf: model.configURL), bytes)
+        }
+        for state in 0...1 {
+            model.running = state == 0
+            model.connecting = state == 1
+            let result = try await registry.execute(actionID: "camera.edit",
+                parameters: ["camera_id": local.id.uuidString, "device_id": "device-c"])
+            XCTAssertFalse(result.success)
+            XCTAssertEqual(try Data(contentsOf: model.configURL), bytes)
+        }
+        model.running = false
+        model.connecting = false
+        model.vlmBusy = true
+        let busy = try await registry.execute(actionID: "camera.edit",
+            parameters: ["camera_id": local.id.uuidString, "device_id": "device-c"])
+        XCTAssertFalse(busy.success)
+        XCTAssertEqual(try Data(contentsOf: model.configURL), bytes)
+        model.vlmBusy = false
+        var changed = try ConfigurationStore.load(from: model.configURL)
+        changed.cameras[0].name = "External change"
+        try ConfigurationStore.save(changed, to: model.configURL)
+        let externalBytes = try Data(contentsOf: model.configURL)
+        let stale = try await registry.execute(actionID: "camera.edit",
+            parameters: ["camera_id": local.id.uuidString, "device_id": "device-c"])
+        XCTAssertFalse(stale.success)
+        XCTAssertEqual(try Data(contentsOf: model.configURL), externalBytes)
+        XCTAssertEqual(credentials.saveCount, 0)
+        XCTAssertEqual(credentials.removeCount, 0)
+    }
+
     func testRemovalRequiresReviewAndChecksCredentialDeletion() async throws {
         let previous = IsolatedWallFixtureSupport.modelPreferences()
         defer { ModelSelectionRegistry.update(previous) }
@@ -216,11 +339,12 @@ final class ACTACameraConfigurationActionTests: XCTestCase {
 
 private final class TestCameraCredentials: CameraCredentialStore, @unchecked Sendable {
     var values: [UUID: Credentials] = [:]
+    var readCount = 0
     var saveCount = 0
     var removeCount = 0
     var failRemove = false
     var onRemove: (() throws -> Void)?
-    func read(_ id: UUID) throws -> Credentials? { values[id] }
+    func read(_ id: UUID) throws -> Credentials? { readCount += 1; return values[id] }
     func save(_ credentials: Credentials, for id: UUID) throws { saveCount += 1; values[id] = credentials }
     func remove(_ id: UUID) throws {
         removeCount += 1

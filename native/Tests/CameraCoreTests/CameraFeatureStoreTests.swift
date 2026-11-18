@@ -3,6 +3,41 @@ import SQLite3
 @testable import CameraCore
 
 final class CameraFeatureStoreTests: XCTestCase {
+    func testVersionSixJobsGainRevisionsAndRetryReceipts() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("features.sqlite3")
+        let jobID = UUID()
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(url.path, &db), SQLITE_OK)
+        let database = try XCTUnwrap(db)
+        let sql = """
+            CREATE TABLE feature_jobs (
+                id TEXT PRIMARY KEY NOT NULL, feature_id TEXT NOT NULL, camera_id TEXT,
+                status TEXT NOT NULL, attempts INTEGER NOT NULL, created_at REAL NOT NULL,
+                updated_at REAL NOT NULL, not_before REAL NOT NULL, payload_json TEXT,
+                result_json TEXT, last_error TEXT
+            );
+            INSERT INTO feature_jobs VALUES
+                ('\(jobID.uuidString)', 'visionDescriptions', NULL, 'failed', 1, 1, 1, 1, NULL, NULL, 'fixture');
+            PRAGMA user_version=6;
+            """
+        XCTAssertEqual(sqlite3_exec(database, sql, nil, nil, nil), SQLITE_OK)
+        XCTAssertEqual(sqlite3_close(database), SQLITE_OK)
+        let store = try CameraFeatureStore(url: url)
+        let revision = try store.descriptionJobRevision(id: jobID)
+        XCTAssertEqual(revision.status, .failed)
+        let receipt = try store.retryDescriptionJob(expected: revision,
+            preferences: CameraFeaturePreferences(enabledFeatures: [.visionDescriptions]),
+            operationID: UUID(), beforeCommit: {})
+        let reopened = try CameraFeatureStore(url: url)
+        XCTAssertTrue(try reopened.hasDescriptionRetryReceipt(receipt))
+        let updated = try reopened.descriptionJobRevision(id: jobID)
+        XCTAssertEqual(updated.status, .queued)
+        XCTAssertNotEqual(updated.revision, revision.revision)
+    }
+
     func testVersionFiveMigrationPreservesJobsActionsAndLegacyAcknowledgements() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -196,6 +231,41 @@ final class CameraFeatureStoreTests: XCTestCase {
         _ = try store.enqueue(featureID: .visionDescriptions, preferences: preferences)
         XCTAssertThrowsError(try store.retryFailedJob(id: failed.id, preferences: preferences))
         XCTAssertEqual(try store.jobs().first(where: { $0.id == failed.id })?.status, .failed)
+    }
+
+    func testDescriptionRetryRejectsStaleRevisionAndCommitsReceiptAtomically() throws {
+        let (store, directory, url) = try makeStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let preferences = CameraFeaturePreferences(enabledFeatures: [.visionDescriptions])
+        let job = try store.enqueue(featureID: .visionDescriptions, preferences: preferences)
+        _ = try store.claimNext(featureID: .visionDescriptions)
+        try store.fail(jobID: job.id, message: "Synthetic failure")
+        let reviewed = try store.descriptionJobRevision(id: job.id)
+        let other = try CameraFeatureStore(url: url)
+        try other.retryFailedJob(id: job.id, preferences: preferences)
+        _ = try other.claimNext(featureID: .visionDescriptions)
+        try other.fail(jobID: job.id, message: "Another failure")
+        let operation = UUID()
+        XCTAssertThrowsError(try store.retryDescriptionJob(
+            expected: reviewed, preferences: preferences, operationID: operation, beforeCommit: {}
+        ))
+        XCTAssertFalse(try store.hasDescriptionRetryReceipt(.init(jobID: job.id, operationID: operation)))
+        let current = try store.descriptionJobRevision(id: job.id)
+        var calls = 0
+        XCTAssertThrowsError(try store.retryDescriptionJob(
+            expected: current, preferences: preferences, operationID: operation, beforeCommit: {
+                calls += 1
+                if calls == 2 { throw CancellationError() }
+            }
+        ))
+        XCTAssertEqual(try store.descriptionJobRevision(id: job.id), current)
+        XCTAssertFalse(try other.hasDescriptionRetryReceipt(.init(jobID: job.id, operationID: operation)))
+        let receipt = try store.retryDescriptionJob(
+            expected: current, preferences: preferences, operationID: operation, beforeCommit: {}
+        )
+        let reopened = try CameraFeatureStore(url: url)
+        XCTAssertTrue(try reopened.hasDescriptionRetryReceipt(receipt))
+        XCTAssertEqual(try reopened.jobs(featureID: .visionDescriptions).first?.status, .queued)
     }
 
     func testJobsRequireFeatureOptInAndRespectPendingLimit() throws {

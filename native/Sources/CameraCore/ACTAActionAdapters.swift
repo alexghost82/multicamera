@@ -95,7 +95,7 @@ public struct SettingsGetSectionAction: ACTAActionProtocol {
 public struct SettingsUpdateSystemAction: ACTAActionProtocol {
     public let id = "settings.update_system"
     public let title = "Update System Settings"
-    public let description = "Updates general display and stream configuration (columns, detection threshold, FPS, ports)."
+    public let description = "Updates display and detection settings. Local relay ports and executable path are not supported."
     public let classification = ACTAActionClassification.reversible
     public let parameters = [
         ACTAActionParameterSchema(name: "columns", type: "integer", description: "Grid columns (1...16)"),
@@ -110,7 +110,23 @@ public struct SettingsUpdateSystemAction: ACTAActionProtocol {
         self.settingsProvider = settingsProvider
     }
 
+    public func validate(parameters: [String: String]) throws {
+        guard Set(parameters.keys).isSubset(of: Set(self.parameters.map(\.name))) else {
+            throw ConfigurationError.invalid("Unknown settings field.")
+        }
+        for key in ["columns", "detection_fps", "stale_threshold_ms"] {
+            if let value = parameters[key], Int(value) == nil {
+                throw ConfigurationError.invalid("Settings field requires an integer.")
+            }
+        }
+        if let value = parameters["detection_threshold"],
+           !(Double(value)?.isFinite ?? false) {
+            throw ConfigurationError.invalid("Settings field requires a finite number.")
+        }
+    }
+
     public func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
+        try validate(parameters: parameters)
         var config = try await settingsProvider.loadConfiguration()
         var changed: [String] = []
 
@@ -130,13 +146,14 @@ public struct SettingsUpdateSystemAction: ACTAActionProtocol {
             config.staleAfterMilliseconds = min(30000, max(200, stale))
             changed.append("staleAfterMs=\(config.staleAfterMilliseconds)")
         }
-
+        try config.validate()
         try await settingsProvider.saveConfiguration(config)
         let summary = "System settings updated: " + (changed.isEmpty ? "no changes" : changed.joined(separator: ", "))
         return ACTAActionResult(actionID: id, success: true, summary: summary, outputJSON: "{\"updated\": true}")
     }
 
     public func verify(parameters: [String: String], context: ACTAActionContext) async throws -> Bool {
+        try validate(parameters: parameters)
         let loaded = try await settingsProvider.loadConfiguration()
         if let colsStr = parameters["columns"], let cols = Int(colsStr), loaded.columns != min(16, max(1, cols)) {
             return false

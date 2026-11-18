@@ -23,8 +23,27 @@ private final class SnapshotActionClock: @unchecked Sendable {
 
 private actor FakeSnapshotFrames: ACTASnapshotFrameProvider {
     private var frame: ACTASnapshotFrame
-    init(_ frame: ACTASnapshotFrame) { self.frame = frame }
-    func captureFreshFrame(cameraID: UUID) async throws -> ACTASnapshotFrame { frame }
+    private var captures: [UUID: ACTASnapshotFrame] = [:]
+    private let afterCapture: @Sendable () -> Void
+    init(_ frame: ACTASnapshotFrame, afterCapture: @escaping @Sendable () -> Void = {}) {
+        self.frame = frame
+        self.afterCapture = afterCapture
+    }
+    func captureFreshFrame(cameraID: UUID) async throws -> ACTASnapshotFrame {
+        let captured = ACTASnapshotFrame(cameraID: frame.cameraID, frameID: UUID(),
+            capturedUptime: frame.capturedUptime, selectedUptime: frame.selectedUptime,
+            jpeg: Data([UInt8](frame.jpeg)))
+        captures[captured.frameID] = captured
+        afterCapture()
+        return captured
+    }
+    func isCaptureValid(_ captured: ACTASnapshotFrame) async throws -> Bool {
+        guard let original = captures[captured.frameID] else { return false }
+        return original.cameraID == captured.cameraID
+            && original.capturedUptime == captured.capturedUptime
+            && original.selectedUptime == captured.selectedUptime && original.jpeg == captured.jpeg
+    }
+    func capturedID() -> UUID? { captures.keys.first }
     func set(_ next: ACTASnapshotFrame) { frame = next }
 }
 
@@ -84,7 +103,7 @@ struct ACTASnapshotActionTests {
 
     private func frame(camera: UUID? = nil, captured: TimeInterval = 99, byte: UInt8 = 1) -> ACTASnapshotFrame {
         ACTASnapshotFrame(
-            cameraID: camera ?? self.camera, frameID: frameID, capturedUptime: captured,
+            cameraID: camera ?? self.camera, frameID: frameID, capturedUptime: captured, selectedUptime: 100,
             jpeg: Data([0xff, 0xd8, byte, 0xff, 0xd9]))
     }
 
@@ -97,7 +116,8 @@ struct ACTASnapshotActionTests {
         let path = root.url.appendingPathComponent("captured.jpg").path
         let frames = FakeSnapshotFrames(frame())
         let publisher = FakeSnapshotPublisher()
-        let action = ACTASnapshotAction(frames: frames, publisher: publisher, now: { 100 })
+        let clock = SnapshotActionClock()
+        let action = ACTASnapshotAction(frames: frames, publisher: publisher, now: { clock.now() })
         let registry = ACTAActionRegistry()
         await registry.register(action)
         let parameters = args(path)
@@ -106,13 +126,15 @@ struct ACTASnapshotActionTests {
         let token = try #require(review.confirmationToken)
         #expect(review.requiresOperatorConfirmation)
         #expect(review.summary.contains(camera.uuidString))
-        #expect(review.summary.contains(frameID.uuidString))
+        let capturedID = try #require(await frames.capturedID())
+        #expect(review.summary.contains(capturedID.uuidString))
         #expect(review.summary.contains(path))
         #expect(review.summary.contains("directory_device="))
         #expect(review.summary.contains("directory_inode="))
         #expect(review.summary.contains("sha256=adeaec77d1bc772e9694f8b5d7ba0ab621797f61f2587493ba69bd8dbbf09bf1"))
         #expect(review.summary.contains(token))
         await frames.set(frame(byte: 2))
+        clock.advance(30)
         let mismatch = try await registry.confirmAndExecute(
             token: token, confirmed: true, expectedActionID: action.id, expectedParameters: parameters,
             expectedThreadID: context.threadID, expectedReviewTitle: review.summary + " changed")
@@ -184,7 +206,7 @@ struct ACTASnapshotActionTests {
         #expect(!FileManager.default.fileExists(atPath: path))
     }
 
-    @Test func frameBecomingStaleDuringPreparationCancelsThePendingRequest() async throws {
+    @Test func heldFrameSurvivesSlowPreparation() async throws {
         let root = try SnapshotActionDirectory()
         let path = root.url.appendingPathComponent("frame.jpg").path
         let clock = SnapshotActionClock()
@@ -193,8 +215,39 @@ struct ACTASnapshotActionTests {
         let registry = ACTAActionRegistry()
         await registry.register(action)
         let result = try await registry.execute(actionID: action.id, parameters: args(path))
-        #expect(!result.requiresOperatorConfirmation && !result.success)
+        #expect(result.requiresOperatorConfirmation)
+        #expect(await publisher.cancellationCount() == 0)
+        #expect(!FileManager.default.fileExists(atPath: path))
+    }
+
+    @Test func freshSelectionSurvivesSlowEncoding() async throws {
+        let root = try SnapshotActionDirectory()
+        let path = root.url.appendingPathComponent("frame.jpg").path
+        let clock = SnapshotActionClock()
+        let publisher = FakeSnapshotPublisher()
+        let frames = FakeSnapshotFrames(frame(), afterCapture: { clock.advance(3) })
+        let action = ACTASnapshotAction(frames: frames, publisher: publisher, now: { clock.now() })
+        let prepared = try await action.prepareConfirmation(parameters: args(path), context: ACTAActionContext())
+        let result = try await action.executeConfirmed(parameters: args(path),
+            context: ACTAActionContext(isConfirmed: true), snapshot: prepared.snapshot)
+        #expect(result.success)
+        #expect(await publisher.data(for: prepared.snapshot.request.token) == bytes)
+    }
+
+    @Test func expiredFrameAfterReviewCancelsWithoutPublishing() async throws {
+        let root = try SnapshotActionDirectory()
+        let path = root.url.appendingPathComponent("frame.jpg").path
+        let clock = SnapshotActionClock()
+        let publisher = FakeSnapshotPublisher()
+        let action = ACTASnapshotAction(
+            frames: FakeSnapshotFrames(frame()), publisher: publisher, now: { clock.now() })
+        let prepared = try await action.prepareConfirmation(parameters: args(path), context: ACTAActionContext())
+        clock.advance(300)
+        let result = try await action.executeConfirmed(parameters: args(path),
+            context: ACTAActionContext(isConfirmed: true), snapshot: prepared.snapshot)
+        #expect(!result.success && result.error?.hasPrefix("STALE_FRAME:") == true)
         #expect(await publisher.cancellationCount() == 1)
+        #expect(await publisher.count() == 0)
         #expect(!FileManager.default.fileExists(atPath: path))
     }
 
@@ -210,19 +263,83 @@ struct ACTASnapshotActionTests {
         let unconfirmed = try await action.executeConfirmed(
             parameters: parameters, context: ACTAActionContext(),
             snapshot: prepared.snapshot)
+        let next = try await action.prepareConfirmation(parameters: parameters, context: ACTAActionContext())
         let changed = try await action.executeConfirmed(
             parameters: args(path + ".jpg"),
             context: ACTAActionContext(isConfirmed: true),
-            snapshot: prepared.snapshot)
+            snapshot: next.snapshot)
         #expect(!direct.success && !unconfirmed.success && !changed.success)
         #expect(await publisher.count() == 0)
         await publisher.setVerificationFailure()
+        let last = try await action.prepareConfirmation(parameters: parameters, context: ACTAActionContext())
         let failed = try await action.executeConfirmed(
             parameters: parameters,
             context: ACTAActionContext(isConfirmed: true),
-            snapshot: prepared.snapshot)
+            snapshot: last.snapshot)
         #expect(!failed.success && !failed.verified)
         #expect(failed.error?.hasPrefix("VERIFICATION_FAILED:") == true)
+    }
+
+    @Test func changedReviewedBytesAreRejectedAndCancelled() async throws {
+        let root = try SnapshotActionDirectory()
+        let path = root.url.appendingPathComponent("frame.jpg").path
+        let publisher = FakeSnapshotPublisher()
+        let action = ACTASnapshotAction(frames: FakeSnapshotFrames(frame()), publisher: publisher, now: { 100 })
+        let prepared = try await action.prepareConfirmation(parameters: args(path), context: ACTAActionContext())
+        let original = prepared.snapshot.frame
+        let altered = ACTASnapshotFrame(cameraID: original.cameraID, frameID: original.frameID,
+            capturedUptime: original.capturedUptime, selectedUptime: original.selectedUptime,
+            jpeg: Data([0xff, 0xd8, 2, 0xff, 0xd9]))
+        let tampered = ACTASnapshotAction.Snapshot(frame: altered, request: prepared.snapshot.request)
+        let failed = try await action.executeConfirmed(parameters: args(path),
+            context: ACTAActionContext(isConfirmed: true), snapshot: tampered)
+        #expect(!failed.success && failed.error?.hasPrefix("CONFIRMATION_MISMATCH:") == true)
+        #expect(await publisher.cancellationCount() == 1)
+        #expect(await publisher.count() == 0)
+        #expect(!FileManager.default.fileExists(atPath: path))
+        let replay = try await action.executeConfirmed(parameters: args(path),
+            context: ACTAActionContext(isConfirmed: true), snapshot: prepared.snapshot)
+        #expect(!replay.success)
+        #expect(await publisher.count() == 0)
+    }
+
+    @Test func cancelledExecutionConsumesPreparedRequestWithoutWriting() async throws {
+        let root = try SnapshotActionDirectory()
+        let path = root.url.appendingPathComponent("frame.jpg").path
+        let publisher = FakeSnapshotPublisher()
+        let action = ACTASnapshotAction(frames: FakeSnapshotFrames(frame()), publisher: publisher, now: { 100 })
+        let prepared = try await action.prepareConfirmation(parameters: args(path), context: ACTAActionContext())
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await action.executeConfirmed(parameters: args(path),
+                context: ACTAActionContext(isConfirmed: true), snapshot: prepared.snapshot)
+        }
+        await #expect(throws: CancellationError.self) { try await task.value }
+        #expect(await publisher.cancellationCount() == 1)
+        #expect(await publisher.count() == 0)
+        let replay = try await action.executeConfirmed(parameters: args(path),
+            context: ACTAActionContext(isConfirmed: true), snapshot: prepared.snapshot)
+        #expect(!replay.success)
+        #expect(!FileManager.default.fileExists(atPath: path))
+    }
+
+    @Test func sourceBufferMutationAfterReviewCannotChangeApprovedBytes() async throws {
+        let root = try SnapshotActionDirectory()
+        let path = root.url.appendingPathComponent("frame.jpg").path
+        let storage = UnsafeMutablePointer<UInt8>.allocate(capacity: bytes.count)
+        defer { storage.deallocate() }
+        bytes.copyBytes(to: storage, count: bytes.count)
+        let alias = Data(bytesNoCopy: storage, count: bytes.count, deallocator: .none)
+        let source = ACTASnapshotFrame(cameraID: camera, frameID: frameID, capturedUptime: 99,
+                                       selectedUptime: 100, jpeg: alias)
+        let publisher = FakeSnapshotPublisher()
+        let action = ACTASnapshotAction(frames: FakeSnapshotFrames(source), publisher: publisher, now: { 100 })
+        let prepared = try await action.prepareConfirmation(parameters: args(path), context: ACTAActionContext())
+        storage[2] = 9
+        let result = try await action.executeConfirmed(parameters: args(path),
+            context: ACTAActionContext(isConfirmed: true), snapshot: prepared.snapshot)
+        #expect(result.success)
+        #expect(await publisher.data(for: prepared.snapshot.request.token) == bytes)
     }
 
     @Test func independentReviewsRetainEachFrameAndRegistryVerificationMustPass() async throws {
@@ -246,12 +363,19 @@ struct ACTASnapshotActionTests {
         #expect(newResult.success)
         let newerRequest = try #require(await publisher.latest)
         #expect(await publisher.data(for: newerRequest.token) == frame(byte: 2).jpeg)
-        await publisher.setCurrentVerificationFailure()
         let oldResult = try await registry.confirmAndExecute(
             token: try #require(older.confirmationToken), confirmed: true, expectedActionID: action.id,
             expectedParameters: olderParameters, expectedThreadID: "default", expectedReviewTitle: older.summary)
-        #expect(!oldResult.success && !oldResult.verified)
+        #expect(oldResult.success && oldResult.verified)
         let olderRequest = try #require(await publisher.latest)
         #expect(await publisher.data(for: olderRequest.token) == bytes)
+        await publisher.setCurrentVerificationFailure()
+        let anotherPath = root.url.appendingPathComponent("another.jpg").path
+        let anotherParameters = args(anotherPath)
+        let another = try await registry.execute(actionID: action.id, parameters: anotherParameters)
+        let failed = try await registry.confirmAndExecute(
+            token: try #require(another.confirmationToken), confirmed: true, expectedActionID: action.id,
+            expectedParameters: anotherParameters, expectedThreadID: "default", expectedReviewTitle: another.summary)
+        #expect(!failed.success && !failed.verified)
     }
 }

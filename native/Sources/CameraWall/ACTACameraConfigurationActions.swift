@@ -17,7 +17,7 @@ struct WallCameraConfigurationAction: ACTAActionProtocol {
         case .local: return "Register a local capture device ID DISABLED. This does not certify device availability or grant macOS permissions."
         case .screen: return "Register a display ID DISABLED. Does not capture the screen or bypass macOS permissions."
         case .file: return "Register a readable regular local file by absolute path DISABLED, using the app bookmark service. Video decoding is not certified."
-        case .edit: return "Edit metadata or anonymous network URLs for an existing camera. Credentials stay in Keychain. Existing running streams may reconnect."
+        case .edit: return "Edit metadata or anonymous network URLs; edit device_id or display_id only for matching disabled sources while the wall is stopped. Credentials are unchanged. Existing running streams may reconnect for other edits."
         case .processing: return "Set one camera's YOLO or AI-chat flag. AI flag changes require confirmation; network/voice/privacy permissions remain unchanged."
         }
     }
@@ -31,6 +31,26 @@ struct WallCameraConfigurationAction: ACTAActionProtocol {
         if kind == .network || kind == .edit {
             for field in ["url", "mainstream"] {
                 if let value = parameters[field] { _ = try Self.networkURL(value) }
+            }
+            if kind == .edit {
+                if let deviceID = parameters["device_id"] {
+                    guard !deviceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                          deviceID.utf8.count <= 1024 else {
+                        throw ConfigurationError.invalid("A nonempty device ID of at most 1024 bytes is required.")
+                    }
+                }
+                if let displayID = parameters["display_id"] {
+                    guard let value = UInt32(displayID), value > 0 else {
+                        throw ConfigurationError.invalid("A positive display ID is required.")
+                    }
+                }
+                if parameters["device_id"] != nil || parameters["display_id"] != nil {
+                    guard !(parameters["device_id"] != nil && parameters["display_id"] != nil),
+                          parameters["url"] == nil, parameters["mainstream"] == nil,
+                          parameters["clear_mainstream"] == nil else {
+                        throw ConfigurationError.invalid("Specify one source ID without network source fields.")
+                    }
+                }
             }
         }
     }
@@ -54,12 +74,14 @@ struct WallCameraConfigurationAction: ACTAActionProtocol {
         case .screen: return [field("name", "string", true), field("display_id", "integer", true)]
         case .file: return [field("file_path", "string", true), field("name", "string")]
         case .edit: return [field("camera_id", "string", true), field("name", "string"), field("location", "string"),
-            field("clear_location", "boolean"), field("url", "string"), field("mainstream", "string"), field("clear_mainstream", "boolean")]
+            field("clear_location", "boolean"), field("url", "string"), field("mainstream", "string"), field("clear_mainstream", "boolean"),
+            field("device_id", "string"), field("display_id", "integer")]
         case .processing: return [field("camera_id", "string", true), field("feature", "string", true, ["yolo", "ai_chat"]), field("enabled", "boolean", true)]
         }
     }
     func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
-        try await MainActor.run {
+        try validate(parameters: parameters)
+        return try await MainActor.run {
             try Task.checkCancellation()
             _ = try model.cameraConfigurationChecked()
             func name(_ value: String) throws -> String {
@@ -111,6 +133,27 @@ struct WallCameraConfigurationAction: ACTAActionProtocol {
                     guard !(parameters["clear_location"] == "true" && parameters["location"] != nil),
                           !(parameters["clear_mainstream"] == "true" && parameters["mainstream"] != nil) else {
                         throw ConfigurationError.invalid("Do not set and clear the same camera field in one action.")
+                    }
+                    if parameters["device_id"] != nil || parameters["display_id"] != nil {
+                        guard !camera.enabled, !model.running, !model.connecting,
+                              !model.vlmBusy, !model.manualVLMBusy, model.manualQuestionQueue.pending == nil,
+                              model.localAnalyticsEngine.engineState == .disabled,
+                              model.tiles.values.allSatisfy({ $0.session == nil }) else {
+                            throw ConfigurationError.invalid("Source IDs can be edited only for disabled sources while the wall and its camera processing are stopped.")
+                        }
+                        if let value = parameters["device_id"] {
+                            guard camera.localDeviceID != nil, camera.screenDisplayID == nil, camera.fileURL == nil else {
+                                throw ConfigurationError.invalid("Device ID requires an existing local camera.")
+                            }
+                            camera.localDeviceID = value
+                        }
+                        if let value = parameters["display_id"] {
+                            guard camera.screenDisplayID != nil, camera.localDeviceID == nil, camera.fileURL == nil,
+                                  let displayID = UInt32(value), displayID > 0 else {
+                                throw ConfigurationError.invalid("Display ID requires an existing screen source and a positive display ID.")
+                            }
+                            camera.screenDisplayID = String(displayID)
+                        }
                     }
                     if let value = parameters["name"] { camera.name = try name(value) }
                     if let value = parameters["location"] {

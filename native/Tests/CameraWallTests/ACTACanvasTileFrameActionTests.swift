@@ -1,4 +1,5 @@
 import CameraCore
+import Darwin
 import Foundation
 import XCTest
 @testable import CameraWall
@@ -37,6 +38,150 @@ private final class FakeTileFrameTransaction: ACTACanvasTileFrameTransaction {
             persisted.frames[cameraID.uuidString] == frame
     }
 }
+
+@MainActor
+final class ACTACanvasTileFrameProviderTests: XCTestCase {
+        private let frame = VideoTileFrame(x: 25, y: 30, width: 400, height: 225)
+
+        private func fixture() throws -> (URL, WallModel, UUID) {
+            let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+                .deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent(".build/canvas-provider-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+            let camera = Camera(name: "Fixture", substream: "rtsp://127.0.0.1/fixture", enabled: true)
+            var config = WallConfiguration()
+            config.cameras = [camera]
+            let configURL = root.appendingPathComponent("cameras.json")
+            try ConfigurationStore.save(config, to: configURL)
+            try ModelSelectionPreferences(enabled: []).save(to: root.appendingPathComponent("model-preferences.json"))
+            try CameraFeaturePreferencesStore.save(CameraFeaturePreferences(), to: root.appendingPathComponent("features.json"))
+            let model = WallModel(configURL: configURL, poseModelURL: root.appendingPathComponent("unused.mlmodel"),
+                trackingStoreURL: root.appendingPathComponent("tracks.sqlite"),
+                featureCoordinator: CameraFeatureCoordinator(preferencesURL: root.appendingPathComponent("features.json"),
+                    databaseURL: root.appendingPathComponent("features.sqlite")),
+                analyticsDirectoryURL: root.appendingPathComponent("analytics"),
+                agentClient: IsolatedWallFixtureSupport.client(),
+                cameraMemoryStore: CameraMemoryStore(url: root.appendingPathComponent("frames")),
+                operationsWatchURL: root.appendingPathComponent("watches.json"),
+                missionStoreURL: root.appendingPathComponent("missions.json"),
+                cameraCredentialStore: ACTAIsolatedCredentials(),
+                operationsPreferencesURL: root.appendingPathComponent("operations.json"),
+                alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")),
+                languageSettings: LanguageSettings(storage: InMemoryLanguageStorage()),
+                monitorHistoryURL: root.appendingPathComponent("monitor.json"),
+                analyticsModelDiscovery: IsolatedWallFixtureSupport.modelDiscovery)
+            XCTAssertFalse(model.running)
+            XCTAssertNil(model.tiles[camera.id]?.session)
+            XCTAssertTrue(LocalModelService.allCases.allSatisfy { !ModelSelectionRegistry.isEnabled($0) })
+            return (root, model, camera.id)
+        }
+
+        private func arguments(_ id: UUID) -> [String: String] {
+            ["camera_id": id.uuidString, "x": "25", "y": "30", "width": "400", "height": "225"]
+        }
+
+        func testRealStoreAndModelReadbackAndLifecycle() async throws {
+            let previous = IsolatedWallFixtureSupport.modelPreferences()
+            defer { ModelSelectionRegistry.update(previous) }
+            let (root, model, camera) = try fixture()
+            defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+            let tracker = ACTACanvasGestureTracker()
+            let provider = ACTACanvasTileFrameProvider(model: model, gestures: tracker)
+            let action = ACTACanvasSetTileFrameAction(state: .init(transaction: provider, gestures: tracker))
+            let params = arguments(camera)
+            let window = ACTACanvasFilterState()
+            let missing = try await action.execute(parameters: params, context: .init())
+            XCTAssertFalse(missing.success)
+            model.canvasFilterBridge.attach(window)
+            let otherID = UUID()
+            let other = VideoTileFrame(x: 10, y: 10, width: 200, height: 100)
+            XCTAssertTrue(model.setTileFrame(other, for: otherID))
+            let registry = ACTAActionRegistry()
+            await registry.register(action)
+            let result = try await registry.execute(actionID: action.id, parameters: params)
+            XCTAssertTrue(result.success && result.verified, result.summary)
+            XCTAssertEqual(model.layout.frames[camera.uuidString], frame)
+            XCTAssertEqual(try ACTACanvasLayoutStore(url: model.layoutURL).read().layout, model.layout)
+            XCTAssertEqual(model.layout.frames[otherID.uuidString], other)
+            let token = tracker.begin()
+            let duringGesture = try await action.verify(parameters: params, context: .init())
+            XCTAssertFalse(duringGesture)
+            tracker.end(token)
+            model.canvasFilterBridge.detach(window)
+            model.canvasFilterBridge.attach(window)
+            let reattached = try await action.verify(parameters: params, context: .init())
+            XCTAssertFalse(reattached)
+            model.canvasFilterBridge.detach(window)
+        }
+
+        func testConflictsBusyAndExternalChangesFailClosed() async throws {
+            let previous = IsolatedWallFixtureSupport.modelPreferences()
+            defer { ModelSelectionRegistry.update(previous) }
+            let (root, model, camera) = try fixture()
+            defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+            let window = ACTACanvasFilterState()
+            model.canvasFilterBridge.attach(window)
+            defer { model.canvasFilterBridge.detach(window) }
+            let tracker = ACTACanvasGestureTracker()
+            let provider = ACTACanvasTileFrameProvider(model: model, gestures: tracker)
+            let action = ACTACanvasSetTileFrameAction(state: .init(transaction: provider, gestures: tracker))
+            let params = arguments(camera)
+            let original = try XCTUnwrap(model.canvasLayoutSnapshot)
+            let token = tracker.begin()
+            let busy = try await action.execute(parameters: params, context: .init())
+            XCTAssertFalse(busy.success)
+            tracker.end(token)
+            let lock = open(model.layoutURL.appendingPathExtension("lock").path, O_RDWR)
+            XCTAssertGreaterThanOrEqual(lock, 0)
+            defer { close(lock) }
+            XCTAssertEqual(flock(lock, LOCK_EX | LOCK_NB), 0)
+            let locked = try await action.execute(parameters: params, context: .init())
+            XCTAssertFalse(locked.success)
+            XCTAssertEqual(flock(lock, LOCK_UN), 0)
+            XCTAssertEqual(model.canvasLayoutSnapshot, original)
+            XCTAssertEqual(try ACTACanvasLayoutStore(url: model.layoutURL).read(), original)
+            var legacy = VideoWallLayout()
+            legacy.frames[UUID().uuidString] = frame
+            try legacy.save(to: model.layoutURL)
+            let conflict = try await action.execute(parameters: params, context: .init())
+            XCTAssertFalse(conflict.success)
+            XCTAssertEqual(model.canvasLayoutSnapshot, original)
+            XCTAssertEqual(try VideoWallLayout.load(from: model.layoutURL), legacy)
+            XCTAssertTrue(model.refreshCanvasLayout())
+            let success = try await action.execute(parameters: params, context: .init())
+            XCTAssertTrue(success.success)
+            let saved = try ACTACanvasLayoutStore(url: model.layoutURL).read()
+            _ = try ACTACanvasLayoutStore(url: model.layoutURL).commit(saved.layout, expected: saved)
+            let aba = try await action.verify(parameters: params, context: .init())
+            XCTAssertFalse(aba)
+        }
+
+        func testUnavailableCameraAndAmbiguousWindowDoNotWrite() async throws {
+            let previous = IsolatedWallFixtureSupport.modelPreferences()
+            defer { ModelSelectionRegistry.update(previous) }
+            let (root, model, camera) = try fixture()
+            defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+            let first = ACTACanvasFilterState()
+            let second = ACTACanvasFilterState()
+            model.canvasFilterBridge.attach(first)
+            model.canvasFilterBridge.attach(second)
+            defer { model.canvasFilterBridge.detach(first); model.canvasFilterBridge.detach(second) }
+            let tracker = ACTACanvasGestureTracker()
+            let action = ACTACanvasSetTileFrameAction(state: .init(
+                transaction: ACTACanvasTileFrameProvider(model: model, gestures: tracker), gestures: tracker))
+            let original = try XCTUnwrap(model.canvasLayoutSnapshot)
+            let ambiguous = try await action.execute(parameters: arguments(camera), context: .init())
+            XCTAssertFalse(ambiguous.success)
+            model.canvasFilterBridge.detach(second)
+            let missing = try await action.execute(parameters: arguments(UUID()), context: .init())
+            XCTAssertFalse(missing.success)
+            model.config.cameras[0].enabled = false
+            let staleConfig = try await action.execute(parameters: arguments(camera), context: .init())
+            XCTAssertFalse(staleConfig.success)
+            XCTAssertEqual(model.canvasLayoutSnapshot, original)
+            XCTAssertEqual(try ACTACanvasLayoutStore(url: model.layoutURL).read(), original)
+        }
+    }
 
 @MainActor
 final class ACTACanvasTileFrameActionTests: XCTestCase {

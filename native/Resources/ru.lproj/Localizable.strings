@@ -637,6 +637,16 @@
 "Remove saved text" = "Удалить сохранённый текст";
 "Remove saved vehicle text?" = "Удалить сохранённый текст автомобиля?";
 "Saved vehicle text changed; review it again before removing." = "Сохранённый текст автомобиля изменился; проверьте его снова перед удалением.";
+"Description job or feature policy changed; refresh before retrying." = "Задание описания или политика функций изменились; обновите данные перед повтором.";
+"A nonempty device ID of at most 1024 bytes is required." = "Необходим непустой идентификатор устройства длиной не более 1024 байт.";
+"Specify one source ID without network source fields." = "Укажите один идентификатор источника без полей сетевого источника.";
+"Source IDs can be edited only for disabled sources while the wall and its camera processing are stopped." = "Идентификаторы отключённых источников можно изменить только после остановки видеостены и обработки камер.";
+"Device ID requires an existing local camera." = "Идентификатор устройства требует существующую локальную камеру.";
+"Display ID requires an existing screen source and a positive display ID." = "Для идентификатора дисплея необходим существующий источник экрана и положительный идентификатор.";
+"TOOL_NOT_ADVERTISED: Tool is not in the applicable catalogue." = "TOOL_NOT_ADVERTISED: Инструмент отсутствует в доступном каталоге.";
+"AUDIT_FAILED: Could not record rejected action." = "AUDIT_FAILED: Не удалось записать отклонённое действие.";
+"AUDIT_FAILED: Action audit store is unavailable." = "AUDIT_FAILED: Хранилище аудита действий недоступно.";
+"CATALOGUE_ERROR: Could not load the action catalogue." = "CATALOGUE_ERROR: Не удалось загрузить каталог действий.";
 "Track: %@" = "Трек: %@";
 "This removes saved OCR from the track only. Copies may remain in search indexes and other records." = "Это удаляет распознанный текст только из трека. Копии могут остаться в поисковых индексах и других записях.";
 "Vehicle text was not removed: track no longer exists" = "Текст автомобиля не удалён: трек больше не существует.";
@@ -879,6 +889,7 @@
 "The native VLM returned an empty response." = "Нативная VLM вернула пустой ответ.";
 "The selected video file is not readable." = "Выбранный видеофайл недоступен для чтения.";
 "The selected video file is unavailable." = "Выбранный видеофайл недоступен.";
+"File source is not available for reconnection." = "Файловый источник недоступен для переподключения.";
 "The video source is no longer in the wall." = "Источник видео больше не находится на видеостене.";
 "These tracks already share a proposed identity; detach or undo that decision first." = "Для этих наблюдений уже предложена общая связь; сначала отделите их или отмените решение.";
 "These tracks have an explicit cannot-link decision." = "Для этих наблюдений явно запрещена связь.";
@@ -1709,6 +1720,12 @@
 "Specify a zone change." = "Укажите изменение зоны.";
 "Zone name is empty, too long or ambiguous." = "Имя зоны пустое, слишком длинное или неоднозначное.";
 "Conflicting polygon point operations." = "Операции с точками полигона противоречат друг другу.";
+"Polygon requires 3...64 finite normalized points in points_json." = "В points_json необходимо указать от 3 до 64 точек с конечными нормализованными координатами.";
+"Polygon vertices must be distinct." = "Вершины полигона должны быть различными.";
+"Polygon edges must not overlap." = "Стороны полигона не должны перекрываться.";
+"Polygon edges must not intersect or touch." = "Стороны полигона не должны пересекаться или соприкасаться.";
+"Polygon must have nonzero area." = "Площадь полигона должна быть ненулевой.";
+"Do not combine polygon and rectangle coordinates." = "Не совмещайте координаты полигона и прямоугольника.";
 "Polygon coordinates must be within [0,1]." = "Координаты полигона должны находиться в диапазоне [0,1].";
 "A polygon cannot exceed 64 points." = "Полигон не может содержать более 64 точек.";
 "Polygon point index does not exist." = "Точка полигона с указанным индексом отсутствует.";
@@ -1761,6 +1778,18 @@
 "ACTA action review failed: %@" = "Не удалось обработать подтверждение действия ACTA: %@";
 
 "Review proposed action" = "Проверить предложенное действие";
+"Action" = "Действие";
+"Thread" = "Диалог";
+"Complete review" = "Полный текст проверки";
+"Exact review uses escaped Unicode; no characters are omitted." = "Точная проверка показывает Unicode в экранированном виде; символы не пропущены.";
+"I reviewed the complete request" = "Я полностью проверил запрос";
+"REVIEW_TOO_LARGE: Parameters exceed the review limit." = "REVIEW_TOO_LARGE: Параметры превышают допустимый размер для проверки.";
+"AUDIT_FAILED: Action was not executed." = "AUDIT_FAILED: Действие не выполнено.";
+"REVIEW_UNDISPLAYABLE: Request cannot be safely reviewed." = "REVIEW_UNDISPLAYABLE: Запрос невозможно безопасно проверить.";
+"Port updates are not supported by this settings provider." = "Этот поставщик настроек не поддерживает изменение портов.";
+"Relay ports must be integers in 1024...65535." = "Порты ретранслятора должны быть целыми числами от 1024 до 65535.";
+"Relay ports must be distinct." = "Порты ретранслятора должны различаться.";
+"System settings changed; retry the port update." = "Системные настройки изменились; повторите изменение портов.";
 
 "Mission UUID does not identify a saved mission." = "Миссия с указанным UUID отсутствует в сохранённых данных.";
 "Mission run request verification failed." = "Не удалось подтвердить постановку миссии на выполнение.";

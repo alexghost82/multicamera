@@ -258,6 +258,28 @@ struct ACTASnapshotExportFoundationTests {
             try await replacing.publish(token: second.token, reviewed: second.preview, approved: true)
         }
     }
+
+    @Test func rejectsSameInodeCorruptionAfterInitialReadback() async throws {
+        let root = try SnapshotTestDirectory()
+        let path = root.url.appendingPathComponent("frame.jpg").path
+        let service = ACTASnapshotExportFoundation(
+            now: { 100 },
+            beforeIdentityCheck: {
+                let fd = open(path, O_WRONLY | O_NOFOLLOW)
+                guard fd >= 0 else { return }
+                defer { close(fd) }
+                var byte: UInt8 = 9
+                _ = pwrite(fd, &byte, 1, 2)
+            })
+        let request = try await service.prepareForPublication(cameraID: camera, jpeg: jpeg, destinationPath: path)
+        await #expect(throws: ACTASnapshotExportFoundation.Failure.verificationFailed) {
+            try await service.publish(token: request.token, reviewed: request.preview, approved: true)
+        }
+        #expect(try Data(contentsOf: URL(fileURLWithPath: path)) != jpeg)
+        await #expect(throws: ACTASnapshotExportFoundation.Failure.invalidOrExpiredConfirmation) {
+            try await service.publish(token: request.token, reviewed: request.preview, approved: true)
+        }
+    }
 }
 
 extension Sequence {

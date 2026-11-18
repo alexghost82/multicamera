@@ -29,7 +29,7 @@ struct WallAnalyticsAction: ACTAActionProtocol {
         case .sampling: return "Set analytics sampling rates; idle <= fps <= boost, boost <= 15. Does not claim measured throughput."
         case .overlay: return "Enable or disable one analytics display layer."
         case .cameraOverride: return "Update one configured camera's analytics override. inherit=true preserves dormant overrides and zones."
-        case .zone: return "Create or update a named rectangular restricted zone with normalized coordinates; preserves existing zone ID and policy."
+        case .zone: return "Create or update a named restricted zone using either x, y, width, height or points_json (a JSON string containing an array of {\"x\":number,\"y\":number}); coordinates are normalized. Preserves existing zone ID and policy."
         case .removeZone: return "Remove exactly one named restricted zone from a configured camera."
         }
     }
@@ -89,7 +89,9 @@ struct WallAnalyticsAction: ACTAActionProtocol {
             field("sensitivity_profile", "string", false, AnalyticsSensitivityProfile.allCases.map(\.rawValue))]
             + Self.cameraFlags.keys.sorted().map { field($0, "boolean") }
         case .zone: return [field("camera_id", "string", true), field("name", "string", true),
-            field("x", "number", true), field("y", "number", true), field("width", "number", true), field("height", "number", true)]
+            field("x", "number"), field("y", "number"), field("width", "number"), field("height", "number"),
+            ACTAActionParameterSchema(name: "points_json", type: "string",
+                description: "JSON string containing 3...64 ordered points, e.g. [{\"x\":0,\"y\":0},{\"x\":1,\"y\":0},{\"x\":0,\"y\":1}]. Do not combine with rectangle fields.")]
         case .removeZone: return [field("camera_id", "string", true), field("name", "string", true)]
         }
     }
@@ -97,6 +99,72 @@ struct WallAnalyticsAction: ACTAActionProtocol {
     func requiresConfirmation(parameters: [String: String]) -> Bool {
         // Storage retention and pre/post buffers affect private evidence; confirm either direction.
         kind == .removeOverride || kind == .threshold && ["preEventBufferSeconds", "postEventBufferSeconds", "maxEvidenceDiskQuotaMB"].contains(parameters["parameter"] ?? "")
+    }
+
+    private struct PolygonPoint: Decodable {
+        let x: Double
+        let y: Double
+
+        private struct Key: CodingKey {
+            let stringValue: String
+            let intValue: Int?
+            init?(stringValue: String) { self.stringValue = stringValue; self.intValue = nil }
+            init?(intValue: Int) { self.stringValue = String(intValue); self.intValue = intValue }
+        }
+
+        init(from decoder: Swift.Decoder) throws {
+            let container = try decoder.container(keyedBy: Key.self)
+            guard Set(container.allKeys.map(\.stringValue)) == Set(["x", "y"]) else {
+                throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+                    debugDescription: "A polygon point must contain exactly x and y."))
+            }
+            x = try container.decode(Double.self, forKey: Key(stringValue: "x")!)
+            y = try container.decode(Double.self, forKey: Key(stringValue: "y")!)
+        }
+    }
+
+    private static func polygonPoints(_ json: String) throws -> [NormalizedPoint] {
+        guard json.utf8.count <= 16_384,
+              let points = try? JSONDecoder().decode([PolygonPoint].self, from: Data(json.utf8)),
+              (3...64).contains(points.count),
+              points.allSatisfy({ $0.x.isFinite && $0.y.isFinite && (0...1).contains($0.x) && (0...1).contains($0.y) }) else {
+            throw ConfigurationError.invalid("Polygon requires 3...64 finite normalized points in points_json.")
+        }
+        let vertices = points.map { NormalizedPoint(x: $0.x, y: $0.y) }
+        guard Set(vertices).count == vertices.count else {
+            throw ConfigurationError.invalid("Polygon vertices must be distinct.")
+        }
+        func cross(_ a: NormalizedPoint, _ b: NormalizedPoint, _ c: NormalizedPoint) -> Double {
+            (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+        }
+        func onSegment(_ a: NormalizedPoint, _ b: NormalizedPoint, _ p: NormalizedPoint) -> Bool {
+            cross(a, b, p) == 0 && (min(a.x, b.x)...max(a.x, b.x)).contains(p.x)
+                && (min(a.y, b.y)...max(a.y, b.y)).contains(p.y)
+        }
+        func intersects(_ a: NormalizedPoint, _ b: NormalizedPoint, _ c: NormalizedPoint, _ d: NormalizedPoint) -> Bool {
+            let abC = cross(a, b, c), abD = cross(a, b, d)
+            let cdA = cross(c, d, a), cdB = cross(c, d, b)
+            if (abC > 0 && abD < 0 || abC < 0 && abD > 0)
+                && (cdA > 0 && cdB < 0 || cdA < 0 && cdB > 0) { return true }
+            return onSegment(a, b, c) || onSegment(a, b, d) || onSegment(c, d, a) || onSegment(c, d, b)
+        }
+        let count = vertices.count
+        var area = 0.0
+        for i in 0..<count {
+            let a = vertices[i], b = vertices[(i + 1) % count], c = vertices[(i + 2) % count]
+            area += a.x * b.y - a.y * b.x
+            // Adjacent edges may be collinear, but must not double back over each other.
+            if cross(a, b, c) == 0 && (a.x - b.x) * (c.x - b.x) + (a.y - b.y) * (c.y - b.y) > 0 {
+                throw ConfigurationError.invalid("Polygon edges must not overlap.")
+            }
+            for j in (i + 1)..<count where j != i + 1 && !(i == 0 && j == count - 1) {
+                if intersects(a, b, vertices[j], vertices[(j + 1) % count]) {
+                    throw ConfigurationError.invalid("Polygon edges must not intersect or touch.")
+                }
+            }
+        }
+        guard area != 0 else { throw ConfigurationError.invalid("Polygon must have nonzero area.") }
+        return vertices
     }
 
     func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
@@ -242,16 +310,24 @@ struct WallAnalyticsAction: ACTAActionProtocol {
                         guard let index = matches.first else { throw ConfigurationError.invalid("Zone does not exist.") }
                         override.restrictedZones.remove(at: index)
                     } else {
-                        let x = try number("x"), y = try number("y"), width = try number("width"), height = try number("height")
-                        guard x >= 0, y >= 0, width > 0, height > 0, x + width <= 1, y + height <= 1 else {
-                            throw ConfigurationError.invalid("Zone rectangle must have positive dimensions and fit inside [0,1].")
+                        let points: [NormalizedPoint]
+                        if let polygon = parameters["points_json"] {
+                            guard ["x", "y", "width", "height"].allSatisfy({ parameters[$0] == nil }) else {
+                                throw ConfigurationError.invalid("Do not combine polygon and rectangle coordinates.")
+                            }
+                            points = try Self.polygonPoints(polygon)
+                        } else {
+                            let x = try number("x"), y = try number("y"), width = try number("width"), height = try number("height")
+                            guard x >= 0, y >= 0, width > 0, height > 0, x + width <= 1, y + height <= 1 else {
+                                throw ConfigurationError.invalid("Zone rectangle must have positive dimensions and fit inside [0,1].")
+                            }
+                            points = RestrictedZoneRegion.rectangle(name: name, x: x, y: y, width: width, height: height).points
                         }
                         if let index = matches.first {
                             // Preserve ID, enabled state, hold time and severity on geometric edits.
-                            override.restrictedZones[index].points = RestrictedZoneRegion.rectangle(name: name,
-                                x: x, y: y, width: width, height: height).points
+                            override.restrictedZones[index].points = points
                         } else {
-                            override.restrictedZones.append(.rectangle(name: name, x: x, y: y, width: width, height: height))
+                            override.restrictedZones.append(RestrictedZoneRegion(name: name, points: points))
                         }
                     }
                 }

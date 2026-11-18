@@ -44,6 +44,23 @@ final class CameraFeatureCoordinatorTests: XCTestCase {
         XCTAssertEqual(try reopened.claimNext()?.id, job.id)
     }
 
+    func testDescriptionRetryRejectsChangedFeaturePolicy() throws {
+        let paths = makePaths()
+        defer { try? FileManager.default.removeItem(at: paths.directory) }
+        let coordinator = makeCoordinator(paths)
+        try coordinator.savePreferences(CameraFeaturePreferences(enabledFeatures: [.visionDescriptions]))
+        let job = try coordinator.enqueue(featureID: .visionDescriptions)
+        _ = try coordinator.claimNext(featureID: .visionDescriptions)
+        let store = try CameraFeatureStore(url: paths.database)
+        try store.fail(jobID: job.id, message: "Synthetic failure")
+        let snapshot = try coordinator.descriptionJobSnapshot(id: job.id)
+        let operationID = UUID()
+        try CameraFeaturePreferencesStore.save(CameraFeaturePreferences(), to: paths.preferences)
+        XCTAssertThrowsError(try coordinator.retryDescriptionJob(snapshot: snapshot, operationID: operationID))
+        XCTAssertFalse(try coordinator.hasDescriptionRetryReceipt(.init(jobID: job.id, operationID: operationID)))
+        XCTAssertEqual(try store.jobs(featureID: .visionDescriptions).first?.status, .failed)
+    }
+
     private func makeCoordinator(_ paths: Paths) -> CameraFeatureCoordinator {
         CameraFeatureCoordinator(
             preferencesURL: paths.preferences,

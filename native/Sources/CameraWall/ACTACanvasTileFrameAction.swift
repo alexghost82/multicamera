@@ -1,13 +1,11 @@
 import CameraCore
 import Foundation
 
-// This action is deliberately not registered. A production provider must coordinate
-// every layout writer, including other processes, and all unfinished GUI gestures.
+// Not registered: advisory locking cannot coordinate legacy layout writers or
+// gestures in other processes. The provider below is safe only for cooperating writers.
 @MainActor
 protocol ACTACanvasTileFrameTransaction: AnyObject {
-    // Atomically validate the target and gesture state, merge with the latest layout,
-    // persist it, and publish the same runtime layout. Failure must leave both
-    // runtime and durable state unchanged, including on partial I/O failure.
+    // Validate the target and gesture state, then persist and publish a layout.
     func setFrame(_ frame: VideoTileFrame, for cameraID: UUID) -> ACTACanvasTileFrameOutcome
 
     // Check the receipt and both runtime and persisted state under the same coordination.
@@ -20,6 +18,67 @@ enum ACTACanvasTileFrameOutcome {
     case unavailable
     case conflict
     case failed
+}
+
+@MainActor
+final class ACTACanvasTileFrameProvider: ACTACanvasTileFrameTransaction {
+    private weak var model: WallModel?
+    private let gestures: ACTACanvasGestureTracker
+    private struct Receipt {
+        let id: UUID
+        let cameraID: UUID
+        let frame: VideoTileFrame
+        let snapshot: ACTACanvasLayoutStore.Snapshot
+        let lifecycleRevision: UUID
+    }
+    private var receipt: Receipt?
+
+    init(model: WallModel, gestures: ACTACanvasGestureTracker? = nil) {
+        self.model = model
+        self.gestures = gestures ?? .shared
+    }
+
+    private func targetAvailable(_ id: UUID, in model: WallModel) -> Bool {
+        guard model.canvasFilterBridge.activeState != nil,
+              let config = try? model.cameraConfigurationChecked() else { return false }
+        let matches = config.cameras.filter { $0.id == id }
+        return matches.count == 1 && matches[0].enabled
+    }
+
+    func setFrame(_ frame: VideoTileFrame, for cameraID: UUID) -> ACTACanvasTileFrameOutcome {
+        receipt = nil
+        guard frame.isValid, let model, targetAvailable(cameraID, in: model) else { return .unavailable }
+        guard !gestures.hasActiveGestures else { return .busy }
+        guard let base = model.canvasLayoutSnapshot, model.layout == base.layout else { return .conflict }
+        var next = base.layout
+        next.frames[cameraID.uuidString] = frame
+        do {
+            let snapshot = try ACTACanvasLayoutStore(url: model.layoutURL).commit(next, expected: base)
+            model.publishCanvasLayout(snapshot)
+            let id = UUID()
+            receipt = Receipt(id: id, cameraID: cameraID, frame: frame, snapshot: snapshot,
+                              lifecycleRevision: model.canvasFilterBridge.lifecycleRevision)
+            return .written(id)
+        } catch ACTACanvasLayoutStore.Failure.busy {
+            return .busy
+        } catch ACTACanvasLayoutStore.Failure.conflict {
+            return .conflict
+        } catch {
+            return .failed
+        }
+    }
+
+    func verifies(_ id: UUID, frame: VideoTileFrame, for cameraID: UUID) -> Bool {
+        guard let model, let receipt, receipt.id == id, receipt.cameraID == cameraID,
+              receipt.frame == frame, !gestures.hasActiveGestures,
+              receipt.lifecycleRevision == model.canvasFilterBridge.lifecycleRevision,
+              targetAvailable(cameraID, in: model),
+              model.canvasLayoutSnapshot == receipt.snapshot,
+              model.layout == receipt.snapshot.layout,
+              receipt.snapshot.layout.frames[cameraID.uuidString] == frame,
+              let persisted = try? ACTACanvasLayoutStore(url: model.layoutURL).read() else { return false }
+        return persisted == receipt.snapshot
+    }
 }
 
 @MainActor

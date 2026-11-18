@@ -207,7 +207,7 @@ public struct CameraRemoveAction: ACTAActionProtocol {
 private final class CameraReconnectActionService {
     private weak var model: WallModel?
     private var inFlight = false
-    private var receipt: (request: String, camera: Camera, session: CameraSession)?
+    private var receipt: (request: String, camera: Camera, session: CameraSession, file: Bool)?
 
     init(model: WallModel) { self.model = model }
 
@@ -221,37 +221,56 @@ private final class CameraReconnectActionService {
         guard let camera = actaResolveCamera(request, model: model) else {
             return .failed(actionID: actionID, error: "NOT_FOUND: Camera does not exist or its name is ambiguous.")
         }
-        guard camera.fileURL == nil, camera.localDeviceID == nil, camera.screenDisplayID == nil else {
-            return .failed(actionID: actionID, error: "UNSUPPORTED: Only network cameras can be reconnected by this action.")
+        guard camera.localDeviceID == nil, camera.screenDisplayID == nil else {
+            return .failed(actionID: actionID, error: "UNSUPPORTED: Local camera and screen reconnect are not supported by this action.")
         }
         guard model.running, !model.connecting, camera.enabled else {
             return .failed(actionID: actionID, error: "UNAVAILABLE: Camera wall must be running and the camera enabled.")
         }
         inFlight = true
         defer { inFlight = false }
-        model.notice = "Reconnecting network camera; waiting for a fresh frame."
-        let session = try await model.reconnectNetworkVerified(camera)
-        try Task.checkCancellation()
-        guard try valid(camera: camera, session: session, model: model) else {
+        let isFile = camera.fileURL != nil
+        let session: CameraSession
+        let current: Camera
+        if isFile {
+            (session, current) = try model.reconnectFileScheduled(camera)
+            if Task.isCancelled {
+                model.discardFileReconnect(session, cameraID: camera.id)
+                throw CancellationError()
+            }
+        } else {
+            model.notice = "Reconnecting network camera; waiting for a fresh frame."
+            session = try await model.reconnectNetworkVerified(camera)
+            try Task.checkCancellation()
+            current = camera
+        }
+        guard try valid(camera: current, session: session, model: model, file: isFile) else {
             return .failed(actionID: actionID, error: "RECONNECT_NOT_VERIFIED: The replacement session is no longer current.")
         }
-        receipt = (request, camera, session)
+        receipt = (request, current, session, isFile)
         return ACTAActionResult(actionID: actionID, success: true,
-            summary: "Network camera reconnected and a fresh frame verified; continued availability is not guaranteed.")
+            summary: isFile
+                ? "File restart scheduled and replacement session verified; playback and frames were not verified."
+                : "Network camera reconnected and a fresh frame verified; continued availability is not guaranteed.")
     }
 
     func verify(_ request: String) throws -> Bool {
         defer { receipt = nil }
         guard !inFlight, let model, let receipt, receipt.request == request else { return false }
-        return try valid(camera: receipt.camera, session: receipt.session, model: model)
+        return try valid(camera: receipt.camera, session: receipt.session, model: model, file: receipt.file)
     }
 
-    private func valid(camera: Camera, session: CameraSession, model: WallModel) throws -> Bool {
+    private func valid(camera: Camera, session: CameraSession, model: WallModel, file: Bool) throws -> Bool {
         _ = try model.cameraConfigurationChecked()
+        guard model.running, !model.connecting, camera.enabled, model.config.cameras.contains(camera),
+              model.tiles[camera.id]?.session === session else { return false }
+        if file {
+            return !session.isStopped && camera.fileURL != nil
+                && camera.localDeviceID == nil && camera.screenDisplayID == nil
+        }
         let frame = session.snapshot()
         let now = ContinuousClock.now
-        guard model.running, !model.connecting, model.config.cameras.contains(camera),
-              model.tiles[camera.id]?.session === session, frame.pixel != nil,
+        guard frame.pixel != nil,
               let evidence = frame.reconnectEvidence, evidence.attemptID == session.attemptID,
               evidence.sequence > 0, evidence.receivedAt <= now else { return false }
         return evidence.receivedAt.duration(to: now) <= .seconds(2)
@@ -261,7 +280,7 @@ private final class CameraReconnectActionService {
 public struct CameraReconnectAction: ACTAActionProtocol {
     public let id = "camera.reconnect"
     public let title = "Reconnect Camera"
-    public let description = "Reconnect an enabled network camera on the running wall and verify a fresh frame. Local, screen and file sources are unsupported."
+    public let description = "Reconnect an enabled network camera with fresh-frame verification, or schedule a file restart and verify its replacement session (not playback). Local cameras and screen sources are unsupported."
     public let classification = ACTAActionClassification.serviceAffecting
     public let parameters = [
         ACTAActionParameterSchema(name: "camera_id", type: "string", description: "Camera UUID or name", isRequired: true)
@@ -378,7 +397,7 @@ public struct CanvasResetLayoutAction: ACTAActionProtocol {
 @MainActor
 struct WallSystemSettingsProvider: ACTASystemSettingsProvider {
     unowned let model: WallModel
-    func loadConfiguration() async throws -> WallConfiguration { model.config }
+    func loadConfiguration() async throws -> WallConfiguration { try model.cameraConfigurationChecked() }
     func saveConfiguration(_ config: WallConfiguration) async throws { try model.saveSystemSettings(config) }
 }
 

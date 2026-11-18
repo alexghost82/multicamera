@@ -42,6 +42,122 @@ final class ACTAAnalyticsActionAdapterTests: XCTestCase {
         return (root, model, camera.id)
     }
 
+    func testSetRestrictedZonePolygonCreatesAndReplacesAtomically() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
+        let (root, model, camera) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let registry = ACTAActionRegistry()
+        await registerAllWallActions(registry: registry, model: model)
+        let polygon = #"[{"x":0.1,"y":0.1},{"x":0.9,"y":0.1},{"x":0.5,"y":0.4},{"x":0.9,"y":0.9},{"x":0.1,"y":0.9}]"#
+        let args: [String: String] = ["camera_id": camera.uuidString, "name": "Entrance", "points_json": polygon]
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: args), as: UTF8.self)
+        let created = try await registry.executeJSON(actionID: "analytics.set_restricted_zone", argumentsJSON: json)
+        XCTAssertTrue(created.success, created.summary)
+        XCTAssertTrue(created.verified)
+        let saved = try VideoAnalyticsSettingsStore.load(from: model.localAnalyticsEngine.settingsURL)
+        XCTAssertEqual(saved, model.localAnalyticsEngine.settings)
+        let zone = try XCTUnwrap(saved.cameraOverrides[camera]?.restrictedZones.first)
+        XCTAssertEqual(zone.points, [NormalizedPoint(x: 0.1, y: 0.1), NormalizedPoint(x: 0.9, y: 0.1),
+                                     NormalizedPoint(x: 0.5, y: 0.4), NormalizedPoint(x: 0.9, y: 0.9),
+                                     NormalizedPoint(x: 0.1, y: 0.9)])
+        var draft = saved
+        draft.cameraOverrides[camera]?.restrictedZones[0].enabled = false
+        draft.cameraOverrides[camera]?.restrictedZones[0].holdSeconds = 9
+        draft.cameraOverrides[camera]?.restrictedZones[0].severity = .critical
+        try model.localAnalyticsEngine.updateSettings(draft)
+        let updated = try await registry.execute(actionID: "analytics.set_restricted_zone", parameters: [
+            "camera_id": camera.uuidString, "name": "entrance",
+            "points_json": #"[{"x":0,"y":0},{"x":1,"y":0},{"x":0,"y":1}]"#])
+        XCTAssertTrue(updated.success, updated.summary)
+        let final = try VideoAnalyticsSettingsStore.load(from: model.localAnalyticsEngine.settingsURL)
+        XCTAssertEqual(final, model.localAnalyticsEngine.settings)
+        let replacement = try XCTUnwrap(final.cameraOverrides[camera]?.restrictedZones.first)
+        XCTAssertEqual(final.cameraOverrides[camera]?.restrictedZones.count, 1)
+        XCTAssertEqual(replacement.id, zone.id)
+        XCTAssertEqual(replacement.name, zone.name)
+        XCTAssertFalse(replacement.enabled)
+        XCTAssertEqual(replacement.holdSeconds, 9)
+        XCTAssertEqual(replacement.severity, .critical)
+        XCTAssertEqual(replacement.points, [NormalizedPoint(x: 0, y: 0), NormalizedPoint(x: 1, y: 0), NormalizedPoint(x: 0, y: 1)])
+    }
+
+    func testSetRestrictedZoneRejectsInvalidPolygonWithoutMutation() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
+        let (root, model, camera) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let registry = ACTAActionRegistry()
+        await registerAllWallActions(registry: registry, model: model)
+        let rectangle = ["camera_id": camera.uuidString, "name": "Entrance", "x": "0.1", "y": "0.1", "width": "0.2", "height": "0.3"]
+        let created = try await registry.execute(actionID: "analytics.set_restricted_zone", parameters: rectangle)
+        XCTAssertTrue(created.success, created.summary)
+        let before = model.localAnalyticsEngine.settings
+        let bytes = try Data(contentsOf: model.localAnalyticsEngine.settingsURL)
+        let tooMany = "[" + Array(repeating: #"{"x":0,"y":0}"#, count: 65).joined(separator: ",") + "]"
+        let invalid = [
+            "", "not json", "[]", #"[{"x":0,"y":0},{"x":1,"y":0}]"#,
+            #"[{"x":true,"y":0},{"x":1,"y":0},{"x":0,"y":1}]"#,
+            #"[{"x":0,"y":0,"extra":1},{"x":1,"y":0},{"x":0,"y":1}]"#,
+            #"[{"x":0},{"x":1,"y":0},{"x":0,"y":1}]"#,
+            #"[{"x":-0.1,"y":0},{"x":1,"y":0},{"x":0,"y":1}]"#,
+            #"[{"x":0,"y":0},{"x":1,"y":0},{"x":0,"y":0}]"#,
+            #"[{"x":0,"y":0},{"x":0.5,"y":0},{"x":1,"y":0}]"#,
+            #"[{"x":0,"y":0},{"x":1,"y":1},{"x":0,"y":1},{"x":1,"y":0}]"#,
+            #"[{"x":0,"y":0},{"x":1,"y":0},{"x":0.5,"y":0},{"x":0,"y":1}]"#,
+            #"[{"x":0,"y":0},{"x":1,"y":0},{"x":1,"y":1},{"x":0.5,"y":0},{"x":0,"y":1}]"#,
+            tooMany
+        ]
+        for points in invalid {
+            let result = try await registry.execute(actionID: "analytics.set_restricted_zone", parameters: [
+                "camera_id": camera.uuidString, "name": "Entrance", "points_json": points])
+            XCTAssertFalse(result.success, points)
+            XCTAssertNotNil(result.error)
+            XCTAssertEqual(model.localAnalyticsEngine.settings, before)
+            XCTAssertEqual(try Data(contentsOf: model.localAnalyticsEngine.settingsURL), bytes)
+        }
+        let mixed = try await registry.execute(actionID: "analytics.set_restricted_zone",
+            parameters: rectangle.merging(["points_json": #"[{"x":0,"y":0},{"x":1,"y":0},{"x":0,"y":1}]"#]) { _, new in new })
+        XCTAssertFalse(mixed.success)
+        let incomplete = try await registry.execute(actionID: "analytics.set_restricted_zone",
+            parameters: ["camera_id": camera.uuidString, "name": "Entrance", "x": "0.1"])
+        XCTAssertFalse(incomplete.success)
+        XCTAssertEqual(model.localAnalyticsEngine.settings, before)
+        XCTAssertEqual(try Data(contentsOf: model.localAnalyticsEngine.settingsURL), bytes)
+    }
+
+    func testSetRestrictedZoneRectangleTypedJSONRegression() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
+        let (root, model, camera) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let registry = ACTAActionRegistry()
+        await registerAllWallActions(registry: registry, model: model)
+        let result = try await registry.executeJSON(actionID: "analytics.set_restricted_zone",
+            argumentsJSON: #"{"camera_id":"\#(camera.uuidString)","name":"Entrance","x":0.1,"y":0.2,"width":0.3,"height":0.4}"#)
+        XCTAssertTrue(result.success, result.summary)
+        XCTAssertTrue(result.verified)
+        let saved = try VideoAnalyticsSettingsStore.load(from: model.localAnalyticsEngine.settingsURL)
+        XCTAssertEqual(saved, model.localAnalyticsEngine.settings)
+        XCTAssertEqual(saved.cameraOverrides[camera]?.restrictedZones.first?.points,
+                       RestrictedZoneRegion.rectangle(name: "Entrance", x: 0.1, y: 0.2, width: 0.3, height: 0.4).points)
+        let zone = try XCTUnwrap(saved.cameraOverrides[camera]?.restrictedZones.first)
+        var draft = saved
+        draft.cameraOverrides[camera]?.restrictedZones[0].enabled = false
+        draft.cameraOverrides[camera]?.restrictedZones[0].holdSeconds = 9
+        try model.localAnalyticsEngine.updateSettings(draft)
+        let updated = try await registry.executeJSON(actionID: "analytics.set_restricted_zone",
+            argumentsJSON: #"{"camera_id":"\#(camera.uuidString)","name":"Entrance","x":0.1,"y":0.2,"width":0.5,"height":0.4}"#)
+        XCTAssertTrue(updated.success, updated.summary)
+        let final = try VideoAnalyticsSettingsStore.load(from: model.localAnalyticsEngine.settingsURL)
+        XCTAssertEqual(final, model.localAnalyticsEngine.settings)
+        let replacement = try XCTUnwrap(final.cameraOverrides[camera]?.restrictedZones.first)
+        XCTAssertEqual(replacement.id, zone.id)
+        XCTAssertFalse(replacement.enabled)
+        XCTAssertEqual(replacement.holdSeconds, 9)
+        XCTAssertEqual(replacement.points, RestrictedZoneRegion.rectangle(name: "Entrance", x: 0.1, y: 0.2, width: 0.5, height: 0.4).points)
+    }
+
     func testSensitivityProfilesMatchGUIAndSelectionDoesNotApplyPreset() async throws {
         let previous = IsolatedWallFixtureSupport.modelPreferences()
         defer { ModelSelectionRegistry.update(previous) }

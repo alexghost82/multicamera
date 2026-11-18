@@ -6,11 +6,14 @@ struct ACTASnapshotFrame: Sendable {
     let cameraID: UUID
     let frameID: UUID
     let capturedUptime: TimeInterval
+    let selectedUptime: TimeInterval
     let jpeg: Data
 }
 
 protocol ACTASnapshotFrameProvider: Sendable {
+    /// Copies the chosen frame; later frames do not replace the chosen bytes.
     func captureFreshFrame(cameraID: UUID) async throws -> ACTASnapshotFrame
+    func isCaptureValid(_ frame: ACTASnapshotFrame) async throws -> Bool
 }
 
 /// Implementations must serialize publication and verification for the exact
@@ -54,8 +57,7 @@ struct ACTASnapshotUnavailablePublisher: ACTASnapshotPublicationBackend {
 
 struct ACTASnapshotAction: ACTAPreparedConfirmationAction {
     struct Snapshot: Sendable {
-        let frameID: UUID
-        let capturedUptime: TimeInterval
+        let frame: ACTASnapshotFrame
         let request: ACTASnapshotExportFoundation.Request
     }
 
@@ -101,15 +103,22 @@ struct ACTASnapshotAction: ACTAPreparedConfirmationAction {
         -> ACTAPreparedConfirmation<Snapshot> {
         let (camera, path) = try parse(parameters)
         try Task.checkCancellation()
+        let startedAt = now()
         let frame = try await frames.captureFreshFrame(cameraID: camera)
         let instant = now()
-        guard frame.cameraID == camera, instant.isFinite, frame.capturedUptime.isFinite,
-              frame.capturedUptime >= 0, instant >= frame.capturedUptime,
-              instant - frame.capturedUptime <= 2 else { throw ACTASnapshotActionError.staleFrame }
+        guard frame.cameraID == camera, startedAt.isFinite, startedAt >= 0, instant.isFinite,
+              frame.capturedUptime.isFinite, frame.selectedUptime.isFinite,
+              frame.capturedUptime >= 0, frame.selectedUptime >= startedAt,
+              instant >= frame.selectedUptime, frame.selectedUptime >= frame.capturedUptime,
+              frame.selectedUptime - frame.capturedUptime <= 2,
+              instant - frame.selectedUptime < 300 else { throw ACTASnapshotActionError.staleFrame }
         guard frame.jpeg.count >= 4, frame.jpeg.count <= 8 * 1024 * 1024 else {
             throw ACTASnapshotActionError.invalidPreparation
         }
         let bytes = Data([UInt8](frame.jpeg))
+        let captured = ACTASnapshotFrame(cameraID: frame.cameraID, frameID: frame.frameID,
+                                         capturedUptime: frame.capturedUptime, selectedUptime: frame.selectedUptime,
+                                         jpeg: bytes)
         let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
         try Task.checkCancellation()
         let request = try await publisher.prepare(cameraID: camera, jpeg: bytes, destination: path)
@@ -119,18 +128,24 @@ struct ACTASnapshotAction: ACTAPreparedConfirmationAction {
             let preparedAt = now()
             guard preview.cameraID == camera, preview.destinationPath == path,
                   preview.byteCount == bytes.count, preview.sha256 == digest,
-                  preparedAt.isFinite, preparedAt >= frame.capturedUptime,
-                  preparedAt - frame.capturedUptime <= 2,
+                  preparedAt.isFinite, preparedAt >= frame.selectedUptime,
+                  preparedAt - frame.selectedUptime < 300,
                   let directory = preview.directoryIdentity else { throw ACTASnapshotActionError.invalidPreparation }
+            guard try await frames.isCaptureValid(captured) else { throw ACTASnapshotActionError.staleFrame }
+            try Task.checkCancellation()
+            let checkedAt = now()
+            guard checkedAt.isFinite, checkedAt >= frame.selectedUptime,
+                  checkedAt - frame.selectedUptime < 300 else { throw ACTASnapshotActionError.staleFrame }
             let encoder = JSONEncoder()
             encoder.outputFormatting = .withoutEscapingSlashes
             let encodedPath = String(decoding: try encoder.encode(path), as: UTF8.self)
             let summary = "Snapshot camera=\(camera.uuidString), frame=\(frame.frameID.uuidString), "
-                + "captured_uptime=\(frame.capturedUptime), destination=\(encodedPath), "
+                + "captured_uptime=\(frame.capturedUptime), selected_uptime=\(frame.selectedUptime), "
+                + "destination=\(encodedPath), "
                 + "directory_device=\(directory.device), directory_inode=\(directory.inode), "
                 + "bytes=\(preview.byteCount), sha256=\(preview.sha256). No overwrite."
             return ACTAPreparedConfirmation(
-                snapshot: Snapshot(frameID: frame.frameID, capturedUptime: frame.capturedUptime, request: request),
+                snapshot: Snapshot(frame: captured, request: request),
                 reviewSummary: summary
             )
         } catch {
@@ -146,14 +161,52 @@ struct ACTASnapshotAction: ACTAPreparedConfirmationAction {
 
     func executeConfirmed(parameters: [String: String], context: ACTAActionContext,
                           snapshot: Snapshot) async throws -> ACTAActionResult {
-        let (camera, path) = try parse(parameters)
+        let (camera, path): (UUID, String)
+        do {
+            (camera, path) = try parse(parameters)
+        } catch {
+            await publisher.cancel(snapshot.request)
+            throw error
+        }
+        let digest = SHA256.hash(data: snapshot.frame.jpeg).map { String(format: "%02x", $0) }.joined()
         guard context.isConfirmed, snapshot.request.preview.cameraID == camera,
               snapshot.request.preview.destinationPath == path,
+              snapshot.frame.cameraID == camera,
+              snapshot.request.preview.byteCount == snapshot.frame.jpeg.count,
+              snapshot.request.preview.sha256 == digest,
               snapshot.request.preview.directoryIdentity != nil else {
+            await publisher.cancel(snapshot.request)
             return .failed(actionID: id, error: "CONFIRMATION_MISMATCH: Reviewed snapshot does not match.")
         }
-        try Task.checkCancellation()
         do {
+            try Task.checkCancellation()
+            let instant = now()
+            guard instant.isFinite, snapshot.frame.selectedUptime.isFinite,
+                  instant >= snapshot.frame.selectedUptime,
+                  instant - snapshot.frame.selectedUptime < 300 else {
+                await publisher.cancel(snapshot.request)
+                return .failed(actionID: id, error: "STALE_FRAME: The reviewed capture is no longer valid.")
+            }
+            let valid: Bool
+            do {
+                valid = try await frames.isCaptureValid(snapshot.frame)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                await publisher.cancel(snapshot.request)
+                return .failed(actionID: id, error: "STALE_FRAME: The reviewed capture cannot be validated.")
+            }
+            guard valid else {
+                await publisher.cancel(snapshot.request)
+                return .failed(actionID: id, error: "STALE_FRAME: The reviewed capture is no longer valid.")
+            }
+            try Task.checkCancellation()
+            let checkedAt = now()
+            guard checkedAt.isFinite, checkedAt >= snapshot.frame.selectedUptime,
+                  checkedAt - snapshot.frame.selectedUptime < 300 else {
+                await publisher.cancel(snapshot.request)
+                return .failed(actionID: id, error: "STALE_FRAME: The reviewed capture is no longer valid.")
+            }
             try await publisher.publish(snapshot.request)
             guard try await publisher.verify(snapshot.request) else {
                 return .failed(actionID: id, error: "VERIFICATION_FAILED: Publication could not be verified.")
@@ -161,7 +214,11 @@ struct ACTASnapshotAction: ACTAPreparedConfirmationAction {
             return ACTAActionResult(actionID: id, success: true, summary: "Reviewed snapshot saved and verified.")
         } catch ACTASnapshotActionError.unsafePublication {
             return .failed(actionID: id, error: "UNAVAILABLE: Safe snapshot publication is not established; no file was written.")
+        } catch is CancellationError {
+            await publisher.cancel(snapshot.request)
+            throw CancellationError()
         } catch {
+            await publisher.cancel(snapshot.request)
             return .failed(actionID: id, error: "PUBLICATION_FAILED: Publication may be incomplete; reconcile before retrying.")
         }
     }

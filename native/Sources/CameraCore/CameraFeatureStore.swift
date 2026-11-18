@@ -48,6 +48,24 @@ public struct CameraFeatureJob: Codable, Equatable, Identifiable, Sendable {
     public let lastError: String?
 }
 
+public struct DescriptionJobRevision: Equatable, Sendable {
+    public let id: UUID
+    public let status: CameraFeatureJobStatus
+    public let attempts: Int
+    public let updatedAt: Date
+    public let revision: String
+}
+
+public struct DescriptionRetryReceipt: Equatable, Sendable {
+    public let jobID: UUID
+    public let operationID: UUID
+
+    public init(jobID: UUID, operationID: UUID) {
+        self.jobID = jobID
+        self.operationID = operationID
+    }
+}
+
 public struct CameraOperatorAction: Codable, Equatable, Identifiable, Sendable {
     public enum Kind: String, Codable, Sendable { case describeTracks = "describe_tracks" }
     public enum Status: String, Codable, Sendable { case pending, applied, rejected }
@@ -83,6 +101,7 @@ public enum CameraFeatureStoreError: LocalizedError {
     case identityProposalNotUndoable(UUID)
     case identityProposalAlreadyUndone(UUID)
     case identityReviewStale
+    case descriptionJobStale
 
     public var errorDescription: String? {
         switch self {
@@ -107,12 +126,13 @@ public enum CameraFeatureStoreError: LocalizedError {
         case .identityProposalNotUndoable(let id): "Identity proposal \(id) has not been accepted."
         case .identityProposalAlreadyUndone(let id): "Identity proposal \(id) was already undone."
         case .identityReviewStale: "Identity review evidence or graph changed; refresh before reviewing."
+        case .descriptionJobStale: "Description job or feature policy changed; refresh before retrying."
         }
     }
 }
 
 public final class CameraFeatureStore: @unchecked Sendable {
-    public static let schemaVersion = 6
+    public static let schemaVersion = 7
     public static let defaultPendingLimit = 500
     private static let maximumPayloadBytes = 64 * 1024
     private static let maximumErrorCharacters = 1000
@@ -312,6 +332,48 @@ public final class CameraFeatureStore: @unchecked Sendable {
                         """)
                     try execute("CREATE INDEX operations_alert_review_audit_id ON operations_alert_review_audit(alert_id, sequence)")
                     try execute("PRAGMA user_version = 6")
+                }
+            }
+            if version < 7 {
+                try transaction {
+                    try execute("""
+                        CREATE TABLE IF NOT EXISTS description_job_revisions (
+                            job_id TEXT PRIMARY KEY NOT NULL,
+                            revision TEXT NOT NULL
+                        )
+                        """)
+                    try execute("""
+                        INSERT OR IGNORE INTO description_job_revisions (job_id, revision)
+                        SELECT id, lower(hex(randomblob(16))) FROM feature_jobs
+                        """)
+                    try execute("""
+                        CREATE TRIGGER IF NOT EXISTS description_job_revision_insert AFTER INSERT ON feature_jobs
+                        BEGIN
+                            INSERT OR REPLACE INTO description_job_revisions (job_id, revision)
+                            VALUES (NEW.id, lower(hex(randomblob(16))));
+                        END
+                        """)
+                    try execute("""
+                        CREATE TRIGGER IF NOT EXISTS description_job_revision_update AFTER UPDATE ON feature_jobs
+                        BEGIN
+                            DELETE FROM description_job_revisions WHERE job_id=OLD.id;
+                            INSERT OR REPLACE INTO description_job_revisions (job_id, revision)
+                            VALUES (NEW.id, lower(hex(randomblob(16))));
+                        END
+                        """)
+                    try execute("""
+                        CREATE TRIGGER IF NOT EXISTS description_job_revision_delete AFTER DELETE ON feature_jobs
+                        BEGIN
+                            DELETE FROM description_job_revisions WHERE job_id=OLD.id;
+                        END
+                        """)
+                    try execute("""
+                        CREATE TABLE IF NOT EXISTS description_retry_receipts (
+                            operation_id TEXT PRIMARY KEY NOT NULL,
+                            job_id TEXT NOT NULL
+                        )
+                        """)
+                    try execute("PRAGMA user_version = 7")
                 }
             }
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
@@ -695,6 +757,84 @@ public final class CameraFeatureStore: @unchecked Sendable {
                 }
             }
         }
+    }
+
+    /// Metadata only. The revision changes on every job row update, including other connections.
+    func descriptionJobRevision(id: UUID) throws -> DescriptionJobRevision {
+        try locked { try readDescriptionJobRevision(id: id) }
+    }
+
+    /// The caller must hold the feature-policy lock and perform authorization separately.
+    func retryDescriptionJob(
+        expected: DescriptionJobRevision, preferences: CameraFeaturePreferences,
+        operationID: UUID, at time: Date = Date(), beforeCommit: () throws -> Void
+    ) throws -> DescriptionRetryReceipt {
+        try preferences.validate()
+        return try locked {
+            try transaction {
+                guard preferences.enabledFeatures.contains(.visionDescriptions) else {
+                    throw CameraFeatureStoreError.featureDisabled(.visionDescriptions)
+                }
+                let current = try readDescriptionJobRevision(id: expected.id)
+                guard current == expected else { throw CameraFeatureStoreError.descriptionJobStale }
+                guard current.status == .failed else { throw CameraFeatureStoreError.jobNotFailed(expected.id) }
+                let pending = try scalarInt("SELECT COUNT(*) FROM feature_jobs WHERE status IN ('queued','running')")
+                guard pending < pendingLimit else { throw CameraFeatureStoreError.pendingLimitReached(pendingLimit) }
+                try beforeCommit()
+                let update = try prepare("""
+                    UPDATE feature_jobs SET status='queued', updated_at=?, not_before=?, result_json=NULL
+                    WHERE id=? AND feature_id=? AND status='failed'
+                    """)
+                defer { sqlite3_finalize(update) }
+                sqlite3_bind_double(update, 1, time.timeIntervalSince1970)
+                sqlite3_bind_double(update, 2, time.timeIntervalSince1970)
+                bind(expected.id.uuidString, at: 3, to: update)
+                bind(CameraFeatureID.visionDescriptions.rawValue, at: 4, to: update)
+                guard sqlite3_step(update) == SQLITE_DONE, sqlite3_changes(database) == 1 else {
+                    throw CameraFeatureStoreError.descriptionJobStale
+                }
+                let receipt = try prepare("INSERT INTO description_retry_receipts (operation_id, job_id) VALUES (?, ?)")
+                defer { sqlite3_finalize(receipt) }
+                bind(operationID.uuidString, at: 1, to: receipt)
+                bind(expected.id.uuidString, at: 2, to: receipt)
+                guard sqlite3_step(receipt) == SQLITE_DONE else { throw databaseError() }
+                try beforeCommit()
+                return DescriptionRetryReceipt(jobID: expected.id, operationID: operationID)
+            }
+        }
+    }
+
+    func hasDescriptionRetryReceipt(_ receipt: DescriptionRetryReceipt) throws -> Bool {
+        try locked {
+            let statement = try prepare("SELECT 1 FROM description_retry_receipts WHERE operation_id=? AND job_id=?")
+            defer { sqlite3_finalize(statement) }
+            bind(receipt.operationID.uuidString, at: 1, to: statement)
+            bind(receipt.jobID.uuidString, at: 2, to: statement)
+            switch sqlite3_step(statement) {
+            case SQLITE_ROW: return true
+            case SQLITE_DONE: return false
+            default: throw databaseError()
+            }
+        }
+    }
+
+    private func readDescriptionJobRevision(id: UUID) throws -> DescriptionJobRevision {
+        let statement = try prepare("""
+            SELECT j.status, j.attempts, j.updated_at, r.revision
+            FROM feature_jobs j JOIN description_job_revisions r ON r.job_id=j.id
+            WHERE j.id=? AND j.feature_id=?
+            """)
+        defer { sqlite3_finalize(statement) }
+        bind(id.uuidString, at: 1, to: statement)
+        bind(CameraFeatureID.visionDescriptions.rawValue, at: 2, to: statement)
+        let result = sqlite3_step(statement)
+        guard result != SQLITE_DONE else { throw CameraFeatureStoreError.jobNotFound(id) }
+        guard result == SQLITE_ROW, let status = CameraFeatureJobStatus(rawValue: text(statement, 0)) else {
+            throw databaseError()
+        }
+        return DescriptionJobRevision(id: id, status: status, attempts: Int(sqlite3_column_int(statement, 1)),
+                                      updatedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 2)),
+                                      revision: text(statement, 3))
     }
 
     public func jobs(limit: Int = 100, featureID: CameraFeatureID? = nil) throws -> [CameraFeatureJob] {

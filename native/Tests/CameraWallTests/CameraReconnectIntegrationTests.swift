@@ -68,6 +68,9 @@ final class CameraReconnectIntegrationTests: XCTestCase {
     }
 
     private func fixture(_ transport: FakeReconnectTransport,
+                         fileStart: @escaping @MainActor (CameraSession, URL, Bool) -> Void = {
+                             _, url, access in if access { url.stopAccessingSecurityScopedResource() }
+                         },
                          start: @escaping @MainActor (CameraSession, String) -> Void) throws -> (URL, WallModel, Camera, CameraSession) {
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent(".build/reconnect-fixture-\(UUID().uuidString)", isDirectory: true)
@@ -90,7 +93,7 @@ final class CameraReconnectIntegrationTests: XCTestCase {
             cameraMemoryStore: CameraMemoryStore(url: root.appendingPathComponent("frames")),
             operationsWatchURL: root.appendingPathComponent("watches.json"),
             missionStoreURL: root.appendingPathComponent("missions.json"),
-            cameraCredentialStore: ReconnectCredentials(), reconnectDecoderStart: start,
+            cameraCredentialStore: ReconnectCredentials(), reconnectDecoderStart: start, fileDecoderStart: fileStart,
             operationsPreferencesURL: root.appendingPathComponent("operations.json"),
             alertClipStore: CriticalAlertClipStore(url: root.appendingPathComponent("clips")),
             languageSettings: LanguageSettings(storage: ReconnectLanguageStorage()),
@@ -102,6 +105,137 @@ final class CameraReconnectIntegrationTests: XCTestCase {
         model.tiles[camera.id]?.session = old
         model.running = true
         return (root, model, camera, old)
+    }
+
+    private func configureFile(_ root: URL, model: WallModel, camera: Camera, exists: Bool = true) throws -> Camera {
+        let url = root.appendingPathComponent("fixture.video")
+        if exists { try Data("fixture".utf8).write(to: url) }
+        var file = camera
+        file.substream = ""
+        file.fileURL = url
+        model.config.cameras = [file]
+        try ConfigurationStore.save(model.config, to: root.appendingPathComponent("cameras.json"))
+        return file
+    }
+
+    func testFileActionAndGUIUseSameIsolatedRestartWithoutClaimingFrames() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
+        let transport = FakeReconnectTransport()
+        var starts: [CameraSession] = []
+        let (root, model, camera, old) = try fixture(transport, fileStart: { session, url, access in
+            if access { url.stopAccessingSecurityScopedResource() }
+            starts.append(session)
+        }) { _, _ in XCTFail("Unexpected network decoder") }
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let file = try configureFile(root, model: model, camera: camera)
+        let otherID = UUID()
+        let otherTile = TileState(id: otherID)
+        let otherSession = CameraSession()
+        otherTile.session = otherSession
+        model.tiles[otherID] = otherTile
+        let action = CameraReconnectAction(model: model)
+        let parameters = ["camera_id": file.id.uuidString]
+        let result = try await action.execute(parameters: parameters, context: ACTAActionContext())
+        XCTAssertTrue(result.success)
+        XCTAssertTrue(result.summary.contains("playback and frames were not verified"))
+        let verified = try await action.verify(parameters: parameters, context: ACTAActionContext())
+        XCTAssertTrue(verified)
+        XCTAssertTrue(model.tiles[file.id]?.session === starts.first)
+        XCTAssertFalse(model.tiles[file.id]?.session === old)
+        XCTAssertNil(starts.first?.snapshot().pixel)
+        XCTAssertTrue(otherTile.session === otherSession)
+        model.reconnect(file)
+        try await waitUntil { starts.count == 2 }
+        XCTAssertTrue(model.tiles[file.id]?.session === starts.last)
+        XCTAssertTrue(otherTile.session === otherSession)
+        XCTAssertTrue(transport.names.isEmpty)
+    }
+
+    func testFileActionRejectsMissingFileAndReadbackDetectsReplacement() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
+        let transport = FakeReconnectTransport()
+        var starts: [CameraSession] = []
+        let (root, model, camera, old) = try fixture(transport, fileStart: { session, url, access in
+            if access { url.stopAccessingSecurityScopedResource() }
+            starts.append(session)
+        }) { _, _ in XCTFail("Unexpected network decoder") }
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let file = try configureFile(root, model: model, camera: camera, exists: false)
+        let action = CameraReconnectAction(model: model)
+        let parameters = ["camera_id": file.id.uuidString]
+        do {
+            _ = try await action.execute(parameters: parameters, context: ACTAActionContext())
+            XCTFail("Missing file must fail")
+        } catch {}
+        XCTAssertTrue(model.tiles[file.id]?.session === old)
+        XCTAssertTrue(starts.isEmpty)
+        try Data("fixture".utf8).write(to: try XCTUnwrap(file.fileURL))
+        let result = try await action.execute(parameters: parameters, context: ACTAActionContext())
+        XCTAssertTrue(result.success)
+        model.tiles[file.id]?.session = old
+        let verified = try await action.verify(parameters: parameters, context: ACTAActionContext())
+        XCTAssertFalse(verified)
+        starts.first?.stop()
+        XCTAssertTrue(transport.names.isEmpty)
+    }
+
+    func testCancelledFileRestartStopsOnlyItsReplacement() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
+        let transport = FakeReconnectTransport()
+        var replacement: CameraSession?
+        let (root, model, camera, _) = try fixture(transport, fileStart: { session, url, access in
+            if access { url.stopAccessingSecurityScopedResource() }
+            replacement = session
+            withUnsafeCurrentTask { $0?.cancel() }
+        }) { _, _ in XCTFail("Unexpected network decoder") }
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let file = try configureFile(root, model: model, camera: camera)
+        let otherTile = TileState(id: UUID())
+        let otherSession = CameraSession()
+        otherTile.session = otherSession
+        model.tiles[otherTile.id] = otherTile
+        let task = Task {
+            try await CameraReconnectAction(model: model).execute(
+                parameters: ["camera_id": file.id.uuidString], context: ACTAActionContext())
+        }
+        do { _ = try await task.value; XCTFail("Cancellation must not report success") }
+        catch is CancellationError {}
+        XCTAssertNotNil(replacement)
+        XCTAssertNil(model.tiles[file.id]?.session)
+        replacement?.publish(try pixel(), message: "late")
+        XCTAssertNil(replacement?.snapshot().pixel)
+        XCTAssertTrue(otherTile.session === otherSession)
+        XCTAssertTrue(transport.names.isEmpty)
+    }
+
+    func testFileReadbackRejectsStoppedSessionAndPrecancelDoesNotStart() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
+        let transport = FakeReconnectTransport()
+        var starts: [CameraSession] = []
+        let (root, model, camera, old) = try fixture(transport, fileStart: { session, url, access in
+            if access { url.stopAccessingSecurityScopedResource() }
+            starts.append(session)
+        }) { _, _ in XCTFail("Unexpected network decoder") }
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let file = try configureFile(root, model: model, camera: camera)
+        let action = CameraReconnectAction(model: model)
+        let parameters = ["camera_id": file.id.uuidString]
+        let task = Task { try await action.execute(parameters: parameters, context: ACTAActionContext()) }
+        task.cancel()
+        do { _ = try await task.value; XCTFail("Precancelled restart must fail") }
+        catch is CancellationError {}
+        XCTAssertTrue(starts.isEmpty)
+        XCTAssertTrue(model.tiles[file.id]?.session === old)
+        let result = try await action.execute(parameters: parameters, context: ACTAActionContext())
+        XCTAssertTrue(result.success)
+        try XCTUnwrap(starts.first).stop()
+        let verified = try await action.verify(parameters: parameters, context: ACTAActionContext())
+        XCTAssertFalse(verified)
+        XCTAssertTrue(transport.names.isEmpty)
     }
 
     func testLatePatchIsIsolatedAndOnlyFreshReplacementIsInstalled() async throws {
@@ -203,6 +337,14 @@ final class CameraReconnectIntegrationTests: XCTestCase {
         let unsupported = try await action.execute(parameters: parameters, context: ACTAActionContext())
         XCTAssertFalse(unsupported.success)
         XCTAssertTrue(unsupported.error?.hasPrefix("UNSUPPORTED:") == true)
+        var screen = local
+        screen.localDeviceID = nil
+        screen.screenDisplayID = "1"
+        model.config.cameras = [screen]
+        try ConfigurationStore.save(model.config, to: root.appendingPathComponent("cameras.json"))
+        let unsupportedScreen = try await action.execute(parameters: parameters, context: ACTAActionContext())
+        XCTAssertFalse(unsupportedScreen.success)
+        XCTAssertTrue(unsupportedScreen.error?.hasPrefix("UNSUPPORTED:") == true)
         XCTAssertTrue(transport.names.isEmpty)
     }
 

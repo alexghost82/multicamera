@@ -932,3 +932,137 @@ swift test --package-path native --disable-automatic-resolution --jobs 2 --filte
 Дополнительно изолированно проверен CameraCore из обновлённого тестового
 бинарника: **190 XCTest и 53 Swift Testing**, без ошибок. Весь CameraWall suite
 и реальное оборудование при этом не запускались.
+
+## Продолжение Phase 1: идентификаторы источников и защита снимков
+
+`camera.edit` теперь поддерживает изменение идентификатора существующего
+отключённого local/screen-источника, когда стена и обработка камер остановлены.
+Проверены сохранение, readback и аудит на изолированных фикстурах; доступность
+устройств и реальный захват не проверялись.
+
+Удаление текста автомобиля в GUI теперь сравнивает подтверждённое evidence с
+записью SQLite и использует условное обновление, не удаляя более новую запись.
+Удаляется только поле трека: копии в поисковых индексах остаются. Агентское
+действие не опубликовано; авторизация и полная семантика удаления не доказаны.
+
+Для геометрии canvas добавлен provider и изолированные проверки состояния,
+конфликтов и жизненного цикла. Действие не зарегистрировано: старые процессы и
+жесты других процессов обходят координацию. Для повторного запуска description
+job добавлены проверка ревизии и транзакционная квитанция (аддитивная миграция
+SQLite до версии 7); проверены конфликт, отмена и повторное открытие хранилища.
+Действие не зарегистрировано: доверенная авторизация и интеграция с production
+provider не реализованы, старые записи политики могут обходить блокировку.
+При первом открытии существующая база feature jobs обновляется до версии 7.
+Старая сборка, поддерживающая только версию 6, откажется открыть её; откат
+бинарника без восстановления совместимой резервной копии не проверен.
+
+Проверка изолированных тестов: **50 XCTest**, без ошибок. Реальные камеры, GUI,
+модели и полный набор тестов не запускались. Phase 1 остаётся незавершённой.
+Дополнительные **7 XCTest** проверили настоящий переход тестовой базы с версии
+6 на 7, отмену транзакции, сохранность квитанции и отказ GUI-модели удалять
+текст, изменённый другим соединением. Они не являются проверкой отрисовки GUI.
+
+```sh
+swift test --package-path native --disable-automatic-resolution --jobs 2 --filter 'CameraFeatureStoreTests|CameraFeatureCoordinatorTests|VehicleTextRemovalSafetyTests|VehicleTextRemovalReviewTests|ACTACameraConfigurationActionTests|ACTACanvasTileFrameActionTests|ACTACanvasTileFrameProviderTests|ACTADescriptionJobActionsTests'
+swift test --package-path native --disable-automatic-resolution --jobs 2 --filter 'VehicleTextRemovalSafetyTests|VehicleTextRemovalReviewTests|CameraFeatureStoreTests/testVersionSixJobsGainRevisionsAndRetryReceipts|CameraFeatureStoreTests/testDescriptionRetryRejectsStaleRevisionAndCommitsReceiptAtomically|CameraFeatureCoordinatorTests/testDescriptionRetryRejectsChangedFeaturePolicy'
+make -C native localization-audit
+git diff --check
+```
+
+Дополнительно подготовлены изолированные основы:
+
+- Отдельный opt-in реестр с локальными capabilities и их отзывом. Существующий
+  production/shared реестр им не заменён и не получил авторизацию; нужен
+  доверенный broker, подключение GUI и аудит. Это не граница безопасности ОС.
+- Вызовы модели теперь сверяются с каталогом конкретного запроса и действующим
+  allowlist; нерекламируемые имена и альтернативные transport-имена отклоняются
+  с аудитом без аргументов. Это ограничение каталога не заменяет авторизацию.
+- Журнал закрытия главы с транзакционным сохранением и повторной сверкой.
+  GUI и agent action не подключены; политика хранения чувствительных входных
+  данных и восстановление после реального сбоя не доказаны.
+- Проверка identity обычного файла модели через descriptor и hash. Она не
+  подключена к path-based загрузчикам и не защищает каталоги моделей.
+- Provider снимка проверяет свежесть при выборе кадра и удерживает полученные
+  JPEG-байты на время подтверждения, не требуя остановки потока. Пиксели BGRA
+  и NV12 копируются перед асинхронным кодированием. Операция не опубликована:
+  посторонняя запись во время копирования и атомарность production-записи не
+  исключены; отклонённое подтверждение может удерживать ограниченные ресурсы.
+
+Изолированный прогон этих основ: **10 XCTest и 39 Swift Testing**, без ошибок:
+
+```sh
+swift test --package-path native --disable-automatic-resolution --jobs 2 --filter 'ACTAActionRegistryTests|SelectedModelFileIdentityTests|ACTANarrativeCloseJournalTests'
+swift test --package-path native --disable-automatic-resolution --jobs 2 --filter 'ACTASnapshotExportFoundationTests|ACTASnapshotActionTests|ACTASnapshotFrameProviderTests'
+```
+
+Проверка основы снимков: **28 Swift Testing**, без ошибок; реальные камеры и
+публикация через production backend не проверялись.
+
+Проверка каталога модели, аудита, адаптеров и реестра: **22 XCTest и
+39 Swift Testing**, без ошибок:
+
+```sh
+swift test --package-path native --disable-automatic-resolution --jobs 2 --filter 'ACTAModelGeneratedRegistryJSONTests|ACTAIncidentSearchTests|ACTACameraConfigurationActionTests|ACTAServiceAdapterTests|ACTAActionRegistryTests'
+```
+
+Критичные классы реестра теперь требуют подтверждения даже если конкретный
+action ошибочно его отключает. Дополнительная регрессия адаптеров и реестра:
+**37 XCTest и 41 Swift Testing**, без ошибок:
+
+```sh
+swift test --package-path native --disable-automatic-resolution --jobs 2 --filter 'ACTAActionRegistryTests|ACTAAnalyticsActionAdapterTests|ACTASettingsActionAdapterTests|ACTAServiceAdapterTests|ACTAModelGeneratedRegistryJSONTests|ACTAOperationalAdapterTests'
+```
+
+Подготовлен отдельный local broker: в нём все модельные мутации требуют
+подтверждения и действуют сессионные capabilities. **Production его не
+использует**: legacy-пути обходят его, а разрешения и приватность результатов
+чтения в production ещё не проверены. Отдельный SwiftUI review показывает
+полные параметры и результат подготовки, но не подключён к чату или голосу.
+Проверены **48 Swift Testing и 2 XCTest** на синтетических действиях:
+
+```sh
+swift test --package-path native --disable-automatic-resolution --jobs 2 --filter 'ACTALocalActionBrokerTests|ACTABrokerReviewViewTests|ACTAActionRegistryTests'
+```
+
+`incident.get` дополнен сроком подавления инцидента из GUI domain service.
+Свободный текст и evidence не раскрываются. Изолированная проверка:
+**5 XCTest**, включая повторное чтение после изменения статуса.
+
+```sh
+swift test --package-path native --disable-automatic-resolution --jobs 2 --filter ACTAIncidentReadActionsTests
+```
+
+`settings.update_system` явно отклоняет неподдерживаемые порты и путь,
+нечисловые и неконечные значения; сохранено ограничение числовых диапазонов.
+Несовпадение конфигурации с диском обнаруживается при чтении, но проверка и
+запись не образуют межпроцессную CAS. Проверены **16 XCTest и 41 Swift Testing**:
+
+```sh
+swift test --package-path native --disable-automatic-resolution --jobs 2 --filter 'ACTASystemPortActionTests|ACTASystemLanguageActionTests|ACTASettingsActionAdapterTests|ACTAActionRegistryTests'
+```
+
+`analytics.set_restricted_zone` поддерживает как прямоугольники, так и простые
+полигоны с нормализованными координатами; некорректная геометрия отклоняется
+до сохранения. Сырые ответы локальной модели больше не записываются в
+`agentTrace`. Проверены **26 XCTest** для аналитики, приватности, инцидентов
+и каталога вызовов:
+
+```sh
+swift test --package-path native --disable-automatic-resolution --jobs 2 --filter 'ACTAAnalyticsActionAdapterTests|ACTAAIAgentPrivacyTests|ACTAModelGeneratedRegistryJSONTests|ACTAIncidentReadActionsTests'
+```
+
+`camera.reconnect` для файловых источников планирует перезапуск и проверяет
+замену сессии, не утверждая успешное воспроизведение или получение кадра.
+Обновление устаревшего bookmark при агентском вызове не сохраняется; GUI сохраняет
+прежнее поведение. Отмена после замены не восстанавливает прежнюю сессию.
+Реальное воспроизведение, stale bookmark и local/screen источники не проверены.
+
+Для удаления трека подготовлен неподключённый журнал с проверкой снимка и
+повторной очисткой crop-файлов. Проверка: **9 XCTest**, включая stale state,
+partial failure и замену файла. Он не подключён к GUI или агенту: старые
+процессы обходят координацию, восстановление при запуске отсутствует, а
+производные индексные копии не удаляются.
+
+```sh
+swift test --package-path native --disable-automatic-resolution --jobs 2 --filter 'ACTATrackDeletionJournalTests|VehicleTextRemovalSafetyTests'
+```

@@ -43,7 +43,7 @@ private enum IncidentGetValidationError: LocalizedError {
 struct ACTAIncidentGetAction: ACTAActionProtocol {
     let id = "incident.get"
     let title = "Get Incident"
-    let description = "Read minimal incident metadata by UUID from the incident service."
+    let description = "Read incident metadata and the suppression deadline by UUID; sensitive details and evidence are not exposed."
     let classification = ACTAActionClassification.inspect
     let parameters = [
         ACTAActionParameterSchema(name: "incident_id", type: "string",
@@ -110,7 +110,8 @@ private struct IncidentPayload: Encodable {
         self.incident = Metadata(id: incident.id, camera_id: incident.cameraID,
                                  type: incident.type, severity: incident.severity,
                                  status: incident.status, created_at: incident.createdAt,
-                                 updated_at: incident.updatedAt)
+                                 updated_at: incident.updatedAt,
+                                 suppressed_until: incident.suppressedUntil)
     }
 
     struct Metadata: Encodable {
@@ -121,5 +122,6 @@ private struct IncidentPayload: Encodable {
         let status: SafetyIncidentStatus
         let created_at: Date
         let updated_at: Date
+        let suppressed_until: Date?
     }
 }

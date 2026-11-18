@@ -74,6 +74,7 @@ final class ACTACanvasFilterBridge {
         weak var state: ACTACanvasFilterState?
     }
     private var entries: [Entry] = []
+    private(set) var lifecycleRevision = UUID()
     private weak var writtenState: ACTACanvasFilterState?
     private weak var arrangeWrittenState: ACTACanvasFilterState?
     private weak var presentationWrittenState: ACTACanvasFilterState?
@@ -84,6 +85,7 @@ final class ACTACanvasFilterBridge {
     private var selectionValue: Set<UUID>?
 
     func attach(_ state: ACTACanvasFilterState) {
+        lifecycleRevision = UUID()
         writtenState = nil
         arrangeWrittenState = nil
         presentationWrittenState = nil
@@ -95,6 +97,7 @@ final class ACTACanvasFilterBridge {
     }
 
     func detach(_ state: ACTACanvasFilterState) {
+        lifecycleRevision = UUID()
         writtenState = nil
         arrangeWrittenState = nil
         presentationWrittenState = nil

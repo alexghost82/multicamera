@@ -5,7 +5,8 @@ import Foundation
 public enum ACTAActionClassification: String, Codable, Sendable {
     /// Read-only inspection; does not mutate state or write to disk. Auto-approved.
     case inspect
-    /// Reversible mutation (e.g. changing column count, adjusting sensitivity threshold, acknowledging an alert). Auto-approved.
+    /// Reversible mutation (e.g. changing column count, adjusting sensitivity threshold, acknowledging an alert).
+    /// The legacy registry auto-approves unless the action requests confirmation; the local broker requires it.
     case reversible
     /// Affects active streaming or system services (reconnecting streams, switching models, restarting relays). Notice provided.
     case serviceAffecting
@@ -61,6 +62,7 @@ public struct ACTAActionParameterSchema: Codable, Sendable, Equatable {
 
 public struct ACTAActionContext: Sendable {
     public let threadID: String
+    /// Untrusted descriptive metadata, not an authenticated identity.
     public let initiator: String // "text_chat", "voice_asr", "ui_direct", "mission_schedule"
     public let now: Date
     public let trackingStore: (any Sendable)?
@@ -79,6 +81,25 @@ public struct ACTAActionContext: Sendable {
         self.trackingStore = trackingStore
         self.isConfirmed = isConfirmed
     }
+}
+
+/// Opaque, in-process capabilities. Possession is authority: never expose these to a
+/// model, tool arguments, persistence, or untrusted code. They are not an OS boundary.
+public final class ACTALocalAuthority: Sendable {
+    init() {}
+}
+
+public final class ACTALocalPrincipal: Sendable {
+    init() {}
+}
+
+/// Read-only catalogue metadata; unlike an action object it cannot execute an action.
+public struct ACTAActionDescriptor: Sendable, Equatable {
+    public let id: String
+    public let title: String
+    public let description: String
+    public let classification: ACTAActionClassification
+    public let parameters: [ACTAActionParameterSchema]
 }
 
 public struct ACTAActionResult: Codable, Sendable, Equatable {

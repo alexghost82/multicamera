@@ -20,6 +20,13 @@ private struct PrivacyStructuredResponse: Codable, Sendable {
     let value: String
 }
 
+private final class AgentTraceProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries: [String] = []
+    func record(_ entry: String) { lock.lock(); defer { lock.unlock() }; entries.append(entry) }
+    func read() -> [String] { lock.lock(); defer { lock.unlock() }; return entries }
+}
+
 final class ACTAAIAgentPrivacyTests: XCTestCase {
     private func request() -> ACTAAgentRequest {
         ACTAAgentRequest(instructions: "Use tools", fullInput: [
@@ -140,5 +147,26 @@ final class ACTAAIAgentPrivacyTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? ACTAAgentError, .noBackendAvailable)
         }
+    }
+
+    func testAgentTraceNeverContainsModelOutputOrReviewValues() async throws {
+        let trace = AgentTraceProbe()
+        let secret = "private-review-fixture"
+        let client = ACTAAIClient(
+            config: ACTAAIConfiguration(mode: .mlxInProcess),
+            transport: { _ in XCTFail("Unexpected network request"); throw URLError(.notConnectedToInternet) },
+            keyProvider: { _ in XCTFail("Unexpected Keychain access"); return nil },
+            agentTrace: { trace.record($0) },
+            localAgentInference: { _, _ in
+                #"{"tool_calls":[{"name":"acta__canvas__set_columns","arguments":{"value":"private-review-fixture"}}]}"#
+            }
+        )
+        let response = try await client.runAgentStep(request: request())
+        XCTAssertEqual(response.functionCalls.first?.arguments["value"], secret)
+        let entries = trace.read()
+        XCTAssertTrue(entries.contains { $0.hasPrefix("RESPONSE chars=") })
+        XCTAssertFalse(entries.contains { $0.contains(secret) })
+        XCTAssertFalse(entries.contains { $0.contains("private question") })
+        XCTAssertFalse(entries.contains { $0.contains("private tool result") })
     }
 }

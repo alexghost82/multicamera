@@ -155,6 +155,8 @@ public actor ACTASnapshotExportFoundation {
         defer { close(fd) }
         try Self.writeAndVerify(entry.jpeg, fd: fd, beforeReadback: beforeReadback)
         beforeIdentityCheck()
+        // Narrows the readback-to-identity window; it does not exclude later writes.
+        try Self.verify(entry.jpeg, fd: fd)
         let fileIdentity = try Self.requireSameFile(fd: fd, leaf: leaf, directory: directory)
         try Self.requireSameParent(entry.preview.destinationPath, directory: directory)
         return Receipt(preview: entry.preview, fileIdentity: fileIdentity)
@@ -248,6 +250,10 @@ public actor ACTASnapshotExportFoundation {
         }
         guard fsync(fd) == 0 else { throw Failure.publicationFailed }
         beforeReadback(fd)
+        try verify(data, fd: fd)
+    }
+
+    private static func verify(_ data: Data, fd: Int32) throws {
         var info = stat()
         guard fstat(fd, &info) == 0, info.st_size == data.count else { throw Failure.verificationFailed }
         var buffer = [UInt8](repeating: 0, count: min(64 * 1024, data.count))

@@ -958,6 +958,34 @@ public final class LocalTrackingStore: @unchecked Sendable {
     }
 
     @discardableResult
+    public func clearVehicleTextEvidence(matching expected: VehicleTextEvidence) throws -> Bool {
+        guard expected.isValid else { throw LocalTrackingStoreError.invalidVehicleTextEvidence }
+        lock.lock()
+        defer { lock.unlock() }
+        let query = try prepare("SELECT vehicle_text_json FROM tracked_objects WHERE track_id=?")
+        defer { sqlite3_finalize(query) }
+        bind(expected.trackID.uuidString, at: 1, to: query)
+        let step = sqlite3_step(query)
+        if step == SQLITE_DONE { throw LocalTrackingStoreError.missingTrack(expected.trackID) }
+        guard step == SQLITE_ROW else { throw databaseError() }
+        guard sqlite3_column_type(query, 0) != SQLITE_NULL,
+              let value = sqlite3_column_text(query, 0) else { return false }
+        let json = String(cString: value)
+        guard json.utf8.count <= 64 * 1024,
+              let current = try? JSONDecoder().decode(VehicleTextEvidence.self, from: Data(json.utf8)),
+              current.isValid, current.trackID == expected.trackID else {
+            throw LocalTrackingStoreError.invalidVehicleTextEvidence
+        }
+        guard current == expected else { return false }
+        let statement = try prepare("UPDATE tracked_objects SET vehicle_text_json=NULL WHERE track_id=? AND vehicle_text_json=?")
+        defer { sqlite3_finalize(statement) }
+        bind(expected.trackID.uuidString, at: 1, to: statement)
+        bind(json, at: 2, to: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseError() }
+        return sqlite3_changes(database) == 1
+    }
+
+    @discardableResult
     public func purgeExpired(now: Date = Date()) throws -> Int {
         lock.lock()
         defer { lock.unlock() }

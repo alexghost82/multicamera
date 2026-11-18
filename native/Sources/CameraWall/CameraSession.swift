@@ -71,6 +71,12 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         return frame
     }
 
+    var isStopped: Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        return stopped
+    }
+
     func stop() {
         condition.lock()
         stopped = true

@@ -20,6 +20,7 @@ public actor ACTAActionRegistry {
         public let reviewTitle: String
         fileprivate let actionGeneration: UUID
         fileprivate let preparedExecution: PreparedExecution?
+        fileprivate let requester: ACTALocalPrincipal?
     }
 
     fileprivate struct PreparedExecution: Sendable {
@@ -34,43 +35,136 @@ public actor ACTAActionRegistry {
     private var preparationReservations = 0
     private let maxPendingConfirmations: Int
     private let confirmationNow: @Sendable () -> Date
+    private let authority: ACTALocalAuthority?
+    private let forceMutationConfirmation: Bool
+    private struct Grant {
+        let principal: ACTALocalPrincipal
+        let actionIDs: Set<String>
+        let canRequest: Bool
+        let canReview: Bool
+    }
+    private var grants: [ObjectIdentifier: Grant] = [:]
 
+    /// Legacy registry: callers are trusted and no registry authorization is enforced.
     public init() {
         confirmationNow = { Date() }
         maxPendingConfirmations = Self.maxPendingConfirmationCount
+        authority = nil
+        forceMutationConfirmation = false
     }
 
     init(confirmationNow: @escaping @Sendable () -> Date, maxPendingConfirmations: Int = ACTAActionRegistry.maxPendingConfirmationCount) {
         precondition(maxPendingConfirmations > 0)
         self.confirmationNow = confirmationNow
         self.maxPendingConfirmations = maxPendingConfirmations
+        authority = nil
+        forceMutationConfirmation = false
+    }
+
+    private init(authority: ACTALocalAuthority, forceMutationConfirmation: Bool) {
+        self.authority = authority
+        self.forceMutationConfirmation = forceMutationConfirmation
+        confirmationNow = { Date() }
+        maxPendingConfirmations = Self.maxPendingConfirmationCount
+    }
+
+    /// The caller must retain the authority privately and act as the trusted broker.
+    /// This separate opt-in registry does not change the legacy shared registry.
+    public nonisolated static func makeAuthorized(
+        forceMutationConfirmation: Bool = false
+    ) -> (registry: ACTAActionRegistry, authority: ACTALocalAuthority) {
+        let authority = ACTALocalAuthority()
+        return (ACTAActionRegistry(authority: authority, forceMutationConfirmation: forceMutationConfirmation), authority)
+    }
+
+    /// Capabilities are registry-specific, scoped to explicit action IDs, and revocable.
+    public func issuePrincipal(
+        authority: ACTALocalAuthority, actionIDs: Set<String>, canRequest: Bool, canReview: Bool
+    ) -> ACTALocalPrincipal? {
+        guard self.authority === authority, !actionIDs.isEmpty, canRequest || canReview else { return nil }
+        let principal = ACTALocalPrincipal()
+        grants[ObjectIdentifier(principal)] = Grant(
+            principal: principal, actionIDs: actionIDs, canRequest: canRequest, canReview: canReview
+        )
+        return principal
+    }
+
+    @discardableResult
+    public func revoke(_ principal: ACTALocalPrincipal, authority: ACTALocalAuthority) -> Bool {
+        guard self.authority === authority, grants.removeValue(forKey: ObjectIdentifier(principal)) != nil else { return false }
+        pendingConfirmations = pendingConfirmations.filter { $0.value.requester !== principal }
+        return true
+    }
+
+    private func permits(_ principal: ACTALocalPrincipal?, actionID: String, review: Bool) -> Bool {
+        guard let principal, let grant = grants[ObjectIdentifier(principal)],
+              grant.principal === principal, grant.actionIDs.contains(actionID) else { return false }
+        return review ? grant.canReview : grant.canRequest
     }
 
     // MARK: - Registration
 
     public func register(_ action: any ACTAActionProtocol) {
+        guard authority == nil else { return }
+        registerAction(action)
+    }
+
+    @discardableResult
+    public func register(_ action: any ACTAActionProtocol, authority: ACTALocalAuthority) -> Bool {
+        guard self.authority === authority else { return false }
+        registerAction(action)
+        return true
+    }
+
+    private func registerAction(_ action: any ACTAActionProtocol) {
         pendingConfirmations = pendingConfirmations.filter { $0.value.actionID != action.id }
         actions[action.id] = action
         actionGenerations[action.id] = UUID()
     }
 
     public func unregister(actionID: String) {
+        guard authority == nil else { return }
+        unregisterAction(actionID: actionID)
+    }
+
+    @discardableResult
+    public func unregister(actionID: String, authority: ACTALocalAuthority) -> Bool {
+        guard self.authority === authority else { return false }
+        unregisterAction(actionID: actionID)
+        return true
+    }
+
+    private func unregisterAction(actionID: String) {
         pendingConfirmations = pendingConfirmations.filter { $0.value.actionID != actionID }
         actions.removeValue(forKey: actionID)
         actionGenerations.removeValue(forKey: actionID)
     }
 
     public func action(for id: String) -> (any ACTAActionProtocol)? {
+        guard authority == nil else { return nil }
         return actions[id]
     }
 
     public func allActions() -> [any ACTAActionProtocol] {
+        guard authority == nil else { return [] }
         return Array(actions.values).sorted(by: { $0.id < $1.id })
+    }
+
+    /// Exposes only metadata in the requester's scope, never executable action objects.
+    public func authorizedCatalog(principal: ACTALocalPrincipal) -> [ACTAActionDescriptor] {
+        guard authority != nil else { return [] }
+        return actions.values.filter { permits(principal, actionID: $0.id, review: false) }
+            .sorted { $0.id < $1.id }
+            .map {
+                ACTAActionDescriptor(id: $0.id, title: $0.title, description: $0.description,
+                                     classification: $0.classification, parameters: $0.parameters)
+            }
     }
 
     // MARK: - OpenAI Function-Calling Tool Export
 
     public func openAITools() -> [[String: Any]] {
+        guard authority == nil else { return [] }
         return actions.values.sorted(by: { $0.id < $1.id }).map { action in
             var properties: [String: Any] = [:]
             var required: [String] = []
@@ -111,6 +205,23 @@ public actor ACTAActionRegistry {
         parameters: [String: String],
         context: ACTAActionContext = ACTAActionContext()
     ) async throws -> ACTAActionResult {
+        guard authority == nil else { return authorizationDenied(actionID) }
+        return try await request(actionID: actionID, parameters: parameters, context: context, principal: nil)
+    }
+
+    public func execute(
+        actionID: String, parameters: [String: String], context: ACTAActionContext = ACTAActionContext(),
+        principal: ACTALocalPrincipal
+    ) async throws -> ACTAActionResult {
+        guard authority != nil, permits(principal, actionID: actionID, review: false) else {
+            return authorizationDenied(actionID)
+        }
+        return try await request(actionID: actionID, parameters: parameters, context: context, principal: principal)
+    }
+
+    private func request(
+        actionID: String, parameters: [String: String], context: ACTAActionContext, principal: ACTALocalPrincipal?
+    ) async throws -> ACTAActionResult {
         let unconfirmedContext = ACTAActionContext(
             threadID: context.threadID,
             initiator: context.initiator,
@@ -119,7 +230,8 @@ public actor ACTAActionRegistry {
             isConfirmed: false
         )
         return try await executeValidated(
-            actionID: actionID, parameters: parameters, context: unconfirmedContext, confirmed: false
+            actionID: actionID, parameters: parameters, context: unconfirmedContext, confirmed: false,
+            principal: principal
         )
     }
 
@@ -131,13 +243,34 @@ public actor ACTAActionRegistry {
         context: ACTAActionContext = ACTAActionContext(),
         beforeExecution: @escaping @Sendable ([String: String]) throws -> Void = { _ in }
     ) async throws -> ACTAActionResult {
+        guard authority == nil else { return authorizationDenied(actionID) }
+        return try await requestJSON(actionID: actionID, argumentsJSON: argumentsJSON, context: context,
+                                     principal: nil, beforeExecution: beforeExecution)
+    }
+
+    public func executeJSON(
+        actionID: String, argumentsJSON: String, context: ACTAActionContext = ACTAActionContext(),
+        principal: ACTALocalPrincipal,
+        beforeExecution: @escaping @Sendable ([String: String]) throws -> Void = { _ in }
+    ) async throws -> ACTAActionResult {
+        guard authority != nil, permits(principal, actionID: actionID, review: false) else {
+            return authorizationDenied(actionID)
+        }
+        return try await requestJSON(actionID: actionID, argumentsJSON: argumentsJSON, context: context,
+                                     principal: principal, beforeExecution: beforeExecution)
+    }
+
+    private func requestJSON(
+        actionID: String, argumentsJSON: String, context: ACTAActionContext, principal: ACTALocalPrincipal?,
+        beforeExecution: @escaping @Sendable ([String: String]) throws -> Void
+    ) async throws -> ACTAActionResult {
         let unconfirmedContext = ACTAActionContext(
             threadID: context.threadID, initiator: context.initiator, now: context.now,
             trackingStore: context.trackingStore, isConfirmed: false
         )
         return try await executeValidated(
             actionID: actionID, parameters: [:], context: unconfirmedContext, confirmed: false,
-            argumentsJSON: argumentsJSON, beforeExecution: beforeExecution
+            argumentsJSON: argumentsJSON, beforeExecution: beforeExecution, principal: principal
         )
     }
 
@@ -149,8 +282,12 @@ public actor ACTAActionRegistry {
         argumentsJSON: String? = nil,
         beforeExecution: (@Sendable ([String: String]) throws -> Void)? = nil,
         expectedGeneration: UUID? = nil,
-        preparedExecution: PreparedExecution? = nil
+        preparedExecution: PreparedExecution? = nil,
+        principal: ACTALocalPrincipal? = nil
     ) async throws -> ACTAActionResult {
+        if authority != nil && !permits(principal, actionID: actionID, review: false) {
+            return authorizationDenied(actionID)
+        }
         if let expectedGeneration, actionGenerations[actionID] != expectedGeneration {
             return .failed(actionID: actionID, error: "CONFIRMATION_REVOKED: The action was replaced or unregistered.")
         }
@@ -205,7 +342,9 @@ public actor ACTAActionRegistry {
         }
 
         // 1. Check Destructive / Security Confirmation Gate
-        if action.requiresConfirmation(parameters: parameters) && !confirmed {
+        let critical = action.classification == .destructive || action.classification == .securitySensitive
+        let forced = forceMutationConfirmation && action.classification != .inspect
+        if (forced || critical || action.requiresConfirmation(parameters: parameters)) && !confirmed {
             cleanupExpiredConfirmations()
             guard pendingConfirmations.count + preparationReservations < maxPendingConfirmations else {
                 return .failed(actionID: actionID, error: "CONFIRMATION_CAPACITY: Too many pending confirmations; resolve or wait for existing confirmations to expire.")
@@ -231,6 +370,10 @@ public actor ACTAActionRegistry {
                 }
             } else {
                 prepared = nil
+            }
+            // Preparation suspends the actor; a requester may have been revoked meanwhile.
+            if authority != nil && !permits(principal, actionID: actionID, review: false) {
+                return authorizationDenied(actionID)
             }
             if let prepared,
                (prepared.reviewSummary.utf8.count > Self.maxPreparedReviewSummaryUTF8Bytes
@@ -259,7 +402,8 @@ public actor ACTAActionRegistry {
                 expiresAt: createdAt.addingTimeInterval(300), // 5 minutes TTL
                 reviewTitle: summary,
                 actionGeneration: actionGeneration,
-                preparedExecution: prepared
+                preparedExecution: prepared,
+                requester: principal
             )
             pendingConfirmations[token] = pending
 
@@ -315,6 +459,10 @@ public actor ACTAActionRegistry {
 
     // MARK: - Confirmation Resolution
 
+    private func authorizationDenied(_ actionID: String) -> ACTAActionResult {
+        .failed(actionID: actionID, error: "AUTHORIZATION_DENIED: Local capability is missing, revoked, or out of scope.")
+    }
+
     private static func prepare<Action: ACTAPreparedConfirmationAction>(
         _ action: Action, parameters: [String: String], context: ACTAActionContext
     ) async throws -> PreparedExecution {
@@ -325,6 +473,7 @@ public actor ACTAActionRegistry {
     }
 
     public func confirmAndExecute(token: String, confirmed: Bool) async throws -> ACTAActionResult {
+        guard authority == nil else { return authorizationDenied("unknown") }
         cleanupExpiredConfirmations()
         guard let pending = pendingConfirmations[token] else {
             return ACTAActionResult.failed(actionID: "unknown", error: "Confirmation token '\(token)' is invalid or expired.")
@@ -344,7 +493,8 @@ public actor ACTAActionRegistry {
         expectedParameters: [String: String],
         expectedThreadID: String
     ) async throws -> ACTAActionResult {
-        try await confirmReviewed(token: token, confirmed: confirmed, expectedActionID: expectedActionID,
+        guard authority == nil else { return authorizationDenied(expectedActionID) }
+        return try await confirmReviewed(token: token, confirmed: confirmed, expectedActionID: expectedActionID,
                                   expectedParameters: expectedParameters, expectedThreadID: expectedThreadID,
                                   expectedReviewTitle: nil)
     }
@@ -358,9 +508,24 @@ public actor ACTAActionRegistry {
         expectedThreadID: String,
         expectedReviewTitle: String
     ) async throws -> ACTAActionResult {
-        try await confirmReviewed(token: token, confirmed: confirmed, expectedActionID: expectedActionID,
+        guard authority == nil else { return authorizationDenied(expectedActionID) }
+        return try await confirmReviewed(token: token, confirmed: confirmed, expectedActionID: expectedActionID,
                                   expectedParameters: expectedParameters, expectedThreadID: expectedThreadID,
                                   expectedReviewTitle: expectedReviewTitle)
+    }
+
+    /// Requires a local review capability and the exact displayed review; possession
+    /// does not by itself prove a human reviewed it.
+    public func confirmAndExecute(
+        token: String, confirmed: Bool, expectedActionID: String, expectedParameters: [String: String],
+        expectedThreadID: String, expectedReviewTitle: String, principal: ACTALocalPrincipal
+    ) async throws -> ACTAActionResult {
+        guard authority != nil, permits(principal, actionID: expectedActionID, review: true) else {
+            return authorizationDenied(expectedActionID)
+        }
+        return try await confirmReviewed(token: token, confirmed: confirmed, expectedActionID: expectedActionID,
+                                         expectedParameters: expectedParameters, expectedThreadID: expectedThreadID,
+                                         expectedReviewTitle: expectedReviewTitle)
     }
 
     private func confirmReviewed(
@@ -387,14 +552,16 @@ public actor ACTAActionRegistry {
     }
 
     public func confirmationMatches(token: String, actionID: String, parameters: [String: String], threadID: String) -> Bool {
-        confirmationMatchesReviewed(token: token, actionID: actionID, parameters: parameters,
+        guard authority == nil else { return false }
+        return confirmationMatchesReviewed(token: token, actionID: actionID, parameters: parameters,
                                     threadID: threadID, reviewTitle: nil)
     }
 
     public func confirmationMatches(
         token: String, actionID: String, parameters: [String: String], threadID: String, expectedReviewTitle: String
     ) -> Bool {
-        confirmationMatchesReviewed(token: token, actionID: actionID, parameters: parameters,
+        guard authority == nil else { return false }
+        return confirmationMatchesReviewed(token: token, actionID: actionID, parameters: parameters,
                                     threadID: threadID, reviewTitle: expectedReviewTitle)
     }
 
@@ -449,7 +616,8 @@ public actor ACTAActionRegistry {
             context: confirmedContext,
             confirmed: true,
             expectedGeneration: pending.actionGeneration,
-            preparedExecution: pending.preparedExecution
+            preparedExecution: pending.preparedExecution,
+            principal: pending.requester
         )
     }
 

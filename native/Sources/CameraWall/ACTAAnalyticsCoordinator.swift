@@ -1718,92 +1718,60 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         "live_look", "run_readonly_sql"
     ]
 
+    private func rejectUnadvertisedTool(
+        name: String, threadID: String, now: Date,
+        reason: String = "TOOL_NOT_ADVERTISED: Tool is not in the applicable catalogue."
+    ) -> (outputJSON: String, resultRows: Int, savedClipID: String?, attachedImages: [Data]) {
+        var error = reason
+        if let store = trackingStore {
+            do {
+                try store.recordACTAToolCallAudit(ACTAToolCallAuditRecord(
+                    threadID: threadID, toolName: name, argsJSON: "{}", resultRows: 0,
+                    durationMs: 0, ok: false, error: error, createdAt: now))
+            } catch let auditError {
+                reportStorageFailure(auditError)
+                error = "AUDIT_FAILED: Could not record rejected action."
+            }
+        } else {
+            error = "AUDIT_FAILED: Action audit store is unavailable."
+        }
+        let output = (try? JSONSerialization.data(withJSONObject: ["tool": name, "error": error])) ?? Data("{}".utf8)
+        return (String(decoding: output, as: UTF8.self), 0, nil, [])
+    }
+
     func executeModelGeneratedAgentTool(
         _ call: ACTAAgentFunctionCall, threadID: String,
+        requestToolNames: Set<String>,
         liveFrames: [ACTALiveCameraFrame] = [], cameraNames: [UUID: String] = [:],
-        now: Date = Date(), registry: ACTAActionRegistry = .shared
+        now: Date = Date(), registry: ACTAActionRegistry = .shared,
+        broker: ACTALocalActionBroker? = nil, brokerSession: ACTABrokerSession? = nil
     ) async -> (outputJSON: String, resultRows: Int, savedClipID: String?, attachedImages: [Data]) {
+        guard requestToolNames.contains(call.name) else {
+            return rejectUnadvertisedTool(name: call.name, threadID: threadID, now: now)
+        }
         if Self.legacyAgentToolNames.contains(call.name) {
             return await executeAgentTool(toolName: call.name, arguments: call.arguments, threadID: threadID,
                                           liveFrames: liveFrames, cameraNames: cameraNames, now: now)
         }
 
-        let start = Date()
-        let registryID = call.name.hasPrefix("acta__")
-            ? String(call.name.dropFirst(6)).replacingOccurrences(of: "__", with: ".") : call.name
-        let validated = ACTAValidatedArguments()
-        let store = trackingStore
-        var output: [String: Any] = ["tool": call.name]
-        var rows = 0
-        var errorMessage: String?
-        do {
-            let result = try await registry.executeJSON(
-                actionID: registryID, argumentsJSON: call.rawArgumentsJSON,
-                context: ACTAActionContext(threadID: threadID, initiator: "text_chat", now: now, trackingStore: store),
-                beforeExecution: { arguments in
-                    guard let store else { throw ConfigurationError.invalid("Action audit store is unavailable.") }
-                    let audit = actaActionAuditArguments(registryID, arguments)
-                    try store.recordACTAToolCallAudit(ACTAToolCallAuditRecord(
-                        threadID: threadID, toolName: registryID,
-                        argsJSON: String(decoding: try JSONEncoder().encode(audit), as: UTF8.self),
-                        resultRows: 0, durationMs: 0, ok: false, error: "PENDING_EXECUTION", createdAt: now))
-                    validated.set(arguments)
-                }
-            )
-            if validated.get() == nil, result.error?.hasPrefix("UNSUPPORTED: Unsupported action:") == true {
-                output["status"] = "unknown_tool"
-                output["available_tools"] = Self.agentTools.map(\.name)
-            } else {
-                output["action_result"] = result.summary
-                output["action_success"] = result.success
-                output["action_verified"] = result.verified
-                if result.requiresOperatorConfirmation {
-                    output["requires_operator_confirmation"] = true
-                    output["confirmation_token"] = result.confirmationToken
-                    if let token = result.confirmationToken, let arguments = validated.get(), let store {
-                        try store.saveACTAChatAction(ACTAChatActionRecord(
-                            actionID: token, threadID: threadID, actionType: registryID, title: result.summary,
-                            parameters: arguments, status: "proposed", createdAt: now))
-                    }
-                }
-                if let error = result.error { output["error"] = error; errorMessage = error }
-                if let data = result.outputJSON.data(using: .utf8),
-                   let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    for (key, value) in parsed { output[key] = value }
-                }
-                rows = result.success ? 1 : 0
-            }
-        } catch {
-            errorMessage = error.localizedDescription
-            output["error"] = error.localizedDescription
+        guard call.name == "acta__canvas__set_presentation", let broker, let brokerSession else {
+            return rejectUnadvertisedTool(name: call.name, threadID: threadID, now: now,
+                reason: "UNSUPPORTED: This action has no authorized local review.")
         }
+        let result = await broker.request(session: brokerSession, actionID: "canvas.set_presentation",
+                                          argumentsJSON: call.rawArgumentsJSON)
+        var response: [String: Any] = ["tool": call.name, "action_success": result.success,
+                                       "action_verified": result.verified]
+        if result.requiresOperatorConfirmation {
+            response["requires_operator_confirmation"] = true
+            response["action_result"] = "Operator review required."
+        } else {
+            response["action_result"] = result.success ? "Action completed." : "Action failed."
+            if let error = result.error { response["error"] = error }
+        }
+        let data = (try? JSONSerialization.data(withJSONObject: response)) ?? Data("{}".utf8)
+        return (String(decoding: data, as: UTF8.self), result.success ? 1 : 0, nil, [])
 
-        if validated.get() == nil {
-            if let store {
-                do {
-                    try store.recordACTAToolCallAudit(ACTAToolCallAuditRecord(
-                        threadID: threadID, toolName: registryID, argsJSON: "{}",
-                        resultRows: 0, durationMs: max(1, Int(Date().timeIntervalSince(start) * 1000)),
-                        ok: false, error: "REJECTED_BEFORE_EXECUTION", createdAt: now))
-                } catch {
-                    reportStorageFailure(error)
-                    output["error"] = "AUDIT_FAILED: Could not record rejected action."
-                }
-            } else {
-                output["error"] = "AUDIT_FAILED: Action audit store is unavailable."
-            }
-        } else if let arguments = validated.get(), let store {
-            let audit = actaActionAuditArguments(registryID, arguments)
-            let argsJSON = (try? String(data: JSONEncoder().encode(audit), encoding: .utf8)) ?? "{}"
-            do {
-                try store.recordACTAToolCallAudit(ACTAToolCallAuditRecord(
-                    threadID: threadID, toolName: call.name, argsJSON: argsJSON,
-                    resultRows: rows, durationMs: max(1, Int(Date().timeIntervalSince(start) * 1000)),
-                    ok: errorMessage == nil, error: errorMessage, createdAt: now))
-            } catch { reportStorageFailure(error) }
-        }
-        let data = (try? JSONSerialization.data(withJSONObject: output)) ?? Data("{}".utf8)
-        return (String(decoding: data, as: UTF8.self), rows, nil, [])
     }
 
     /// Executes a supported agent tool and records an audit entry in `ghost_chat_tool_calls`.
@@ -1814,7 +1782,8 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         liveCameraImages: [Data] = [],
         liveFrames: [ACTALiveCameraFrame] = [],
         cameraNames: [UUID: String] = [:],
-        now: Date = Date()
+        now: Date = Date(),
+        registry: ACTAActionRegistry = .shared
     ) async -> (outputJSON: String, resultRows: Int, savedClipID: String?, attachedImages: [Data]) {
         let start = Date()
         var outputDict: [String: Any] = ["tool": toolName]
@@ -2485,36 +2454,8 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
                 outputDict["rows"] = rows
 
             default:
-                if let _ = await ACTAActionRegistry.shared.action(for: registryID) {
-                    guard let trackingStore else { throw ConfigurationError.invalid("Action audit store is unavailable.") }
-                    // Persist intent before a mutation can run. Never execute if this write fails.
-                    try trackingStore.recordACTAToolCallAudit(ACTAToolCallAuditRecord(threadID: threadID,
-                        toolName: registryID, argsJSON: String(decoding: try JSONEncoder().encode(auditArguments), as: UTF8.self),
-                        resultRows: 0, durationMs: 0, ok: false, error: "PENDING_EXECUTION", createdAt: now))
-                    let actionContext = ACTAActionContext(threadID: threadID, initiator: "text_chat", now: now, trackingStore: trackingStore)
-                    let result = try await ACTAActionRegistry.shared.execute(actionID: registryID, parameters: arguments, context: actionContext)
-                    outputDict["action_result"] = result.summary
-                    outputDict["action_success"] = result.success
-                    outputDict["action_verified"] = result.verified
-                    if result.requiresOperatorConfirmation {
-                        outputDict["requires_operator_confirmation"] = true
-                        outputDict["confirmation_token"] = result.confirmationToken
-                        if let token = result.confirmationToken {
-                            try trackingStore.saveACTAChatAction(ACTAChatActionRecord(actionID: token,
-                                threadID: threadID, actionType: registryID, title: result.summary,
-                                parameters: arguments, status: "proposed", createdAt: now))
-                        }
-                    }
-                    if let error = result.error { outputDict["error"] = error; errorMsg = error }
-                    if let rawData = result.outputJSON.data(using: .utf8),
-                       let parsed = try? JSONSerialization.jsonObject(with: rawData) as? [String: Any] {
-                        for (k, v) in parsed { outputDict[k] = v }
-                    }
-                    rowsCount = result.success ? 1 : 0
-                } else {
-                    outputDict["status"] = "unknown_tool"
-                    outputDict["available_tools"] = Self.agentTools.map(\.name)
-                }
+                return rejectUnadvertisedTool(name: toolName, threadID: threadID, now: now,
+                    reason: "UNSUPPORTED: Registry actions require an authorized local review.")
             }
         } catch {
             errorMsg = error.localizedDescription
@@ -2556,7 +2497,9 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         cameraNames: [UUID: String] = [:],
         maxSteps: Int = 6,
         onProgress: (@Sendable (String) -> Void)? = nil,
-        now: Date = Date()
+        now: Date = Date(),
+        broker: ACTALocalActionBroker? = nil,
+        brokerSession: ACTABrokerSession? = nil
     ) async -> ACTAChatPresentAnswer {
         let strippedQuestion = ACTAOpSec.stripPersona(question)
         let detectedLang = ACTAPromptLanguage.detect(
@@ -2746,7 +2689,16 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         var finalResponseID: String?
         var finalBackend: ACTAAgentBackend?
         var liveLookClipID: String?
-        let actionTools = try await Self.registryTools()
+        let actionTools: [ACTAAgentToolSpec]
+        if let broker, let brokerSession,
+           await broker.catalogue(session: brokerSession).contains(where: { $0.id == "canvas.set_presentation" }) {
+            actionTools = [ACTAAgentToolSpec(
+                name: "acta__canvas__set_presentation",
+                description: "Propose changing the camera presentation. Operator review is required.",
+                parametersSchemaJSON: #"{"type":"object","properties":{"mode":{"type":"string","enum":["grid","list"]}},"required":["mode"],"additionalProperties":false}"#)]
+        } else {
+            actionTools = []
+        }
         let requestTools = Self.agentTools + actionTools
         let stepBudget = localMode ? min(4, max(2, maxSteps)) : max(1, maxSteps)
         var generationError: String?
@@ -2829,9 +2781,12 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
                 let output = await executeModelGeneratedAgentTool(
                     call,
                     threadID: threadID,
+                    requestToolNames: isLastStep ? [] : Set(requestTools.map(\.name)),
                     liveFrames: allLiveFrames,
                     cameraNames: cameraNames,
-                    now: now
+                    now: now,
+                    broker: broker,
+                    brokerSession: brokerSession
                 )
                 evidenceLedger.record(outputJSON: output.outputJSON, tool: call.name)
                 if let clip = output.savedClipID { liveLookClipID = clip }
@@ -2956,6 +2911,8 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
         expectedAction: ACTAChatActionRecord? = nil,
         now: Date = Date()
     ) -> ACTAChatActionRecord? {
+        // Persisted proposals are not bound to a live, exact broker review.
+        guard !confirmed else { return nil }
         do {
             guard let store = trackingStore,
                   let proposal = try store.loadACTAChatAction(actionID: actionID), proposal.status == "proposed" else { return nil }

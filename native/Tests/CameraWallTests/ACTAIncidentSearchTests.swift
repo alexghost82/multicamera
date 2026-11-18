@@ -251,11 +251,10 @@ final class ACTAIncidentSearchTests: XCTestCase {
             XCTAssertEqual(args["note"], "[redacted]")
         }
         let otherRows = rows.filter { $0["tool_name"] == otherID }
-        XCTAssertEqual(otherRows.count, 2)
+        XCTAssertEqual(otherRows.count, 1)
         for row in otherRows {
             let json = try XCTUnwrap(row["args_json"])
-            let args = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: String])
-            XCTAssertEqual(args["query"], query)
+            XCTAssertEqual(json, "{}")
         }
     }
 }

@@ -5,9 +5,9 @@ import CameraCore
 struct VehicleTextRemovalReview {
     let evidence: VehicleTextEvidence
 
-    func apply(current: VehicleTextEvidence?, remove: (UUID) -> Void) -> Bool {
+    func apply(current: VehicleTextEvidence?, remove: (VehicleTextEvidence) -> Void) -> Bool {
         guard current == evidence else { return false }
-        remove(evidence.trackID)
+        remove(evidence)
         return true
     }
 }
@@ -312,7 +312,7 @@ struct IdentityHistoryView: View {
             Button("Remove saved text", role: .destructive) {
                 let review = VehicleTextRemovalReview(evidence: evidence)
                 guard review.apply(current: model.savedVehicleTextEvidence[evidence.trackID],
-                                   remove: model.clearVehicleTextEvidence(for:)) else {
+                                   remove: model.clearVehicleTextEvidence(matching:)) else {
                     model.notice = appLanguage.localized("Saved vehicle text changed; review it again before removing.")
                     pendingTextRemoval = nil
                     return

@@ -156,47 +156,16 @@ struct VLMPanel: View {
                                     in: RoundedRectangle(cornerRadius: 8))
                         .id(msg.messageID)
                     }
-                    ForEach(model.actaChatActions, id: \.actionID) { action in
-                        let requiresTokenReview = action.actionID.hasPrefix("CONFIRM-")
-                        VStack(alignment: .leading, spacing: 8) {
-                            Label(requiresTokenReview ? languageSettings.localized("Review proposed action") : (action.title.isEmpty ? "Proposed Action: \(action.actionType)" : action.title), systemImage: "bolt.shield")
-                                .font(.system(size: ACTAType.caption, weight: .semibold))
-                            Text(action.actionType)
-                                .font(.system(size: ACTAType.metadata))
-                                .foregroundStyle(.secondary)
-                                .textSelection(.enabled)
-                            if requiresTokenReview {
-                                Text(verbatim: action.title)
-                                    .font(.system(size: ACTAType.caption))
-                                    .textSelection(.enabled)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Action details")
-                                let values = actaReviewArguments(action.actionType, action.parameters)
-                                ForEach(values.keys.sorted(), id: \.self) { key in
-                                    Text(verbatim: "\(key): \(values[key] ?? "")")
-                                        .font(.system(size: ACTAType.caption))
-                                        .textSelection(.enabled)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
-                            }
-                            .accessibilityIdentifier("acta-action-details-\(action.actionID)")
-                            HStack {
-                                Button {
-                                    model.reviewACTAChatAction(action, confirmed: true)
-                                } label: {
-                                    Label("Confirm", systemImage: "checkmark")
-                                }
-                                Button(role: .destructive) {
-                                    model.reviewACTAChatAction(action, confirmed: false)
-                                } label: {
-                                    Label("Reject", systemImage: "xmark")
-                                }
-                            }
+                    ForEach(model.actaBrokerReviews) { controller in
+                        ACTABrokerReviewView(controller: controller) { result in
+                            model.finishACTABrokerReview(controller, result: result)
                         }
                         .padding(8)
                         .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+                    }
+                    if !model.actaChatActions.isEmpty {
+                        Text("Historical proposals cannot be reviewed safely. Create a new request.")
+                            .font(.system(size: ACTAType.caption))
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

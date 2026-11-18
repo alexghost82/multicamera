@@ -120,9 +120,75 @@ final class ACTAIncidentReadActionsTests: XCTestCase {
     }
 
     @MainActor
+    func testEngineProviderReadsSuppressionDeadlineAndReflectsDomainChangesWithoutWriting() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".incident-read-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let incidentsURL = directory.appendingPathComponent("incidents.json")
+        let auditURL = directory.appendingPathComponent("audit.json")
+        let engine = LocalVideoAnalyticsEngine(
+            settingsURL: directory.appendingPathComponent("settings.json"),
+            incidentsURL: incidentsURL,
+            evidenceDirectoryURL: directory.appendingPathComponent("evidence"),
+            auditLogURL: auditURL,
+            modelDiscovery: AnalyticsModelDiscovery(modelURL: { _ in nil }, integrity: { _ in
+                XCTFail("Model integrity must not be read")
+                throw ACTAIncidentReadProviderError.unavailable
+            }))
+        let candidate = BehaviorSafetyCandidate(
+            cameraID: UUID(), trackIDs: [], type: .fallConfirmed, confidence: 0.9,
+            monotonicTimestamp: 1, occurredAt: Date(timeIntervalSince1970: 0),
+            title: "synthetic-secret-title", explanation: "synthetic-secret-explanation",
+            detectorSource: "synthetic-secret-source", requiresSecondaryVLMVerification: true)
+        let incident = try XCTUnwrap(engine.incidentManager.ingest(
+            candidate: candidate, cameraName: "synthetic-secret-camera",
+            clipID: UUID(), snapshotRelativePath: "/synthetic-secret-path"))
+        let deadline = Date(timeIntervalSince1970: 360)
+        _ = try XCTUnwrap(engine.incidentManager.transitionStatus(
+            incidentID: incident.id, to: .suppressed, operatorNote: "synthetic-secret-note",
+            suppressDurationSeconds: 300, at: Date(timeIntervalSince1970: 60)))
+
+        let action = ACTAIncidentGetAction(provider: ACTAEngineIncidentReadProvider(engine: engine))
+        let registry = ACTAActionRegistry()
+        await registry.register(action)
+        let parameters = ["incident_id": incident.id.uuidString]
+        let beforeIncidents = try Data(contentsOf: incidentsURL)
+        let beforeAudit = try Data(contentsOf: auditURL)
+        let first = try await registry.execute(actionID: action.id, parameters: parameters)
+        let second = try await registry.execute(actionID: action.id, parameters: parameters)
+        XCTAssertTrue(first.success, first.summary)
+        XCTAssertTrue(second.success, second.summary)
+        let firstObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(first.outputJSON.utf8)) as? [String: Any])
+        let secondObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(second.outputJSON.utf8)) as? [String: Any])
+        let firstMetadata = try XCTUnwrap(firstObject["incident"] as? [String: Any])
+        let secondMetadata = try XCTUnwrap(secondObject["incident"] as? [String: Any])
+        XCTAssertEqual(firstMetadata as NSDictionary, secondMetadata as NSDictionary)
+        XCTAssertEqual(Set(firstMetadata.keys), ["id", "camera_id", "type", "severity", "status",
+                                                 "created_at", "updated_at", "suppressed_until"])
+        XCTAssertEqual(firstMetadata["status"] as? String, "SUPPRESSED")
+        let formattedDeadline = ISO8601DateFormatter().string(from: deadline)
+        XCTAssertEqual(firstMetadata["suppressed_until"] as? String, formattedDeadline)
+        XCTAssertFalse(first.outputJSON.contains("synthetic-secret"))
+        XCTAssertEqual(try Data(contentsOf: incidentsURL), beforeIncidents)
+        XCTAssertEqual(try Data(contentsOf: auditURL), beforeAudit)
+
+        _ = try XCTUnwrap(engine.incidentManager.transitionStatus(
+            incidentID: incident.id, to: .active, at: Date(timeIntervalSince1970: 120)))
+        let reopened = try await registry.execute(actionID: action.id, parameters: parameters)
+        XCTAssertTrue(reopened.success, reopened.summary)
+        let reopenedObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(reopened.outputJSON.utf8)) as? [String: Any])
+        let reopenedMetadata = try XCTUnwrap(reopenedObject["incident"] as? [String: Any])
+        XCTAssertEqual(reopenedMetadata["status"] as? String, "ACTIVE")
+        XCTAssertNil(reopenedMetadata["suppressed_until"])
+        XCTAssertFalse(reopened.outputJSON.contains("synthetic-secret"))
+    }
+
+    @MainActor
     func testEngineProviderReportsCorruptStorageInsteadOfMissingIncident() async throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".incident-read-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: directory) }
         let incidentsURL = directory.appendingPathComponent("incidents.json")
         let broken = Data("{invalid".utf8)
@@ -131,7 +197,11 @@ final class ACTAIncidentReadActionsTests: XCTestCase {
             settingsURL: directory.appendingPathComponent("settings.json"),
             incidentsURL: incidentsURL,
             evidenceDirectoryURL: directory.appendingPathComponent("evidence"),
-            auditLogURL: directory.appendingPathComponent("audit.json"))
+            auditLogURL: directory.appendingPathComponent("audit.json"),
+            modelDiscovery: AnalyticsModelDiscovery(modelURL: { _ in nil }, integrity: { _ in
+                XCTFail("Model integrity must not be read")
+                throw ACTAIncidentReadProviderError.unavailable
+            }))
         let action = ACTAIncidentGetAction(provider: ACTAEngineIncidentReadProvider(engine: engine))
         let result = try await action.execute(parameters: ["incident_id": UUID().uuidString], context: ACTAActionContext())
         XCTAssertFalse(result.success)

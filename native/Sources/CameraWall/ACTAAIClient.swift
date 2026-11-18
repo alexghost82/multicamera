@@ -1344,7 +1344,7 @@ public final class ACTAAIClient: @unchecked Sendable {
             if recentImages.isEmpty { raw = try await localVLM.analyze(text: prompt, maxTokens: 2048, requestWorkload: .interactive) }
             else { raw = try await localVLM.analyze(images: recentImages, prompt: prompt, maxTokens: 2048, requestWorkload: .interactive) }
         }
-        agentTrace?("RAW \(raw)")
+        agentTrace?("RESPONSE chars=\(raw.count) backend=mlx")
         let parsed = Self.parseLocalAgentReply(raw)
         return ACTAAgentTurnResult(responseID: nil, text: parsed.text, functionCalls: parsed.calls, backend: .mlx)
     }

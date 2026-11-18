@@ -4,6 +4,65 @@ import XCTest
 @testable import CameraCore
 
 final class VehicleTextRemovalSafetyTests: XCTestCase {
+    func testReviewedEvidenceCannotRemoveNewerEvidenceFromAnotherStore() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".vehicle-text-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("tracking.sqlite3")
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let store = try LocalTrackingStore(url: url, now: now)
+        let other = try LocalTrackingStore(url: url, now: now)
+        let id = UUID()
+        try store.record(DetectedObject(id: 1, label: "car", confidence: 0.9, box: .zero, trackID: id),
+                         cameraID: UUID(), cameraName: "Fake camera", at: now)
+        let reviewed = VehicleTextEvidence(trackID: id,
+            candidates: [VehicleTextCandidate(text: "FAKE123", confidence: 0.9)],
+            readAt: now, cropSHA256: String(repeating: "a", count: 64))
+        let replacement = VehicleTextEvidence(trackID: id,
+            candidates: [VehicleTextCandidate(text: "FAKE456", confidence: 0.9)],
+            readAt: now.addingTimeInterval(1), cropSHA256: String(repeating: "b", count: 64))
+        try store.saveVehicleTextEvidence(reviewed)
+        try other.saveVehicleTextEvidence(replacement)
+        XCTAssertFalse(try store.clearVehicleTextEvidence(matching: reviewed))
+        XCTAssertEqual(try store.vehicleTextEvidence(for: id), replacement)
+        try rewriteEvidenceAsPrettyJSON(replacement, at: url)
+        XCTAssertTrue(try store.clearVehicleTextEvidence(matching: replacement))
+        XCTAssertNil(try other.vehicleTextEvidence(for: id))
+        XCTAssertFalse(try store.clearVehicleTextEvidence(matching: replacement))
+        let missing = VehicleTextEvidence(trackID: UUID(), candidates: [],
+            readAt: now, cropSHA256: String(repeating: "a", count: 64))
+        XCTAssertThrowsError(try store.clearVehicleTextEvidence(matching: missing)) {
+            guard case LocalTrackingStoreError.missingTrack = $0 else {
+                return XCTFail("Expected missing track, got \($0)")
+            }
+        }
+    }
+
+    private func rewriteEvidenceAsPrettyJSON(_ evidence: VehicleTextEvidence, at url: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let json = String(decoding: try encoder.encode(evidence), as: UTF8.self)
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READWRITE, nil), SQLITE_OK)
+        let database = try XCTUnwrap(db)
+        defer { sqlite3_close(database) }
+        var statement: OpaquePointer?
+        XCTAssertEqual(sqlite3_prepare_v2(database,
+            "UPDATE tracked_objects SET vehicle_text_json=? WHERE track_id=?", -1, &statement, nil), SQLITE_OK)
+        let update = try XCTUnwrap(statement)
+        defer { sqlite3_finalize(update) }
+        let result = json.withCString { text in
+            evidence.trackID.uuidString.withCString { trackID in
+                sqlite3_bind_text(update, 1, text, -1, nil)
+                sqlite3_bind_text(update, 2, trackID, -1, nil)
+                return sqlite3_step(update)
+            }
+        }
+        XCTAssertEqual(result, SQLITE_DONE)
+        XCTAssertEqual(sqlite3_changes(database), 1)
+    }
+
     func testTrackOnlyRemovalRejectsMissingTrackAndPreservesSearchData() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(".vehicle-text-test-\(UUID().uuidString)", isDirectory: true)

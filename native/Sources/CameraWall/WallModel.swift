@@ -415,6 +415,9 @@ final class WallModel: ObservableObject {
     @Published var actaChatMessages: [ACTAChatMessageRecord] = []
     @Published var actaThreadFocusEntries: [ACTAThreadFocusEntry] = []
     @Published var actaChatActions: [ACTAChatActionRecord] = []
+    @Published private(set) var actaBrokerReviews: [ACTABrokerReviewController] = []
+    private var actaReviewSession: (broker: ACTALocalActionBroker, key: ACTABrokerOperator,
+                                    session: ACTABrokerSession, threadID: String)?
     private var actaAgentTask: Task<Void, Never>?
     private var actaAgentWatchdog: Task<Void, Never>?
     var agentRequestDeadline: Duration = .seconds(120)
@@ -446,6 +449,7 @@ final class WallModel: ObservableObject {
     private let relayFactory: @MainActor () -> Go2RTC
     private let reconnectAttempt = CameraReconnectAttempt()
     private let reconnectDecoderStart: @MainActor (CameraSession, String) -> Void
+    private let fileDecoderStart: @MainActor (CameraSession, URL, Bool) -> Void
     private var startup: Task<Void, Never>?
     private var switchTask: Task<Void, Never>?
     private var recovery: Task<Void, Never>?
@@ -538,6 +542,9 @@ final class WallModel: ObservableObject {
          missionConsultResponder: (@Sendable (String) async throws -> String)? = nil,
          cameraCredentialStore: any CameraCredentialStore = SystemCameraCredentialStore(),
          reconnectDecoderStart: @escaping @MainActor (CameraSession, String) -> Void = { $0.start(url: $1) },
+         fileDecoderStart: @escaping @MainActor (CameraSession, URL, Bool) -> Void = {
+             $0.start(fileURL: $1, accessAlreadyStarted: $2)
+         },
          operationsPreferencesURL: URL = OperationsPreferencesStore.defaultURL,
          alertClipStore: CriticalAlertClipStore = CriticalAlertClipStore(),
          languageSettings: LanguageSettings? = nil,
@@ -548,6 +555,7 @@ final class WallModel: ObservableObject {
         self.operationsPreferencesURL = operationsPreferencesURL
         self.cameraCredentialStore = cameraCredentialStore
         self.reconnectDecoderStart = reconnectDecoderStart
+        self.fileDecoderStart = fileDecoderStart
         self.missionConsultResponder = missionConsultResponder
         self.missionStoreURL = missionStoreURL
         self.cameraMemoryStore = cameraMemoryStore
@@ -736,12 +744,16 @@ final class WallModel: ObservableObject {
 
     var layoutURL: URL { configURL.deletingPathExtension().appendingPathExtension("layout.json") }
 
+    func publishCanvasLayout(_ snapshot: ACTACanvasLayoutStore.Snapshot) {
+        canvasLayoutSnapshot = snapshot
+        layout = snapshot.layout
+    }
+
     @discardableResult
     func refreshCanvasLayout() -> Bool {
         do {
             let snapshot = try ACTACanvasLayoutStore(url: layoutURL).read()
-            canvasLayoutSnapshot = snapshot
-            layout = snapshot.layout
+            publishCanvasLayout(snapshot)
             return true
         } catch {
             notice = "Cannot load saved video layout"
@@ -766,8 +778,7 @@ final class WallModel: ObservableObject {
         next.frames[id.uuidString] = frame
         do {
             let snapshot = try ACTACanvasLayoutStore(url: layoutURL).commit(next, expected: base)
-            canvasLayoutSnapshot = snapshot
-            layout = snapshot.layout
+            publishCanvasLayout(snapshot)
             return true
         } catch {
             notice = "Cannot save video layout; the tile draft was not saved"
@@ -786,8 +797,7 @@ final class WallModel: ObservableObject {
         }
         do {
             let snapshot = try ACTACanvasLayoutStore(url: layoutURL).commit(VideoWallLayout(), expected: base)
-            canvasLayoutSnapshot = snapshot
-            layout = snapshot.layout
+            publishCanvasLayout(snapshot)
         }
         catch ACTACanvasLayoutStore.Failure.conflict {
             if refreshCanvasLayout() {
@@ -976,64 +986,108 @@ final class WallModel: ObservableObject {
         timer?.invalidate()
     }
 
-    private func connect(_ camera: Camera, expanded: Bool) async throws {
-        localAnalyticsEngine.removeCamera(camera.id)
-        analyticsStreamSessions.removeValue(forKey: camera.id)
-        analyticsStreamReconnects.removeValue(forKey: camera.id)
-        trackAssigners.removeValue(forKey: camera.id)
-        fallDetectors.removeValue(forKey: camera.id)
+    @discardableResult
+    private func connect(_ camera: Camera, expanded: Bool) async throws -> CameraSession? {
+        try Task.checkCancellation()
         if let fileURL = camera.fileURL {
-            try Task.checkCancellation()
-            guard running, let tile = tiles[camera.id] else { return }
-            let resolution = try VideoFileBookmark.resolve(camera.fileBookmarkData, fallbackURL: fileURL)
-            let startedAccessing = resolution.url.startAccessingSecurityScopedResource()
-            guard FileManager.default.isReadableFile(atPath: resolution.url.path) else {
-                if startedAccessing { resolution.url.stopAccessingSecurityScopedResource() }
-                throw ConfigurationError.invalid("The selected video file is unavailable.")
-            }
-            if resolution.wasStale, let index = config.cameras.firstIndex(where: { $0.id == camera.id }) {
-                var refreshed = config
-                refreshed.cameras[index].fileURL = resolution.url.standardizedFileURL
-                refreshed.cameras[index].fileBookmarkData = resolution.bookmarkData
-                do {
-                    try ConfigurationStore.save(refreshed, to: configURL)
-                    config = refreshed
-                } catch {
-                    if startedAccessing { resolution.url.stopAccessingSecurityScopedResource() }
-                    throw error
-                }
-            }
-            tile.stop()
-            let session = CameraSession()
-            tile.session = session
-            session.start(fileURL: resolution.url, accessAlreadyStarted: startedAccessing)
-            return
+            return try connectFile(camera, fileURL: fileURL)
         }
+        resetCameraAnalytics(camera.id)
         if let deviceID = camera.localDeviceID {
             try Task.checkCancellation()
-            guard running, let tile = tiles[camera.id] else { return }
+            guard running, let tile = tiles[camera.id] else { return nil }
             tile.stop()
             let session = CameraSession()
             tile.session = session
             session.start(deviceID: deviceID)
-            return
+            return session
         }
         if let displayID = camera.screenDisplayID {
             try Task.checkCancellation()
-            guard running, let tile = tiles[camera.id] else { return }
+            guard running, let tile = tiles[camera.id] else { return nil }
             tile.stop()
             let session = CameraSession()
             tile.session = session
             session.startScreen(displayID: displayID)
-            return
+            return session
         }
         let url = try await relay.register(camera: camera, expanded: expanded)
         try Task.checkCancellation()
-        guard running, let tile = tiles[camera.id] else { return }
+        guard running, let tile = tiles[camera.id] else { return nil }
         tile.stop()
         let session = CameraSession()
         tile.session = session
         session.start(url: url)
+        return session
+    }
+
+    private func resetCameraAnalytics(_ cameraID: UUID) {
+        localAnalyticsEngine.removeCamera(cameraID)
+        analyticsStreamSessions.removeValue(forKey: cameraID)
+        analyticsStreamReconnects.removeValue(forKey: cameraID)
+        trackAssigners.removeValue(forKey: cameraID)
+        fallDetectors.removeValue(forKey: cameraID)
+    }
+
+    private func connectFile(_ camera: Camera, fileURL: URL, refreshBookmark: Bool = true) throws -> CameraSession? {
+        try Task.checkCancellation()
+        guard running, let tile = tiles[camera.id] else { return nil }
+        let resolution = try VideoFileBookmark.resolve(camera.fileBookmarkData, fallbackURL: fileURL)
+        let startedAccessing = resolution.url.startAccessingSecurityScopedResource()
+        var handedOffAccess = false
+        defer { if startedAccessing && !handedOffAccess { resolution.url.stopAccessingSecurityScopedResource() } }
+        guard FileManager.default.isReadableFile(atPath: resolution.url.path) else {
+            throw ConfigurationError.invalid("The selected video file is unavailable.")
+        }
+        try Task.checkCancellation()
+        if refreshBookmark, resolution.wasStale, let index = config.cameras.firstIndex(where: { $0.id == camera.id }) {
+            var refreshed = config
+            refreshed.cameras[index].fileURL = resolution.url.standardizedFileURL
+            refreshed.cameras[index].fileBookmarkData = resolution.bookmarkData
+            try ConfigurationStore.save(refreshed, to: configURL)
+            config = refreshed
+        }
+        try Task.checkCancellation()
+        resetCameraAnalytics(camera.id)
+        tile.stop()
+        let session = CameraSession()
+        tile.session = session
+        fileDecoderStart(session, resolution.url, startedAccessing)
+        handedOffAccess = true
+        return session
+    }
+
+    func reconnectFileScheduled(_ camera: Camera) throws -> (CameraSession, Camera) {
+        try Task.checkCancellation()
+        guard running, !connecting, camera.enabled, let fileURL = camera.fileURL,
+              camera.localDeviceID == nil, camera.screenDisplayID == nil,
+              config.cameras.contains(camera), let tile = tiles[camera.id] else {
+            throw ConfigurationError.invalid("File source is not available for reconnection.")
+        }
+        let original = tile.session
+        guard let session = try connectFile(camera, fileURL: fileURL, refreshBookmark: false) else {
+            throw CameraReconnectAttempt.Failure.superseded
+        }
+        if Task.isCancelled {
+            if tiles[camera.id] === tile, tile.session === session { tile.stop() }
+            else { session.stop() }
+            throw CancellationError()
+        }
+        guard running, !connecting, tiles[camera.id] === tile, tile.session === session,
+              session !== original else {
+            session.stop()
+            throw CameraReconnectAttempt.Failure.superseded
+        }
+        guard let current = config.cameras.first(where: { $0.id == camera.id }) else {
+            discardFileReconnect(session, cameraID: camera.id)
+            throw CameraReconnectAttempt.Failure.superseded
+        }
+        return (session, current)
+    }
+
+    func discardFileReconnect(_ session: CameraSession, cameraID: UUID) {
+        if let tile = tiles[cameraID], tile.session === session { tile.stop() }
+        else { session.stop() }
     }
 
     func toggleExpanded(_ camera: Camera) {
@@ -2467,13 +2521,18 @@ final class WallModel: ObservableObject {
         }
     }
 
-    func clearVehicleTextEvidence(for trackID: UUID) {
+    func clearVehicleTextEvidence(matching evidence: VehicleTextEvidence) {
         guard let trackingStore else {
             notice = "Local track history is unavailable"
             return
         }
         do {
-            try trackingStore.clearVehicleTextEvidence(for: trackID)
+            guard try trackingStore.clearVehicleTextEvidence(matching: evidence) else {
+                notice = "Saved vehicle text changed; review it again before removing."
+                reloadVehicleTextEvidence()
+                return
+            }
+            let trackID = evidence.trackID
             vehicleTextLoadGeneration = UUID()
             vehicleTextRequestIDs.removeValue(forKey: trackID)
             readingVehicleTextTrackIDs.remove(trackID)
@@ -3776,6 +3835,7 @@ final class WallModel: ObservableObject {
 
     func selectACTAChatThread(_ threadID: String) {
         if actaAgentBusy { cancelACTAAgent() }
+        closeACTAReviewSession()
         actaAgentStatus = "ACTA Agent ready"
         activeACTAThreadID = threadID
         guard let store = trackingStore else { return }
@@ -3786,6 +3846,8 @@ final class WallModel: ObservableObject {
 
     func mergeACTAChatThread(sourceID: String, intoTargetID targetID: String) {
         guard let store = trackingStore, sourceID != targetID else { return }
+        if actaAgentBusy { cancelACTAAgent() }
+        closeACTAReviewSession()
         try? store.mergeACTAThreads(sourceThreadID: sourceID, intoTargetThreadID: targetID)
         activeACTAThreadID = targetID
         actaChatThreads = (try? store.listACTAChatThreads(limit: 50)) ?? []
@@ -3796,57 +3858,11 @@ final class WallModel: ObservableObject {
 
     func reviewACTAChatAction(_ reviewed: ACTAChatActionRecord, confirmed: Bool) {
         guard reviewed.threadID == activeACTAThreadID else { return }
-        let actionID = reviewed.actionID
-        if actionID.hasPrefix("CONFIRM-") {
-            Task { @MainActor [weak self] in
-                await self?.reviewACTATokenAction(reviewed, confirmed: confirmed)
-            }
-            return
-        }
-        guard let ghost = actaAnalytics else { return }
-        if ghost.reviewAndExecuteChatAction(actionID: actionID, confirmed: confirmed, expectedAction: reviewed) == nil {
-            if confirmed, let store = trackingStore,
-               let proposal = try? store.loadACTAChatAction(actionID: actionID),
-               proposal.threadID == activeACTAThreadID, proposal.status == "proposed" {
-                // Legacy records have no registry token bound to the displayed arguments.
-                // Leave the record intact; creating a fresh request must go through the registry.
-                notice = "This proposal cannot be confirmed safely. Recreate the action request for a new confirmation."
-            }
-        }
-        if let store = trackingStore {
-            actaChatActions = (try? store.listACTAChatActions(threadID: activeACTAThreadID, status: "proposed")) ?? []
-        }
+        notice = "This historical proposal cannot be reviewed safely. Create a new request."
     }
 
     func reviewACTATokenAction(_ reviewed: ACTAChatActionRecord, confirmed: Bool) async {
-        guard let store = trackingStore else { return }
-        do {
-            guard reviewed.threadID == activeACTAThreadID, reviewed.status == "proposed" else { return }
-            let registry = ACTAActionRegistry.shared
-            guard await registry.confirmationMatches(token: reviewed.actionID, actionID: reviewed.actionType,
-                    parameters: reviewed.parameters, threadID: reviewed.threadID, expectedReviewTitle: reviewed.title) else {
-                notice = "This confirmation expired or no longer matches the displayed action. Recreate the action request."
-                return
-            }
-            guard reviewed.threadID == activeACTAThreadID else { return }
-            guard try store.applyACTAChatAction(reviewed, confirmed: confirmed, changes: { _ in }) != nil else {
-                notice = "This proposal changed or was already reviewed. Refresh and review it again."
-                return
-            }
-            // Claim the durable proposal before awaiting so a second click cannot replay it.
-            let result = try await registry.confirmAndExecute(token: reviewed.actionID, confirmed: confirmed,
-                expectedActionID: reviewed.actionType, expectedParameters: reviewed.parameters,
-                expectedThreadID: reviewed.threadID, expectedReviewTitle: reviewed.title)
-            try store.recordACTAToolCallAudit(ACTAToolCallAuditRecord(threadID: reviewed.threadID,
-                toolName: reviewed.actionType, argsJSON: String(decoding: try JSONEncoder().encode(actaActionAuditArguments(reviewed.actionType, reviewed.parameters)), as: UTF8.self),
-                resultRows: result.success ? 1 : 0, durationMs: 0, ok: result.success && result.verified,
-                error: result.error))
-            actaAgentStatus = result.summary
-            if confirmed && !result.success { notice = result.summary }
-        } catch {
-            notice = "ACTA action review failed: \(error.localizedDescription)"
-        }
-        actaChatActions = (try? store.listACTAChatActions(threadID: activeACTAThreadID, status: "proposed")) ?? []
+        reviewACTAChatAction(reviewed, confirmed: confirmed)
     }
 
     func pushACTAFocus(identityID: String, label: String? = nil) {
@@ -3870,11 +3886,26 @@ final class WallModel: ObservableObject {
         )
     }
 
+    private func closeACTAReviewSession() {
+        let current = actaReviewSession
+        actaReviewSession = nil
+        actaBrokerReviews = []
+        if let current {
+            Task { await current.broker.closeSession(current.session, operatorKey: current.key) }
+        }
+    }
+
+    func finishACTABrokerReview(_ controller: ACTABrokerReviewController, result: ACTAActionResult) {
+        actaBrokerReviews.removeAll { $0 === controller }
+        actaAgentStatus = result.success && result.verified ? "Action completed and verified" : "Action was not verified"
+    }
+
     func cancelACTAAgent(reason: String = "Request cancelled") {
         guard actaAgentBusy else { return }
         actaAgentGeneration = UUID()
         actaAgentTask?.cancel(); actaAgentTask = nil
         actaAgentWatchdog?.cancel(); actaAgentWatchdog = nil
+        closeACTAReviewSession()
         actaAgentBusy = false
         actaAgentStatus = reason
         if let store = trackingStore {
@@ -3895,6 +3926,7 @@ final class WallModel: ObservableObject {
             return false
         }
         guard !actaAgentBusy, let ghost = actaAnalytics else { return false }
+        closeACTAReviewSession()
         syncACTAOperationalMemory()
         let threadID = activeACTAThreadID
         let cameraNames = Dictionary(uniqueKeysWithValues: config.cameras.map { ($0.id, $0.name) })
@@ -3935,6 +3967,31 @@ final class WallModel: ObservableObject {
                     self.actaAgentWatchdog?.cancel(); self.actaAgentWatchdog = nil
                 }
             }
+            let action = ACTACanvasSetPresentationAction(bridge: self.canvasFilterBridge)
+            let host = await ACTALocalActionBroker.make(actions: [action],
+                allowedActionIDs: [action.id], audit: { event in
+                    let phase: String
+                    switch event.phase {
+                    case .request: phase = "request"
+                    case .validated: phase = "validated"
+                    case .review: phase = event.approved == true ? "approved" : "rejected"
+                    case .result: phase = event.outcome ?? "failed"
+                    }
+                    try store.recordACTAToolCallAudit(ACTAToolCallAuditRecord(
+                        threadID: event.threadID, toolName: event.actionID, argsJSON: "{}",
+                        resultRows: phase == "success" ? 1 : 0, durationMs: 0,
+                        ok: phase == "success", error: "BROKER_\(phase)"))
+                })
+            guard !Task.isCancelled, self.activeACTAThreadID == threadID,
+                  self.actaAgentGeneration == generation, let host,
+                  let session = await host.broker.openSession(operatorKey: host.operatorKey,
+                    input: .chat, threadID: threadID, actionIDs: [action.id]) else { return }
+            guard !Task.isCancelled, self.activeACTAThreadID == threadID,
+                  self.actaAgentGeneration == generation else {
+                await host.broker.closeSession(session, operatorKey: host.operatorKey)
+                return
+            }
+            self.actaReviewSession = (host.broker, host.operatorKey, session, threadID)
             var liveFrames: [ACTALiveCameraFrame] = []
             for snap in livePixelSnapshots.prefix(4) {
                 if let jpeg = try? await VLMFrameEncoder.jpegData(from: snap.pixel.value, maxDimension: 640, quality: 0.45) {
@@ -3954,9 +4011,20 @@ final class WallModel: ObservableObject {
                         self.actaAgentStatus = progress
                         if let store = self.trackingStore { self.actaChatMessages = (try? store.loadACTAChatMessages(threadID: threadID)) ?? self.actaChatMessages }
                     }
-                }
+                },
+                broker: host.broker,
+                brokerSession: session
             )
             guard !Task.isCancelled, self.activeACTAThreadID == threadID, self.actaAgentGeneration == generation else { return }
+            let reviews = await host.broker.reviews(operatorKey: host.operatorKey, session: session)
+            guard !Task.isCancelled, self.activeACTAThreadID == threadID, self.actaAgentGeneration == generation,
+                  self.actaReviewSession?.session === session else { return }
+            self.actaBrokerReviews = reviews.map { review in
+                ACTABrokerReviewController(broker: host.broker, operatorKey: host.operatorKey,
+                    session: session, review: review, isCurrent: { [weak self] in
+                        self?.activeACTAThreadID == threadID && self?.actaReviewSession?.session === session
+                    })
+            }
             if let store = self.trackingStore {
                 self.actaChatThreads = (try? store.listACTAChatThreads(limit: 50)) ?? self.actaChatThreads
                 self.actaChatMessages = (try? store.loadACTAChatMessages(threadID: threadID)) ?? self.actaChatMessages

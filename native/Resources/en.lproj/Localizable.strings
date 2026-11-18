@@ -644,6 +644,12 @@
 "Specify a zone change." = "Specify a zone change.";
 "Zone name is empty, too long or ambiguous." = "Zone name is empty, too long or ambiguous.";
 "Conflicting polygon point operations." = "Conflicting polygon point operations.";
+"Polygon requires 3...64 finite normalized points in points_json." = "Polygon requires 3...64 finite normalized points in points_json.";
+"Polygon vertices must be distinct." = "Polygon vertices must be distinct.";
+"Polygon edges must not overlap." = "Polygon edges must not overlap.";
+"Polygon edges must not intersect or touch." = "Polygon edges must not intersect or touch.";
+"Polygon must have nonzero area." = "Polygon must have nonzero area.";
+"Do not combine polygon and rectangle coordinates." = "Do not combine polygon and rectangle coordinates.";
 "Polygon coordinates must be within [0,1]." = "Polygon coordinates must be within [0,1].";
 "A polygon cannot exceed 64 points." = "A polygon cannot exceed 64 points.";
 "Polygon point index does not exist." = "Polygon point index does not exist.";
@@ -696,6 +702,20 @@
 "ACTA action review failed: %@" = "ACTA action review failed: %@";
 
 "Review proposed action" = "Review proposed action";
+"Action" = "Action";
+"Thread" = "Thread";
+"Complete review" = "Complete review";
+"Exact review uses escaped Unicode; no characters are omitted." = "Exact review uses escaped Unicode; no characters are omitted.";
+"I reviewed the complete request" = "I reviewed the complete request";
+"Confirm" = "Confirm";
+"Reject" = "Reject";
+"REVIEW_TOO_LARGE: Parameters exceed the review limit." = "REVIEW_TOO_LARGE: Parameters exceed the review limit.";
+"AUDIT_FAILED: Action was not executed." = "AUDIT_FAILED: Action was not executed.";
+"REVIEW_UNDISPLAYABLE: Request cannot be safely reviewed." = "REVIEW_UNDISPLAYABLE: Request cannot be safely reviewed.";
+"Port updates are not supported by this settings provider." = "Port updates are not supported by this settings provider.";
+"Relay ports must be integers in 1024...65535." = "Relay ports must be integers in 1024...65535.";
+"Relay ports must be distinct." = "Relay ports must be distinct.";
+"System settings changed; retry the port update." = "System settings changed; retry the port update.";
 
 "Mission UUID does not identify a saved mission." = "Mission UUID does not identify a saved mission.";
 "Mission run request verification failed." = "Mission run request verification failed.";

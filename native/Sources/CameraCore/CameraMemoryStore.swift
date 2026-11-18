@@ -30,6 +30,7 @@ public enum CameraMemoryStoreError: LocalizedError {
     case snapshotChanged
     case recoveryRequired
     case recoveryConflict
+    case noPendingDeletion
 
     public var errorDescription: String? {
         switch self {
@@ -40,13 +41,34 @@ public enum CameraMemoryStoreError: LocalizedError {
         case .snapshotChanged: "Memory frames changed since confirmation; review them again."
         case .recoveryRequired: "Memory deletion is incomplete. Retry recovery before modifying memory."
         case .recoveryConflict: "Memory deletion recovery conflicts with the current index; no further frames were removed."
+        case .noPendingDeletion: "There is no pending memory deletion to recover."
         }
     }
 }
 
 public struct CameraMemoryDeletionSnapshot: Sendable {
     public let frames: [CameraMemoryFrame]
+    fileprivate let directoryURL: URL
     public var count: Int { frames.count }
+}
+
+public struct CameraMemoryRecoverySnapshot: Sendable, Equatable {
+    public let frames: [CameraMemoryFrame]
+    public let presentFrameIDs: [UUID]
+    fileprivate let directoryURL: URL
+    fileprivate let journalBytes: Data
+    fileprivate let indexedFrames: [CameraMemoryFrame]
+    fileprivate let imageIdentities: [CameraMemoryRecoveryImageIdentity?]
+}
+
+fileprivate struct CameraMemoryRecoveryImageIdentity: Sendable, Equatable {
+    let device: Int32
+    let inode: UInt64
+    let size: Int64
+    let modifiedSeconds: Int
+    let modifiedNanoseconds: Int
+    let changedSeconds: Int
+    let changedNanoseconds: Int
 }
 
 private struct CameraMemoryDeletionJournal: Codable {
@@ -192,7 +214,7 @@ public final class CameraMemoryStore: @unchecked Sendable {
         defer { releaseLock(descriptor) }
         guard URL(fileURLWithPath: frame.fileName).lastPathComponent == frame.fileName,
               frame.fileName.hasSuffix(".jpg") else { throw CameraMemoryStoreError.invalidImage }
-        return FileManager.default.fileExists(atPath: directoryURL.appendingPathComponent(frame.fileName).path)
+        return try imageExists(named: frame.fileName)
     }
 
     public func delete(_ frameID: UUID) throws {
@@ -209,23 +231,109 @@ public final class CameraMemoryStore: @unchecked Sendable {
         let descriptor = try acquireLock()
         defer { releaseLock(descriptor) }
         try requireNoPendingDeletion()
-        return CameraMemoryDeletionSnapshot(frames: try readIndex())
+        return CameraMemoryDeletionSnapshot(frames: try readIndex(), directoryURL: directoryURL.standardizedFileURL)
     }
 
     public func deleteConfirmedSnapshot(_ snapshot: CameraMemoryDeletionSnapshot) throws {
         let descriptor = try acquireLock()
         defer { releaseLock(descriptor) }
         try requireNoPendingDeletion()
+        guard snapshot.directoryURL == directoryURL.standardizedFileURL else {
+            throw CameraMemoryStoreError.snapshotChanged
+        }
         let current = try readIndex()
         guard current == snapshot.frames else { throw CameraMemoryStoreError.snapshotChanged }
         guard !current.isEmpty else { return }
         try beginDeletion(current, current: current)
     }
 
+    /// Verifies the reviewed set is absent from both the index and disk.
+    /// A newly indexed frame means that "all frames cleared" is no longer true.
+    public func verifyConfirmedDeletion(_ snapshot: CameraMemoryDeletionSnapshot) throws -> Bool {
+        let descriptor = try acquireLock()
+        defer { releaseLock(descriptor) }
+        try requireNoPendingDeletion()
+        guard snapshot.directoryURL == directoryURL.standardizedFileURL else {
+            throw CameraMemoryStoreError.snapshotChanged
+        }
+        guard try readIndex().isEmpty else { return false }
+        for frame in snapshot.frames where try imageExists(named: frame.fileName) {
+            return false
+        }
+        return true
+    }
+
     public func hasPendingDeletion() throws -> Bool {
         let descriptor = try acquireLock()
         defer { releaseLock(descriptor) }
         return FileManager.default.fileExists(atPath: journalURL.path)
+    }
+
+    /// Reads the exact journal and current index without resuming or changing deletion.
+    /// Filesystem identities are observations, not protection against uncooperative writers.
+    public func recoverySnapshot() throws -> CameraMemoryRecoverySnapshot {
+        let descriptor = try acquireLock()
+        defer { releaseLock(descriptor) }
+        let fd = open(journalURL.path, O_RDONLY | O_NOFOLLOW)
+        guard fd >= 0 else {
+            if errno == ENOENT { throw CameraMemoryStoreError.noPendingDeletion }
+            throw CameraMemoryStoreError.recoveryConflict
+        }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        defer { try? handle.close() }
+        var journalInfo = stat()
+        guard fstat(fd, &journalInfo) == 0,
+              (journalInfo.st_mode & S_IFMT) == S_IFREG,
+              journalInfo.st_size >= 0, journalInfo.st_size <= Self.maximumIndexBytes else {
+            throw CameraMemoryStoreError.recoveryConflict
+        }
+        let data = try handle.read(upToCount: Self.maximumIndexBytes + 1) ?? Data()
+        var afterRead = stat()
+        var atPath = stat()
+        guard data.count <= Self.maximumIndexBytes, data.count == journalInfo.st_size,
+              fstat(fd, &afterRead) == 0, lstat(journalURL.path, &atPath) == 0,
+              afterRead.st_dev == journalInfo.st_dev, afterRead.st_ino == journalInfo.st_ino,
+              afterRead.st_size == journalInfo.st_size,
+              afterRead.st_mtimespec.tv_sec == journalInfo.st_mtimespec.tv_sec,
+              afterRead.st_mtimespec.tv_nsec == journalInfo.st_mtimespec.tv_nsec,
+              afterRead.st_ctimespec.tv_sec == journalInfo.st_ctimespec.tv_sec,
+              afterRead.st_ctimespec.tv_nsec == journalInfo.st_ctimespec.tv_nsec,
+              atPath.st_dev == journalInfo.st_dev, atPath.st_ino == journalInfo.st_ino,
+              (atPath.st_mode & S_IFMT) == S_IFREG else {
+            throw CameraMemoryStoreError.recoveryConflict
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let journal: CameraMemoryDeletionJournal
+        do { journal = try decoder.decode(CameraMemoryDeletionJournal.self, from: data) }
+        catch { throw CameraMemoryStoreError.recoveryConflict }
+        guard validFrames(journal.frames), !journal.frames.isEmpty else {
+            throw CameraMemoryStoreError.recoveryConflict
+        }
+        var identities: [CameraMemoryRecoveryImageIdentity?] = []
+        var present: [UUID] = []
+        for frame in journal.frames {
+            var info = stat()
+            if lstat(directoryURL.appendingPathComponent(frame.fileName).path, &info) == 0 {
+                guard (info.st_mode & S_IFMT) == S_IFREG else {
+                    throw CameraMemoryStoreError.recoveryConflict
+                }
+                identities.append(CameraMemoryRecoveryImageIdentity(
+                    device: info.st_dev, inode: info.st_ino, size: info.st_size,
+                    modifiedSeconds: info.st_mtimespec.tv_sec, modifiedNanoseconds: info.st_mtimespec.tv_nsec,
+                    changedSeconds: info.st_ctimespec.tv_sec, changedNanoseconds: info.st_ctimespec.tv_nsec
+                ))
+                present.append(frame.id)
+            } else if errno == ENOENT {
+                identities.append(nil)
+            } else {
+                throw CameraMemoryStoreError.storageFailure
+            }
+        }
+        return CameraMemoryRecoverySnapshot(
+            frames: journal.frames, presentFrameIDs: present, directoryURL: directoryURL.standardizedFileURL,
+            journalBytes: data, indexedFrames: try readIndex(), imageIdentities: identities
+        )
     }
 
     /// Resumes only the originally authorized deletion; never expands it to newer frames.
@@ -264,6 +372,24 @@ public final class CameraMemoryStore: @unchecked Sendable {
             if let original = byID[frame.id] { return original == frame }
             return !names.contains(frame.fileName)
         }) else { throw CameraMemoryStoreError.recoveryConflict }
+        let currentIDs = Set(current.map(\.id))
+        for frame in frames where !currentIDs.contains(frame.id) {
+            guard try !imageExists(named: frame.fileName) else {
+                throw CameraMemoryStoreError.recoveryConflict
+            }
+        }
+        // Check the whole set before removing any more files.
+        for frame in frames {
+            let url = directoryURL.appendingPathComponent(frame.fileName)
+            var info = stat()
+            if lstat(url.path, &info) == 0 {
+                guard (info.st_mode & S_IFMT) == S_IFREG else {
+                    throw CameraMemoryStoreError.recoveryConflict
+                }
+            } else if errno != ENOENT {
+                throw CameraMemoryStoreError.storageFailure
+            }
+        }
         for (index, frame) in frames.enumerated() {
             let url = directoryURL.appendingPathComponent(frame.fileName)
             do {
@@ -278,8 +404,22 @@ public final class CameraMemoryStore: @unchecked Sendable {
             }
             try deletionFault?(index)
         }
-        try writeIndex(current.filter { byID[$0.id] == nil })
+        let retained = current.filter { byID[$0.id] == nil }
+        try writeIndex(retained)
+        guard try readIndex() == retained else { throw CameraMemoryStoreError.storageFailure }
+        for frame in frames where try imageExists(named: frame.fileName) {
+            throw CameraMemoryStoreError.storageFailure
+        }
         try FileManager.default.removeItem(at: journalURL)
+    }
+
+    private func imageExists(named fileName: String) throws -> Bool {
+        var info = stat()
+        if lstat(directoryURL.appendingPathComponent(fileName).path, &info) == 0 {
+            return true
+        }
+        if errno == ENOENT { return false }
+        throw CameraMemoryStoreError.storageFailure
     }
 
     private func requireNoPendingDeletion() throws {

@@ -125,17 +125,126 @@ final class CameraReconnectIntegrationTests: XCTestCase {
         try await waitUntil { started.count == 1 }
         XCTAssertTrue(model.tiles[camera.id]?.session === old)
         started[0].publish(try pixel(), message: "fresh")
-        try await second.value
+        _ = try await second.value
         XCTAssertTrue(model.tiles[camera.id]?.session === started[0])
         XCTAssertNil(old.snapshot().pixel)
         transport.complete(oldName)
-        do { try await first.value; XCTFail("Superseded reconnect succeeded") }
+        do { _ = try await first.value; XCTFail("Superseded reconnect succeeded") }
         catch {}
         try await Task.sleep(for: .milliseconds(40))
         XCTAssertEqual(started.count, 1)
         XCTAssertTrue(transport.applied.contains(oldName))
         XCTAssertTrue(transport.applied.contains(newName))
         XCTAssertTrue(model.tiles[camera.id]?.session === started[0])
+    }
+
+    func testAgentReconnectUsesFreshNetworkFrameAndIsAdvertised() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
+        let transport = FakeReconnectTransport()
+        var started: CameraSession?
+        let (root, model, camera, old) = try fixture(transport) { session, _ in started = session }
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let registry = ACTAActionRegistry()
+        await registerAllWallActions(registry: registry, model: model)
+        let tools = try await ACTAAnalyticsCoordinator.registryTools(registry: registry)
+        XCTAssertTrue(tools.contains { $0.name == "acta__camera__reconnect" })
+        let task = Task { try await registry.execute(actionID: "camera.reconnect", parameters: ["camera_id": camera.id.uuidString]) }
+        try await waitUntil { transport.names.count == 1 }
+        transport.complete(transport.names[0])
+        try await waitUntil { started != nil }
+        XCTAssertTrue(model.tiles[camera.id]?.session === old)
+        try XCTUnwrap(started).publish(pixel(), message: "fresh")
+        let result = try await task.value
+        XCTAssertTrue(result.success, result.summary)
+        XCTAssertTrue(result.verified)
+        XCTAssertTrue(model.tiles[camera.id]?.session === started)
+    }
+
+    func testAgentReconnectVerificationRejectsReplacedSession() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
+        let transport = FakeReconnectTransport()
+        var started: CameraSession?
+        let (root, model, camera, old) = try fixture(transport) { session, _ in started = session }
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let action = CameraReconnectAction(model: model)
+        let parameters = ["camera_id": camera.id.uuidString]
+        let task = Task { try await action.execute(parameters: parameters, context: ACTAActionContext()) }
+        try await waitUntil { transport.names.count == 1 }
+        transport.complete(transport.names[0])
+        try await waitUntil { started != nil }
+        try XCTUnwrap(started).publish(pixel(), message: "fresh")
+        let result = try await task.value
+        XCTAssertTrue(result.success)
+        model.tiles[camera.id]?.session = old
+        let verified = try await action.verify(parameters: parameters, context: ACTAActionContext())
+        XCTAssertFalse(verified)
+        started?.stop()
+    }
+
+    func testAgentReconnectRejectsStoppedWallAndLocalCameraWithoutStarting() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
+        let transport = FakeReconnectTransport()
+        let (root, model, camera, _) = try fixture(transport) { _, _ in XCTFail("Unexpected decoder start") }
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let action = CameraReconnectAction(model: model)
+        let parameters = ["camera_id": camera.id.uuidString]
+        model.running = false
+        let stopped = try await action.execute(parameters: parameters, context: ACTAActionContext())
+        XCTAssertFalse(stopped.success)
+        XCTAssertTrue(stopped.error?.hasPrefix("UNAVAILABLE:") == true)
+        var local = camera
+        local.substream = ""
+        local.localDeviceID = "synthetic-device"
+        model.config.cameras = [local]
+        try ConfigurationStore.save(model.config, to: root.appendingPathComponent("cameras.json"))
+        let unsupported = try await action.execute(parameters: parameters, context: ACTAActionContext())
+        XCTAssertFalse(unsupported.success)
+        XCTAssertTrue(unsupported.error?.hasPrefix("UNSUPPORTED:") == true)
+        XCTAssertTrue(transport.names.isEmpty)
+    }
+
+    func testCancelledAgentReconnectCannotInstallLatePatch() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
+        let transport = FakeReconnectTransport()
+        let (root, model, camera, old) = try fixture(transport) { _, _ in XCTFail("Unexpected decoder start") }
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let action = CameraReconnectAction(model: model)
+        let task = Task {
+            try await action.execute(parameters: ["camera_id": camera.id.uuidString], context: ACTAActionContext())
+        }
+        try await waitUntil { transport.names.count == 1 }
+        task.cancel()
+        transport.complete(transport.names[0])
+        do {
+            _ = try await task.value
+            XCTFail("Cancelled reconnect must not succeed")
+        } catch is CancellationError {}
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertTrue(model.tiles[camera.id]?.session === old)
+    }
+
+    func testAgentReconnectCancelledBeforeStartDoesNotRegister() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
+        let transport = FakeReconnectTransport()
+        let (root, model, camera, old) = try fixture(transport) { _, _ in XCTFail("Unexpected decoder start") }
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let action = CameraReconnectAction(model: model)
+        let task = Task {
+            try await action.execute(parameters: ["camera_id": camera.id.uuidString], context: ACTAActionContext())
+        }
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("Cancelled reconnect must not succeed")
+        } catch is CancellationError {}
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertTrue(transport.names.isEmpty)
+        XCTAssertTrue(model.tiles[camera.id]?.session === old)
     }
 
     func testStopDuringPatchPreventsLateDecoderAndInstallation() async throws {
@@ -149,7 +258,7 @@ final class CameraReconnectIntegrationTests: XCTestCase {
         try await waitUntil { transport.names.count == 1 }
         model.stop()
         transport.complete(transport.names[0])
-        do { try await task.value; XCTFail("Stopped reconnect succeeded") }
+        do { _ = try await task.value; XCTFail("Stopped reconnect succeeded") }
         catch {}
         try await Task.sleep(for: .milliseconds(40))
         XCTAssertFalse(started)
@@ -169,7 +278,7 @@ final class CameraReconnectIntegrationTests: XCTestCase {
         try await waitUntil { transport.names.count == 1 }
         transport.complete(transport.names[0])
         try await waitUntil { started }
-        do { try await task.value; XCTFail("Old frame must not verify") }
+        do { _ = try await task.value; XCTFail("Old frame must not verify") }
         catch { XCTAssertEqual(error as? CameraReconnectAttempt.Failure, .timedOut) }
         XCTAssertTrue(model.tiles[camera.id]?.session === old)
         XCTAssertNotNil(old.snapshot().pixel)
@@ -204,7 +313,7 @@ final class CameraReconnectIntegrationTests: XCTestCase {
         try await waitUntil { transport.names.count == 1 }
         model.toggleExpanded(camera)
         transport.complete(transport.names[0])
-        do { try await task.value; XCTFail("Expansion must supersede reconnect") }
+        do { _ = try await task.value; XCTFail("Expansion must supersede reconnect") }
         catch {}
         try await Task.sleep(for: .milliseconds(40))
         XCTAssertFalse(started)
@@ -221,7 +330,7 @@ final class CameraReconnectIntegrationTests: XCTestCase {
         let task = Task { try await model.reconnectNetworkVerified(camera, timeout: .seconds(1)) }
         try await waitUntil { transport.names.count == 1 }
         transport.fail(transport.names[0])
-        do { try await task.value; XCTFail("Failed PATCH must fail reconnect") }
+        do { _ = try await task.value; XCTFail("Failed PATCH must fail reconnect") }
         catch { XCTAssertEqual((error as? URLError)?.code, .cannotConnectToHost) }
         XCTAssertFalse(started)
         XCTAssertTrue(model.tiles[camera.id]?.session === old)
@@ -236,7 +345,7 @@ final class CameraReconnectIntegrationTests: XCTestCase {
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let task = Task { try await model.reconnectNetworkVerified(camera, timeout: .milliseconds(100)) }
         try await waitUntil { transport.names.count == 1 }
-        do { try await task.value; XCTFail("Unanswered PATCH must time out") }
+        do { _ = try await task.value; XCTFail("Unanswered PATCH must time out") }
         catch { XCTAssertEqual(error as? CameraReconnectAttempt.Failure, .timedOut) }
         transport.complete(transport.names[0])
         try await Task.sleep(for: .milliseconds(40))
@@ -260,7 +369,7 @@ final class CameraReconnectIntegrationTests: XCTestCase {
         model.tiles[camera.id]?.session = replacement
         let newSession = try XCTUnwrap(candidate)
         newSession.publish(try pixel(), message: "fresh")
-        do { try await task.value; XCTFail("Changed tile must reject reconnect") }
+        do { _ = try await task.value; XCTFail("Changed tile must reject reconnect") }
         catch { XCTAssertEqual(error as? CameraReconnectAttempt.Failure, .superseded) }
         XCTAssertTrue(model.tiles[camera.id]?.session === replacement)
         XCTAssertNil(newSession.snapshot().pixel)

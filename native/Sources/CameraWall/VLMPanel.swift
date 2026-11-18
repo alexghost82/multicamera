@@ -165,6 +165,12 @@ struct VLMPanel: View {
                                 .font(.system(size: ACTAType.metadata))
                                 .foregroundStyle(.secondary)
                                 .textSelection(.enabled)
+                            if requiresTokenReview {
+                                Text(verbatim: action.title)
+                                    .font(.system(size: ACTAType.caption))
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("Action details")
                                 let values = actaReviewArguments(action.actionType, action.parameters)

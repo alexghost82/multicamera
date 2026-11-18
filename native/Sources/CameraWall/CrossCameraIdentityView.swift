@@ -12,7 +12,7 @@ struct CrossCameraIdentityView: View {
     @State private var proposals: [CrossCameraIdentityProposal] = []
     @State private var acceptedProposals: [CrossCameraIdentityProposal] = []
     @State private var reviewSnapshot: CrossCameraIdentityReviewSnapshot?
-    @State private var pendingReview: CrossCameraIdentityPreparedReview?
+    @State private var pendingReview: CrossCameraIdentityPolicyPreparedReview?
     @State private var visitGroups: [CrossCameraVisitGroup] = []
     @State private var presenceCameraID: UUID?
     @State private var routeDestinationID: UUID?
@@ -182,8 +182,9 @@ struct CrossCameraIdentityView: View {
         }
     }
 
-    private func reviewConfirmation(_ prepared: CrossCameraIdentityPreparedReview) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+    private func reviewConfirmation(_ policyReview: CrossCameraIdentityPolicyPreparedReview) -> some View {
+        let prepared = policyReview.review
+        return VStack(alignment: .leading, spacing: 12) {
             Text(prepared.accept ? "Confirm appearance link" : "Confirm cannot-link decision")
                 .font(.headline)
             Text("Appearance similarity is not identity proof. The evidence and graph will be checked again when confirmed.")
@@ -208,7 +209,7 @@ struct CrossCameraIdentityView: View {
                 Button("Cancel") { pendingReview = nil }
                 Button("Confirm") {
                     pendingReview = nil
-                    commitReview(prepared)
+                    commitReview(policyReview)
                 }
             }
         }
@@ -512,9 +513,10 @@ struct CrossCameraIdentityView: View {
             refreshGeneration = UUID()
             isLoading = false
             reviewSnapshot = nil
-            if enabled { preferences.enabledFeatures.insert(.crossCameraIdentity) }
-            else { preferences.enabledFeatures.remove(.crossCameraIdentity) }
-            try CameraFeaturePreferencesStore.save(preferences)
+            preferences = try CameraFeaturePreferencesStore.update {
+                if enabled { $0.enabledFeatures.insert(.crossCameraIdentity) }
+                else { $0.enabledFeatures.remove(.crossCameraIdentity) }
+            }
             if enabled {
                 featureStore = try CameraFeatureStore()
                 refresh()
@@ -537,12 +539,14 @@ struct CrossCameraIdentityView: View {
         isLoading = true
         let generation = UUID()
         refreshGeneration = generation
-        let preferenceSnapshot = preferences
         let service = CrossCameraIdentityReviewService(tracking: trackingStore, features: featureStore)
+        let policyService = CrossCameraIdentityPolicyReviewService(
+            tracking: trackingStore, features: featureStore, preferencesURL: CameraFeaturePreferencesStore.defaultURL
+        )
         Task { @MainActor in
             do {
                 let result = try await Task.detached(priority: .utility) {
-                    _ = try service.reconcile(preferences: preferenceSnapshot)
+                    _ = try policyService.reconcile()
                     var records = try trackingStore.recentTracks(limit: 1000)
                     let samples = try trackingStore.reidValidationSamples(limit: 50_000)
                     let calibration = ReIDThresholdCalibrator.calibrate(
@@ -557,7 +561,13 @@ struct CrossCameraIdentityView: View {
                         recommendedDistance: calibration.recommendedDistance
                     )
                     for candidate in autoProposals {
-                        _ = try? service.propose(candidate: candidate, preferences: preferenceSnapshot)
+                        do {
+                            _ = try policyService.propose(candidate: candidate)
+                        } catch CameraFeaturePreferencesStoreError.busy {
+                            throw CameraFeaturePreferencesStoreError.busy
+                        } catch {
+                            continue
+                        }
                     }
                     let snapshot = try service.snapshot()
                     let proposals = snapshot.proposals
@@ -600,9 +610,9 @@ struct CrossCameraIdentityView: View {
     private func createProposal(_ candidate: ReIDValidationCandidate) {
         guard let featureStore, let trackingStore else { return }
         do {
-            let currentPreferences = try CameraFeaturePreferencesStore.load()
-            _ = try CrossCameraIdentityReviewService(tracking: trackingStore, features: featureStore)
-                .propose(candidate: candidate, preferences: currentPreferences)
+            _ = try CrossCameraIdentityPolicyReviewService(
+                tracking: trackingStore, features: featureStore, preferencesURL: CameraFeaturePreferencesStore.defaultURL
+            ).propose(candidate: candidate)
             refresh()
         } catch {
             message = "Could not create identity proposal: \(error.localizedDescription)"
@@ -612,21 +622,22 @@ struct CrossCameraIdentityView: View {
     private func review(_ proposal: CrossCameraIdentityProposal, accept: Bool) {
         guard let featureStore, let trackingStore, let reviewSnapshot else { return }
         do {
-            let currentPreferences = try CameraFeaturePreferencesStore.load()
-            pendingReview = try CrossCameraIdentityReviewService(tracking: trackingStore, features: featureStore)
+            pendingReview = try CrossCameraIdentityPolicyReviewService(
+                tracking: trackingStore, features: featureStore, preferencesURL: CameraFeaturePreferencesStore.defaultURL
+            )
                 .prepareReview(proposal: proposal, records: records, snapshot: reviewSnapshot,
-                               accept: accept, preferences: currentPreferences)
+                               accept: accept)
         } catch {
             message = "Could not prepare identity decision: \(error.localizedDescription)"
         }
     }
 
-    private func commitReview(_ prepared: CrossCameraIdentityPreparedReview) {
+    private func commitReview(_ prepared: CrossCameraIdentityPolicyPreparedReview) {
         guard let featureStore, let trackingStore else { return }
         do {
-            let currentPreferences = try CameraFeaturePreferencesStore.load()
-            _ = try CrossCameraIdentityReviewService(tracking: trackingStore, features: featureStore)
-                .review(prepared, preferences: currentPreferences)
+            _ = try CrossCameraIdentityPolicyReviewService(
+                tracking: trackingStore, features: featureStore, preferencesURL: CameraFeaturePreferencesStore.defaultURL
+            ).review(prepared)
             refresh()
         } catch {
             message = "Could not save identity decision: \(error.localizedDescription)"
@@ -636,9 +647,9 @@ struct CrossCameraIdentityView: View {
     private func undo(_ proposal: CrossCameraIdentityProposal) {
         guard let featureStore, let trackingStore, let reviewSnapshot else { return }
         do {
-            let currentPreferences = try CameraFeaturePreferencesStore.load()
-            try CrossCameraIdentityReviewService(tracking: trackingStore, features: featureStore)
-                .undo(proposal: proposal, snapshot: reviewSnapshot, preferences: currentPreferences)
+            try CrossCameraIdentityPolicyReviewService(
+                tracking: trackingStore, features: featureStore, preferencesURL: CameraFeaturePreferencesStore.defaultURL
+            ).undo(proposal: proposal, snapshot: reviewSnapshot)
             refresh()
         } catch {
             message = "Could not undo identity decision: \(error.localizedDescription)"

@@ -440,6 +440,110 @@ struct ACTAActionRegistryTests {
         #expect(!replay.success)
     }
 
+    @Test func reviewedTitleMustMatchExactTokenSummaryForApprovalAndRejection() async throws {
+        let registry = ACTAActionRegistry()
+        let state = SnapshotState()
+        await registry.register(SnapshotAction(state: state))
+        let arguments = ["value": "fake"]
+        let context = ACTAActionContext(threadID: "review-thread")
+        let first = try await registry.execute(actionID: "test.snapshot", parameters: arguments, context: context)
+        let second = try await registry.execute(actionID: "test.snapshot", parameters: arguments, context: context)
+        let token = try #require(first.confirmationToken)
+        #expect(await registry.confirmationMatches(token: token, actionID: "test.snapshot", parameters: arguments,
+                                                   threadID: "review-thread", expectedReviewTitle: first.summary))
+        for alteredTitle in [first.summary + " ", second.summary, "Snapshot"] {
+            #expect(!(await registry.confirmationMatches(token: token, actionID: "test.snapshot", parameters: arguments,
+                                                        threadID: "review-thread", expectedReviewTitle: alteredTitle)))
+            for confirmed in [true, false] {
+                let result = try await registry.confirmAndExecute(token: token, confirmed: confirmed,
+                    expectedActionID: "test.snapshot", expectedParameters: arguments,
+                    expectedThreadID: "review-thread", expectedReviewTitle: alteredTitle)
+                #expect(result.error?.hasPrefix("CONFIRMATION_MISMATCH:") == true)
+            }
+        }
+        #expect(await state.confirmedCalls == 0)
+        let approved = try await registry.confirmAndExecute(token: token, confirmed: true,
+            expectedActionID: "test.snapshot", expectedParameters: arguments,
+            expectedThreadID: "review-thread", expectedReviewTitle: first.summary)
+        #expect(approved.success)
+        #expect(await state.confirmedCalls == 1)
+        let replay = try await registry.confirmAndExecute(token: token, confirmed: true,
+            expectedActionID: "test.snapshot", expectedParameters: arguments,
+            expectedThreadID: "review-thread", expectedReviewTitle: first.summary)
+        #expect(!replay.success)
+        let rejection = try await registry.confirmAndExecute(token: try #require(second.confirmationToken), confirmed: false,
+            expectedActionID: "test.snapshot", expectedParameters: arguments,
+            expectedThreadID: "review-thread", expectedReviewTitle: second.summary)
+        #expect(rejection.summary.contains("cancelled"))
+        #expect(await state.confirmedCalls == 1)
+    }
+
+    @Test func preparedApprovalRequiresTitleButLegacyRejectionIsAllowed() async throws {
+        let registry = ACTAActionRegistry()
+        let state = SnapshotState()
+        await registry.register(SnapshotAction(state: state))
+        let arguments = ["value": "fake"]
+        let context = ACTAActionContext(threadID: "review-thread")
+        let proposed = try await registry.execute(actionID: "test.snapshot", parameters: arguments, context: context)
+        let token = try #require(proposed.confirmationToken)
+        let tokenOnly = try await registry.confirmAndExecute(token: token, confirmed: true)
+        #expect(tokenOnly.error?.hasPrefix("CONFIRMATION_MISMATCH:") == true)
+        let intentOnly = try await registry.confirmAndExecute(token: token, confirmed: true,
+            expectedActionID: "test.snapshot", expectedParameters: arguments, expectedThreadID: "review-thread")
+        #expect(intentOnly.error?.hasPrefix("CONFIRMATION_MISMATCH:") == true)
+        let wrongTitle = try await registry.confirmAndExecute(token: token, confirmed: true,
+            expectedActionID: "test.snapshot", expectedParameters: arguments,
+            expectedThreadID: "review-thread", expectedReviewTitle: proposed.summary + " altered")
+        #expect(wrongTitle.error?.hasPrefix("CONFIRMATION_MISMATCH:") == true)
+        #expect(await state.confirmedCalls == 0)
+        let approved = try await registry.confirmAndExecute(token: token, confirmed: true,
+            expectedActionID: "test.snapshot", expectedParameters: arguments,
+            expectedThreadID: "review-thread", expectedReviewTitle: proposed.summary)
+        #expect(approved.success)
+        #expect(await state.confirmedCalls == 1)
+
+        let first = try await registry.execute(actionID: "test.snapshot", parameters: arguments, context: context)
+        let rejected = try await registry.confirmAndExecute(token: try #require(first.confirmationToken), confirmed: false)
+        #expect(rejected.summary.contains("cancelled"))
+        let second = try await registry.execute(actionID: "test.snapshot", parameters: arguments, context: context)
+        let secondToken = try #require(second.confirmationToken)
+        let intentRejected = try await registry.confirmAndExecute(token: secondToken, confirmed: false,
+            expectedActionID: "test.snapshot", expectedParameters: arguments, expectedThreadID: "review-thread")
+        #expect(intentRejected.summary.contains("cancelled"))
+        let replay = try await registry.confirmAndExecute(token: secondToken, confirmed: true,
+            expectedActionID: "test.snapshot", expectedParameters: arguments,
+            expectedThreadID: "review-thread", expectedReviewTitle: second.summary)
+        #expect(!replay.success)
+        #expect(await state.confirmedCalls == 1)
+    }
+
+    @Test func titleBoundMatchingStillRejectsExpiredAndReplacedTokens() async throws {
+        let clock = ConfirmationClock()
+        let registry = ACTAActionRegistry(confirmationNow: { clock.now() })
+        let state = SnapshotState()
+        await registry.register(SnapshotAction(state: state))
+        let arguments = ["value": "fake"]
+        let expired = try await registry.execute(actionID: "test.snapshot", parameters: arguments)
+        let expiredToken = try #require(expired.confirmationToken)
+        clock.advance(300)
+        #expect(!(await registry.confirmationMatches(token: expiredToken, actionID: "test.snapshot", parameters: arguments,
+                                                    threadID: "default", expectedReviewTitle: expired.summary)))
+        let expiredResult = try await registry.confirmAndExecute(token: expiredToken, confirmed: true,
+            expectedActionID: "test.snapshot", expectedParameters: arguments,
+            expectedThreadID: "default", expectedReviewTitle: expired.summary)
+        #expect(!expiredResult.success)
+        let replaced = try await registry.execute(actionID: "test.snapshot", parameters: arguments)
+        let replacedToken = try #require(replaced.confirmationToken)
+        await registry.register(SnapshotAction(state: state))
+        #expect(!(await registry.confirmationMatches(token: replacedToken, actionID: "test.snapshot", parameters: arguments,
+                                                    threadID: "default", expectedReviewTitle: replaced.summary)))
+        let replacedResult = try await registry.confirmAndExecute(token: replacedToken, confirmed: true,
+            expectedActionID: "test.snapshot", expectedParameters: arguments,
+            expectedThreadID: "default", expectedReviewTitle: replaced.summary)
+        #expect(!replacedResult.success)
+        #expect(await state.confirmedCalls == 0)
+    }
+
     @Test func reviewedBooleanArgumentsUseCanonicalValues() async throws {
         let registry = ACTAActionRegistry()
         let features = MockFeatureProvider()
@@ -538,6 +642,300 @@ struct ACTAActionRegistryTests {
             #expect(!result.success)
         }
         #expect(features.preferences.enabledFeatures.isEmpty)
+    }
+
+    actor SnapshotState {
+        private var revision = 1
+        private(set) var confirmedCalls = 0
+
+        func currentRevision() -> Int { revision }
+        func advance() { revision += 1 }
+        func check(_ expected: Int) -> Bool {
+            confirmedCalls += 1
+            return revision == expected
+        }
+    }
+
+    struct SnapshotAction: ACTAPreparedConfirmationAction {
+        struct Snapshot: Sendable {
+            let value: String
+            let revision: Int
+            let thread: String
+            let initiator: String
+        }
+
+        var id = "test.snapshot"
+        let title = "Snapshot"
+        let description = "Fake snapshot action"
+        let classification = ACTAActionClassification.destructive
+        let parameters = [ACTAActionParameterSchema(name: "value", type: "string", description: "Fake value", isRequired: true)]
+        let state: SnapshotState
+        var latch: MutationLatch? = nil
+        var protected = true
+        var failPreparation = false
+        var reviewSummary: String? = nil
+
+        func requiresConfirmation(parameters: [String: String]) -> Bool { protected }
+
+        func prepareConfirmation(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAPreparedConfirmation<Snapshot> {
+            if let latch { await latch.hold() }
+            if failPreparation || context.isConfirmed { throw PreparationError() }
+            let snapshot = Snapshot(value: parameters["value"]!, revision: await state.currentRevision(),
+                                    thread: context.threadID, initiator: context.initiator)
+            return ACTAPreparedConfirmation(snapshot: snapshot, reviewSummary: reviewSummary ?? "Review fake item at revision \(snapshot.revision)")
+        }
+
+        struct PreparationError: LocalizedError {
+            var errorDescription: String? { "fake-secret-in-error" }
+        }
+
+        func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
+            ACTAActionResult(actionID: id, success: true, summary: context.isConfirmed ? "unexpected confirmation" : "ordinary execution")
+        }
+
+        func executeConfirmed(parameters: [String: String], context: ACTAActionContext, snapshot: Snapshot) async throws -> ACTAActionResult {
+            guard context.isConfirmed, parameters["value"] == snapshot.value,
+                  context.threadID == snapshot.thread, context.initiator == snapshot.initiator,
+                  await state.check(snapshot.revision) else {
+                return .failed(actionID: id, error: "STALE_SNAPSHOT")
+            }
+            return ACTAActionResult(actionID: id, success: true, summary: "Confirmed \(snapshot.value)")
+        }
+
+        func verify(parameters: [String: String], context: ACTAActionContext) async throws -> Bool { true }
+    }
+
+    @Test func preparedSnapshotsBindToTokenAndReviewedContext() async throws {
+        let registry = ACTAActionRegistry()
+        let state = SnapshotState()
+        await registry.register(SnapshotAction(state: state))
+        let first = try await registry.execute(actionID: "test.snapshot", parameters: ["value": "fake-secret-one"],
+                                               context: ACTAActionContext(threadID: "first", initiator: "review", isConfirmed: true))
+        let second = try await registry.executeJSON(actionID: "test.snapshot", argumentsJSON: #"{"value":"fake-secret-two"}"#,
+                                                    context: ACTAActionContext(threadID: "second", initiator: "other"))
+        #expect(first.summary.contains("Review fake item at revision 1"))
+        #expect(!first.summary.contains("fake-secret-one"))
+        #expect(!first.outputJSON.contains("fake-secret-one"))
+        let firstToken = try #require(first.confirmationToken)
+        let secondToken = try #require(second.confirmationToken)
+        let mismatch = try await registry.confirmAndExecute(token: firstToken, confirmed: true,
+            expectedActionID: "test.snapshot", expectedParameters: ["value": "fake-secret-two"], expectedThreadID: "second")
+        #expect(mismatch.error?.hasPrefix("CONFIRMATION_MISMATCH:") == true)
+        let secondResult = try await registry.confirmAndExecute(token: secondToken, confirmed: true,
+            expectedActionID: "test.snapshot", expectedParameters: ["value": "fake-secret-two"],
+            expectedThreadID: "second", expectedReviewTitle: second.summary)
+        let firstResult = try await registry.confirmAndExecute(token: firstToken, confirmed: true,
+            expectedActionID: "test.snapshot", expectedParameters: ["value": "fake-secret-one"],
+            expectedThreadID: "first", expectedReviewTitle: first.summary)
+        #expect(secondResult.summary == "Confirmed fake-secret-two")
+        #expect(firstResult.summary == "Confirmed fake-secret-one")
+        #expect(await state.confirmedCalls == 2)
+        let replay = try await registry.confirmAndExecute(token: firstToken, confirmed: true)
+        #expect(!replay.success)
+    }
+
+    @Test func preparedSnapshotCanRejectStaleStateAndNeverRunsOnRejectionExpiryOrReplacement() async throws {
+        let clock = ConfirmationClock()
+        let registry = ACTAActionRegistry(confirmationNow: { clock.now() })
+        let state = SnapshotState()
+        await registry.register(SnapshotAction(state: state))
+        let actionID = "test.snapshot"
+        let params = ["value": "fake"]
+        let stale = try await registry.execute(actionID: actionID, parameters: params)
+        await state.advance()
+        let staleResult = try await registry.confirmAndExecute(token: try #require(stale.confirmationToken), confirmed: true,
+            expectedActionID: actionID, expectedParameters: params, expectedThreadID: "default",
+            expectedReviewTitle: stale.summary)
+        #expect(staleResult.error == "STALE_SNAPSHOT")
+        let rejected = try await registry.execute(actionID: actionID, parameters: params)
+        _ = try await registry.confirmAndExecute(token: try #require(rejected.confirmationToken), confirmed: false)
+        let expired = try await registry.execute(actionID: actionID, parameters: params)
+        clock.advance(300)
+        let expiredResult = try await registry.confirmAndExecute(token: try #require(expired.confirmationToken), confirmed: true)
+        #expect(!expiredResult.success)
+        let replaced = try await registry.execute(actionID: actionID, parameters: params)
+        let replacementState = SnapshotState()
+        await registry.register(SnapshotAction(state: replacementState))
+        let replacedResult = try await registry.confirmAndExecute(token: try #require(replaced.confirmationToken), confirmed: true)
+        #expect(!replacedResult.success)
+        let unregistered = try await registry.execute(actionID: actionID, parameters: params)
+        await registry.unregister(actionID: actionID)
+        let unregisteredResult = try await registry.confirmAndExecute(token: try #require(unregistered.confirmationToken), confirmed: true)
+        #expect(!unregisteredResult.success)
+        #expect(await state.confirmedCalls == 1)
+        #expect(await replacementState.confirmedCalls == 0)
+    }
+
+    @Test func preparationCancellationAndReplacementDoNotIssueTokens() async throws {
+        for cancel in [true, false] {
+            let registry = ACTAActionRegistry(confirmationNow: { Date() }, maxPendingConfirmations: 1)
+            let latch = MutationLatch()
+            let state = SnapshotState()
+            await registry.register(SnapshotAction(state: state, latch: latch))
+            await registry.register(ContextProbeAction())
+            let task = Task { try await registry.execute(actionID: "test.snapshot", parameters: ["value": "fake"]) }
+            await latch.waitUntilStarted()
+            let unrelated = try await registry.execute(actionID: "test.context", parameters: [:])
+            #expect(unrelated.summary == "unconfirmed")
+            if cancel {
+                task.cancel()
+            } else {
+                await registry.unregister(actionID: "test.snapshot")
+                await registry.register(SnapshotAction(state: state))
+            }
+            await latch.release()
+            if cancel {
+                do {
+                    let result = try await task.value
+                    Issue.record("Cancelled preparation returned \(result)")
+                } catch is CancellationError {
+                }
+            } else {
+                let result = try await task.value
+                #expect(result.confirmationToken == nil)
+                #expect(result.error?.hasPrefix("CONFIRMATION_REVOKED:") == true)
+            }
+            #expect(await state.confirmedCalls == 0)
+            await registry.register(SnapshotAction(state: state))
+            let retry = try await registry.execute(actionID: "test.snapshot", parameters: ["value": "fake"])
+            #expect(retry.confirmationToken != nil)
+        }
+    }
+
+    @Test func preparationFailureIsRedactedAndUnprotectedActionsUseOrdinaryExecution() async throws {
+        let registry = ACTAActionRegistry(confirmationNow: { Date() }, maxPendingConfirmations: 1)
+        let state = SnapshotState()
+        await registry.register(SnapshotAction(state: state, failPreparation: true))
+        let failed = try await registry.execute(actionID: "test.snapshot", parameters: ["value": "fake-secret"])
+        #expect(failed.error?.hasPrefix("CONFIRMATION_PREPARATION_FAILED:") == true)
+        #expect(!failed.summary.contains("fake-secret"))
+        #expect(!failed.outputJSON.contains("fake-secret"))
+        #expect(failed.confirmationToken == nil)
+        await registry.register(SnapshotAction(state: state))
+        let retry = try await registry.execute(actionID: "test.snapshot", parameters: ["value": "fake"])
+        #expect(retry.confirmationToken != nil)
+        await registry.register(SnapshotAction(state: state, protected: false, failPreparation: true))
+        let result = try await registry.execute(actionID: "test.snapshot", parameters: ["value": "fake"],
+                                                context: ACTAActionContext(isConfirmed: true))
+        #expect(result.success)
+        #expect(result.summary == "ordinary execution")
+        #expect(result.confirmationToken == nil)
+    }
+
+    @Test func pendingCapacityPreservesLiveTokensAndRecoversAfterRejectionAndExpiry() async throws {
+        let clock = ConfirmationClock()
+        let registry = ACTAActionRegistry(confirmationNow: { clock.now() }, maxPendingConfirmations: 2)
+        let state = SnapshotState()
+        await registry.register(SnapshotAction(state: state))
+        await registry.register(SettingsUpdatePermissionsAction(featureProvider: MockFeatureProvider()))
+        let arguments = ["value": "fake"]
+        let first = try await registry.execute(actionID: "test.snapshot", parameters: arguments)
+        let second = try await registry.execute(actionID: "settings.update_permissions", parameters: ["allow_voice_input": "true"])
+        let firstToken = try #require(first.confirmationToken)
+        let secondToken = try #require(second.confirmationToken)
+        let full = try await registry.execute(actionID: "test.snapshot", parameters: arguments)
+        #expect(full.error?.hasPrefix("CONFIRMATION_CAPACITY:") == true)
+        #expect(full.confirmationToken == nil)
+        #expect(await registry.confirmationMatches(token: firstToken, actionID: "test.snapshot", parameters: arguments,
+                                                  threadID: "default", expectedReviewTitle: first.summary))
+        let rejected = try await registry.confirmAndExecute(token: secondToken, confirmed: false)
+        #expect(rejected.summary.contains("cancelled"))
+        let retry = try await registry.execute(actionID: "test.snapshot", parameters: arguments)
+        #expect(retry.confirmationToken != nil)
+        clock.advance(300)
+        let afterExpiry = try await registry.execute(actionID: "test.snapshot", parameters: arguments)
+        #expect(afterExpiry.confirmationToken != nil)
+        let expired = try await registry.confirmAndExecute(token: firstToken, confirmed: true,
+            expectedActionID: "test.snapshot", expectedParameters: arguments, expectedThreadID: "default",
+            expectedReviewTitle: first.summary)
+        #expect(!expired.success)
+    }
+
+    @Test func concurrentPreparationsReserveCapacityUntilTheyFinish() async throws {
+        let registry = ACTAActionRegistry(confirmationNow: { Date() }, maxPendingConfirmations: 2)
+        let state = SnapshotState()
+        let firstLatch = MutationLatch()
+        let secondLatch = MutationLatch()
+        await registry.register(SnapshotAction(state: state, latch: firstLatch))
+        await registry.register(SnapshotAction(id: "test.snapshot.second", state: state, latch: secondLatch))
+        await registry.register(SnapshotAction(id: "test.snapshot.third", state: state))
+        let arguments = ["value": "fake"]
+        let first = Task { try await registry.execute(actionID: "test.snapshot", parameters: arguments) }
+        await firstLatch.waitUntilStarted()
+        let second = Task { try await registry.execute(actionID: "test.snapshot.second", parameters: arguments) }
+        await secondLatch.waitUntilStarted()
+        let full = try await registry.execute(actionID: "test.snapshot.third", parameters: arguments)
+        #expect(full.error?.hasPrefix("CONFIRMATION_CAPACITY:") == true)
+        first.cancel()
+        let stillFull = try await registry.execute(actionID: "test.snapshot.third", parameters: arguments)
+        #expect(stillFull.error?.hasPrefix("CONFIRMATION_CAPACITY:") == true)
+        await firstLatch.release()
+        do {
+            _ = try await first.value
+            Issue.record("Cancelled preparation issued a result")
+        } catch is CancellationError {
+        }
+        let retry = try await registry.execute(actionID: "test.snapshot.third", parameters: arguments)
+        #expect(retry.confirmationToken != nil)
+        await secondLatch.release()
+        let secondResult = try await second.value
+        #expect(secondResult.confirmationToken != nil)
+        let fullAgain = try await registry.execute(actionID: "test.snapshot.third", parameters: arguments)
+        #expect(fullAgain.error?.hasPrefix("CONFIRMATION_CAPACITY:") == true)
+    }
+
+    @Test func preparedReviewSummaryMustBeNonemptyAndWithinUTF8Limit() async throws {
+        let registry = ACTAActionRegistry(confirmationNow: { Date() }, maxPendingConfirmations: 1)
+        let state = SnapshotState()
+        let limit = ACTAActionRegistry.maxPreparedReviewSummaryUTF8Bytes
+        for summary in ["", " \n\t", String(repeating: "x", count: limit + 1), String(repeating: "é", count: limit / 2 + 1)] {
+            await registry.register(SnapshotAction(state: state, reviewSummary: summary))
+            let rejected = try await registry.execute(actionID: "test.snapshot", parameters: ["value": "fake"])
+            #expect(rejected.error?.hasPrefix("CONFIRMATION_REVIEW_INVALID:") == true)
+            #expect(rejected.confirmationToken == nil)
+        }
+        let fakeFrames = (0..<256).map { "frame \($0): id \(UUID()) camera \(UUID()) bytes 123 timestamp 2000000" }.joined(separator: "\n")
+        for summary in [fakeFrames, String(repeating: "x", count: limit)] {
+            await registry.register(SnapshotAction(state: state, reviewSummary: summary))
+            let accepted = try await registry.execute(actionID: "test.snapshot", parameters: ["value": "fake"])
+            #expect(accepted.confirmationToken != nil)
+            #expect(accepted.summary.contains(summary))
+        }
+    }
+
+    @Test func tokenLifetimeStartsAfterPreparationAndCancelledApprovalConsumesToken() async throws {
+        let clock = ConfirmationClock()
+        let registry = ACTAActionRegistry(confirmationNow: { clock.now() })
+        let state = SnapshotState()
+        let preparation = MutationLatch()
+        await registry.register(SnapshotAction(state: state, latch: preparation))
+        let pendingTask = Task { try await registry.execute(actionID: "test.snapshot", parameters: ["value": "fake"]) }
+        await preparation.waitUntilStarted()
+        clock.advance(600)
+        await preparation.release()
+        let pending = try await pendingTask.value
+        let token = try #require(pending.confirmationToken)
+        let valid = await registry.confirmationMatches(token: token, actionID: "test.snapshot",
+                                                       parameters: ["value": "fake"], threadID: "default")
+        #expect(valid)
+        let approvalGate = MutationLatch()
+        let approval = Task {
+            await approvalGate.hold()
+            return try await registry.confirmAndExecute(token: token, confirmed: true,
+                expectedActionID: "test.snapshot", expectedParameters: ["value": "fake"],
+                expectedThreadID: "default", expectedReviewTitle: pending.summary)
+        }
+        await approvalGate.waitUntilStarted()
+        approval.cancel()
+        await approvalGate.release()
+        do {
+            let result = try await approval.value
+            Issue.record("Cancelled approval returned \(result)")
+        } catch is CancellationError {
+        }
+        let replay = try await registry.confirmAndExecute(token: token, confirmed: true)
+        #expect(!replay.success)
+        #expect(await state.confirmedCalls == 0)
     }
 
 }

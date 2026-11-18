@@ -161,6 +161,33 @@ public protocol ACTAActionProtocol: Sendable {
     ) async throws -> Bool
 }
 
+/// An action-owned snapshot and a safe, operator-visible description of what was reviewed.
+/// The summary must not contain secrets or other sensitive raw values.
+public struct ACTAPreparedConfirmation<Snapshot: Sendable>: Sendable {
+    public let snapshot: Snapshot
+    public let reviewSummary: String
+
+    public init(snapshot: Snapshot, reviewSummary: String) {
+        self.snapshot = snapshot
+        self.reviewSummary = reviewSummary
+    }
+}
+
+/// Opt in to preparing review state before a confirmation token is issued.
+/// Use a stable value snapshot; confirmed execution must atomically check its freshness
+/// with the mutation, using the domain's own synchronization.
+public protocol ACTAPreparedConfirmationAction: ACTAActionProtocol {
+    associatedtype ConfirmationSnapshot: Sendable
+
+    func prepareConfirmation(
+        parameters: [String: String], context: ACTAActionContext
+    ) async throws -> ACTAPreparedConfirmation<ConfirmationSnapshot>
+
+    func executeConfirmed(
+        parameters: [String: String], context: ACTAActionContext, snapshot: ConfirmationSnapshot
+    ) async throws -> ACTAActionResult
+}
+
 public extension ACTAActionProtocol {
     func validate(parameters: [String: String]) throws {}
 

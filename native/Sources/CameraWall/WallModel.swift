@@ -349,6 +349,7 @@ final class WallModel: ObservableObject {
     @Published var error: String?
     @Published var notice = ""
     @Published var layout = VideoWallLayout()
+    private(set) var canvasLayoutSnapshot: ACTACanvasLayoutStore.Snapshot?
     var detectionEnabled: Bool {
         get { config.cameras.contains { $0.enabled && $0.yoloEnabled } }
         set { setYOLOEnabledForAll(newValue) }
@@ -704,10 +705,7 @@ final class WallModel: ObservableObject {
             }
         }
         rebuildTiles()
-        if FileManager.default.fileExists(atPath: layoutURL.path) {
-            do { layout = try VideoWallLayout.load(from: layoutURL) }
-            catch { notice = "Cannot load saved video layout; using the grid" }
-        }
+        _ = refreshCanvasLayout()
         analyticsEngineCancellable = localAnalyticsEngine.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
@@ -738,17 +736,64 @@ final class WallModel: ObservableObject {
 
     var layoutURL: URL { configURL.deletingPathExtension().appendingPathExtension("layout.json") }
 
-    func setTileFrame(_ frame: VideoTileFrame, for id: UUID) {
-        guard frame.isValid else { return }
-        var next = layout
+    @discardableResult
+    func refreshCanvasLayout() -> Bool {
+        do {
+            let snapshot = try ACTACanvasLayoutStore(url: layoutURL).read()
+            canvasLayoutSnapshot = snapshot
+            layout = snapshot.layout
+            return true
+        } catch {
+            notice = "Cannot load saved video layout"
+            return false
+        }
+    }
+
+    @discardableResult
+    func setTileFrame(_ frame: VideoTileFrame, for id: UUID) -> Bool {
+        setTileFrame(frame, for: id, expected: canvasLayoutSnapshot)
+    }
+
+    @discardableResult
+    func setTileFrame(_ frame: VideoTileFrame, for id: UUID,
+                      expected: ACTACanvasLayoutStore.Snapshot?) -> Bool {
+        guard frame.isValid, let base = expected,
+              canvasLayoutSnapshot == base, layout == base.layout else {
+            notice = "Video layout changed; the tile draft was not saved"
+            return false
+        }
+        var next = base.layout
         next.frames[id.uuidString] = frame
-        do { try next.save(to: layoutURL); layout = next }
-        catch { notice = "Cannot save video layout" }
+        do {
+            let snapshot = try ACTACanvasLayoutStore(url: layoutURL).commit(next, expected: base)
+            canvasLayoutSnapshot = snapshot
+            layout = snapshot.layout
+            return true
+        } catch {
+            notice = "Cannot save video layout; the tile draft was not saved"
+            return false
+        }
     }
 
     func resetLayout() {
-        let next = VideoWallLayout()
-        do { try next.save(to: layoutURL); layout = next }
+        guard !ACTACanvasGestureTracker.shared.hasActiveGestures else {
+            notice = "Finish or discard the active tile draft before resetting the layout"
+            return
+        }
+        guard let base = canvasLayoutSnapshot, layout == base.layout else {
+            notice = "Video layout changed; reset was not saved"
+            return
+        }
+        do {
+            let snapshot = try ACTACanvasLayoutStore(url: layoutURL).commit(VideoWallLayout(), expected: base)
+            canvasLayoutSnapshot = snapshot
+            layout = snapshot.layout
+        }
+        catch ACTACanvasLayoutStore.Failure.conflict {
+            if refreshCanvasLayout() {
+                notice = "Video layout changed; review it and retry reset"
+            }
+        }
         catch { notice = "Cannot reset video layout" }
     }
 
@@ -1026,7 +1071,8 @@ final class WallModel: ObservableObject {
         }
     }
 
-    func reconnectNetworkVerified(_ camera: Camera, timeout: Duration = .seconds(10)) async throws {
+    @discardableResult
+    func reconnectNetworkVerified(_ camera: Camera, timeout: Duration = .seconds(10)) async throws -> CameraSession {
         try Task.checkCancellation()
         guard running, !connecting, camera.enabled,
               camera.fileURL == nil, camera.localDeviceID == nil, camera.screenDisplayID == nil,
@@ -1039,37 +1085,44 @@ final class WallModel: ObservableObject {
         reconnectAttempt.cancel()
         let credentials = try cameraCredentialStore.read(camera.id)
         let startDecoder = reconnectDecoderStart
-        let verified = try await reconnectAttempt.run(timeout: timeout) { id in
-            NetworkReconnectSession(attemptID: id, register: {
-                try await attemptRelay.registerReconnect(camera: camera, expanded: selected == camera.id,
-                                                         attemptID: id, credentials: credentials)
-            }, startDecoder: startDecoder)
+        let cancellation = ReconnectCancellationFlag()
+        return try await withTaskCancellationHandler {
+            let verified = try await reconnectAttempt.run(timeout: timeout) { id in
+                NetworkReconnectSession(attemptID: id, register: {
+                    try await attemptRelay.registerReconnect(camera: camera, expanded: selected == camera.id,
+                                                             attemptID: id, credentials: credentials)
+                }, startDecoder: startDecoder, cancellation: cancellation)
+            }
+            guard let candidate = verified.session as? NetworkReconnectSession else {
+                verified.session.stop()
+                throw CameraReconnectAttempt.Failure.invalidSession
+            }
+            var installed = false
+            defer { if !installed { candidate.stop() } }
+            try Task.checkCancellation()
+            let frame = candidate.session.snapshot()
+            let now = ContinuousClock.now
+            guard running, !connecting, relay === attemptRelay, expanded == selected,
+                  config.cameras.contains(camera), tiles[camera.id] === tile,
+                  tile.session === originalSession, frame.pixel != nil,
+                  let evidence = frame.reconnectEvidence, evidence.attemptID == verified.attemptID,
+                  evidence.sequence >= verified.frame.sequence, evidence.receivedAt <= now,
+                  evidence.receivedAt.duration(to: now) <= .seconds(2) else {
+                throw CameraReconnectAttempt.Failure.superseded
+            }
+            guard !cancellation.isCancelled() else { throw CancellationError() }
+            localAnalyticsEngine.removeCamera(camera.id)
+            analyticsStreamSessions.removeValue(forKey: camera.id)
+            analyticsStreamReconnects.removeValue(forKey: camera.id)
+            trackAssigners.removeValue(forKey: camera.id)
+            fallDetectors.removeValue(forKey: camera.id)
+            tile.stop()
+            tile.session = candidate.session
+            installed = true
+            return candidate.session
+        } onCancel: {
+            cancellation.cancel()
         }
-        guard let candidate = verified.session as? NetworkReconnectSession else {
-            verified.session.stop()
-            throw CameraReconnectAttempt.Failure.invalidSession
-        }
-        var installed = false
-        defer { if !installed { candidate.stop() } }
-        try Task.checkCancellation()
-        let frame = candidate.session.snapshot()
-        let now = ContinuousClock.now
-        guard running, !connecting, relay === attemptRelay, expanded == selected,
-              config.cameras.contains(camera), tiles[camera.id] === tile,
-              tile.session === originalSession, frame.pixel != nil,
-              let evidence = frame.reconnectEvidence, evidence.attemptID == verified.attemptID,
-              evidence.sequence >= verified.frame.sequence, evidence.receivedAt <= now,
-              evidence.receivedAt.duration(to: now) <= .seconds(2) else {
-            throw CameraReconnectAttempt.Failure.superseded
-        }
-        localAnalyticsEngine.removeCamera(camera.id)
-        analyticsStreamSessions.removeValue(forKey: camera.id)
-        analyticsStreamReconnects.removeValue(forKey: camera.id)
-        trackAssigners.removeValue(forKey: camera.id)
-        fallDetectors.removeValue(forKey: camera.id)
-        tile.stop()
-        tile.session = candidate.session
-        installed = true
     }
 
     func save(ip: String, credentials: Credentials, original: Camera, progress: (String) -> Void) async throws {
@@ -3771,7 +3824,7 @@ final class WallModel: ObservableObject {
             guard reviewed.threadID == activeACTAThreadID, reviewed.status == "proposed" else { return }
             let registry = ACTAActionRegistry.shared
             guard await registry.confirmationMatches(token: reviewed.actionID, actionID: reviewed.actionType,
-                    parameters: reviewed.parameters, threadID: reviewed.threadID) else {
+                    parameters: reviewed.parameters, threadID: reviewed.threadID, expectedReviewTitle: reviewed.title) else {
                 notice = "This confirmation expired or no longer matches the displayed action. Recreate the action request."
                 return
             }
@@ -3782,7 +3835,8 @@ final class WallModel: ObservableObject {
             }
             // Claim the durable proposal before awaiting so a second click cannot replay it.
             let result = try await registry.confirmAndExecute(token: reviewed.actionID, confirmed: confirmed,
-                expectedActionID: reviewed.actionType, expectedParameters: reviewed.parameters, expectedThreadID: reviewed.threadID)
+                expectedActionID: reviewed.actionType, expectedParameters: reviewed.parameters,
+                expectedThreadID: reviewed.threadID, expectedReviewTitle: reviewed.title)
             try store.recordACTAToolCallAudit(ACTAToolCallAuditRecord(threadID: reviewed.threadID,
                 toolName: reviewed.actionType, argsJSON: String(decoding: try JSONEncoder().encode(actaActionAuditArguments(reviewed.actionType, reviewed.parameters)), as: UTF8.self),
                 resultRows: result.success ? 1 : 0, durationMs: 0, ok: result.success && result.verified,

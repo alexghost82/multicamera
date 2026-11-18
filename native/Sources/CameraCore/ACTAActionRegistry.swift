@@ -5,6 +5,11 @@ import CoreFoundation
 public actor ACTAActionRegistry {
     public static let shared = ACTAActionRegistry()
 
+    /// Maximum pending tokens and in-flight preparations per registry.
+    public static let maxPendingConfirmationCount = 64
+    /// Maximum UTF-8 size of a prepared review summary (256 KiB).
+    public static let maxPreparedReviewSummaryUTF8Bytes = 256 * 1024
+
     public struct PendingConfirmation: Sendable {
         public let token: String
         public let actionID: String
@@ -12,21 +17,33 @@ public actor ACTAActionRegistry {
         public let context: ACTAActionContext
         public let createdAt: Date
         public let expiresAt: Date
+        public let reviewTitle: String
         fileprivate let actionGeneration: UUID
+        fileprivate let preparedExecution: PreparedExecution?
+    }
+
+    fileprivate struct PreparedExecution: Sendable {
+        let reviewSummary: String
+        let execute: @Sendable ([String: String], ACTAActionContext) async throws -> ACTAActionResult
     }
 
     private var mutationInProgress = false
     private var actions: [String: any ACTAActionProtocol] = [:]
     private var actionGenerations: [String: UUID] = [:]
     private var pendingConfirmations: [String: PendingConfirmation] = [:]
+    private var preparationReservations = 0
+    private let maxPendingConfirmations: Int
     private let confirmationNow: @Sendable () -> Date
 
     public init() {
         confirmationNow = { Date() }
+        maxPendingConfirmations = Self.maxPendingConfirmationCount
     }
 
-    init(confirmationNow: @escaping @Sendable () -> Date) {
+    init(confirmationNow: @escaping @Sendable () -> Date, maxPendingConfirmations: Int = ACTAActionRegistry.maxPendingConfirmationCount) {
+        precondition(maxPendingConfirmations > 0)
         self.confirmationNow = confirmationNow
+        self.maxPendingConfirmations = maxPendingConfirmations
     }
 
     // MARK: - Registration
@@ -131,7 +148,8 @@ public actor ACTAActionRegistry {
         confirmed: Bool,
         argumentsJSON: String? = nil,
         beforeExecution: (@Sendable ([String: String]) throws -> Void)? = nil,
-        expectedGeneration: UUID? = nil
+        expectedGeneration: UUID? = nil,
+        preparedExecution: PreparedExecution? = nil
     ) async throws -> ACTAActionResult {
         if let expectedGeneration, actionGenerations[actionID] != expectedGeneration {
             return .failed(actionID: actionID, error: "CONFIRMATION_REVOKED: The action was replaced or unregistered.")
@@ -189,10 +207,48 @@ public actor ACTAActionRegistry {
         // 1. Check Destructive / Security Confirmation Gate
         if action.requiresConfirmation(parameters: parameters) && !confirmed {
             cleanupExpiredConfirmations()
+            guard pendingConfirmations.count + preparationReservations < maxPendingConfirmations else {
+                return .failed(actionID: actionID, error: "CONFIRMATION_CAPACITY: Too many pending confirmations; resolve or wait for existing confirmations to expire.")
+            }
+            preparationReservations += 1
+            defer { preparationReservations -= 1 }
+            let prepared: PreparedExecution?
+            if let preparingAction = action as? any ACTAPreparedConfirmationAction {
+                do {
+                    prepared = try await Self.prepare(preparingAction, parameters: parameters, context: context)
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    try Task.checkCancellation()
+                    guard actionGenerations[actionID] == actionGeneration else {
+                        return .failed(actionID: actionID, error: "CONFIRMATION_REVOKED: The action was replaced or unregistered.")
+                    }
+                    return .failed(actionID: actionID, error: "CONFIRMATION_PREPARATION_FAILED: Unable to prepare operator review.")
+                }
+                try Task.checkCancellation()
+                guard actionGenerations[actionID] == actionGeneration else {
+                    return .failed(actionID: actionID, error: "CONFIRMATION_REVOKED: The action was replaced or unregistered.")
+                }
+            } else {
+                prepared = nil
+            }
+            if let prepared,
+               (prepared.reviewSummary.utf8.count > Self.maxPreparedReviewSummaryUTF8Bytes
+                || prepared.reviewSummary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
+                return .failed(actionID: actionID, error: "CONFIRMATION_REVIEW_INVALID: Prepared review must be nonempty and at most \(Self.maxPreparedReviewSummaryUTF8Bytes) UTF-8 bytes.")
+            }
+            cleanupExpiredConfirmations()
             var token: String
             repeat {
                 token = "CONFIRM-" + UUID().uuidString
             } while pendingConfirmations[token] != nil
+            let paramDesc = parameters.keys.sorted().map { key in
+                let sensitive = key.lowercased() == "note"
+                    || ["password", "secret", "token", "key", "credential", "url"].contains { key.lowercased().contains($0) }
+                return "\(key)=\(sensitive ? "[redacted]" : String((parameters[key] ?? "").prefix(256)))"
+            }.joined(separator: ", ")
+            let review = prepared.map { "review: \($0.reviewSummary)" } ?? "parameters: (\(paramDesc))"
+            let summary = "Operator confirmation required for protected action '\(action.title)' [\(actionID)] with \(review). Token: \(token)"
             let createdAt = confirmationNow()
             let pending = PendingConfirmation(
                 token: token,
@@ -201,16 +257,12 @@ public actor ACTAActionRegistry {
                 context: context,
                 createdAt: createdAt,
                 expiresAt: createdAt.addingTimeInterval(300), // 5 minutes TTL
-                actionGeneration: actionGeneration
+                reviewTitle: summary,
+                actionGeneration: actionGeneration,
+                preparedExecution: prepared
             )
             pendingConfirmations[token] = pending
 
-            let paramDesc = parameters.keys.sorted().map { key in
-                let sensitive = key.lowercased() == "note"
-                    || ["password", "secret", "token", "key", "credential", "url"].contains { key.lowercased().contains($0) }
-                return "\(key)=\(sensitive ? "[redacted]" : String((parameters[key] ?? "").prefix(256)))"
-            }.joined(separator: ", ")
-            let summary = "Operator confirmation required for protected action '\(action.title)' [\(actionID)] with parameters: (\(paramDesc)). Token: \(token)"
             return ACTAActionResult.needsConfirmation(actionID: actionID, summary: summary, token: token)
         }
 
@@ -226,7 +278,11 @@ public actor ACTAActionRegistry {
         // 2. Execute Action
         let result: ACTAActionResult
         do {
-            result = try await action.execute(parameters: parameters, context: context)
+            if confirmed, let preparedExecution {
+                result = try await preparedExecution.execute(parameters, context)
+            } else {
+                result = try await action.execute(parameters: parameters, context: context)
+            }
         } catch {
             return ACTAActionResult.failed(actionID: actionID, error: error.localizedDescription)
         }
@@ -259,15 +315,28 @@ public actor ACTAActionRegistry {
 
     // MARK: - Confirmation Resolution
 
+    private static func prepare<Action: ACTAPreparedConfirmationAction>(
+        _ action: Action, parameters: [String: String], context: ACTAActionContext
+    ) async throws -> PreparedExecution {
+        let prepared = try await action.prepareConfirmation(parameters: parameters, context: context)
+        return PreparedExecution(reviewSummary: prepared.reviewSummary) { parameters, context in
+            try await action.executeConfirmed(parameters: parameters, context: context, snapshot: prepared.snapshot)
+        }
+    }
+
     public func confirmAndExecute(token: String, confirmed: Bool) async throws -> ACTAActionResult {
         cleanupExpiredConfirmations()
-        guard let pending = pendingConfirmations.removeValue(forKey: token) else {
+        guard let pending = pendingConfirmations[token] else {
             return ACTAActionResult.failed(actionID: "unknown", error: "Confirmation token '\(token)' is invalid or expired.")
         }
+        guard approvalMatchesReview(pending, confirmed: confirmed, reviewTitle: nil) else {
+            return .failed(actionID: pending.actionID, error: "CONFIRMATION_MISMATCH: Reviewed action does not match the pending confirmation.")
+        }
+        pendingConfirmations.removeValue(forKey: token)
         return try await executePending(pending, confirmed: confirmed)
     }
 
-    /// Confirms only the intent reviewed by the operator. A mismatch does not consume the token.
+    /// Confirms only the intent reviewed by the operator. Prepared actions require the title-bound overload for approval.
     public func confirmAndExecute(
         token: String,
         confirmed: Bool,
@@ -275,26 +344,72 @@ public actor ACTAActionRegistry {
         expectedParameters: [String: String],
         expectedThreadID: String
     ) async throws -> ACTAActionResult {
+        try await confirmReviewed(token: token, confirmed: confirmed, expectedActionID: expectedActionID,
+                                  expectedParameters: expectedParameters, expectedThreadID: expectedThreadID,
+                                  expectedReviewTitle: nil)
+    }
+
+    /// Also binds approval or rejection to the exact summary displayed to the operator.
+    public func confirmAndExecute(
+        token: String,
+        confirmed: Bool,
+        expectedActionID: String,
+        expectedParameters: [String: String],
+        expectedThreadID: String,
+        expectedReviewTitle: String
+    ) async throws -> ACTAActionResult {
+        try await confirmReviewed(token: token, confirmed: confirmed, expectedActionID: expectedActionID,
+                                  expectedParameters: expectedParameters, expectedThreadID: expectedThreadID,
+                                  expectedReviewTitle: expectedReviewTitle)
+    }
+
+    private func confirmReviewed(
+        token: String, confirmed: Bool, expectedActionID: String,
+        expectedParameters: [String: String], expectedThreadID: String, expectedReviewTitle: String?
+    ) async throws -> ACTAActionResult {
         cleanupExpiredConfirmations()
         guard let pending = pendingConfirmations[token] else {
             return ACTAActionResult.failed(actionID: "unknown", error: "Confirmation token '\(token)' is invalid or expired.")
         }
-        guard matches(pending, actionID: expectedActionID, parameters: expectedParameters, threadID: expectedThreadID) else {
+        guard approvalMatchesReview(pending, confirmed: confirmed, reviewTitle: expectedReviewTitle),
+              matches(pending, actionID: expectedActionID, parameters: expectedParameters,
+                      threadID: expectedThreadID, reviewTitle: expectedReviewTitle) else {
             return .failed(actionID: pending.actionID, error: "CONFIRMATION_MISMATCH: Reviewed action does not match the pending confirmation.")
         }
         pendingConfirmations.removeValue(forKey: token)
         return try await executePending(pending, confirmed: confirmed)
     }
 
+    private func approvalMatchesReview(_ pending: PendingConfirmation, confirmed: Bool, reviewTitle: String?) -> Bool {
+        guard confirmed, pending.preparedExecution != nil else { return true }
+        guard let reviewTitle else { return false }
+        return reviewTitle.utf8.elementsEqual(pending.reviewTitle.utf8)
+    }
+
     public func confirmationMatches(token: String, actionID: String, parameters: [String: String], threadID: String) -> Bool {
+        confirmationMatchesReviewed(token: token, actionID: actionID, parameters: parameters,
+                                    threadID: threadID, reviewTitle: nil)
+    }
+
+    public func confirmationMatches(
+        token: String, actionID: String, parameters: [String: String], threadID: String, expectedReviewTitle: String
+    ) -> Bool {
+        confirmationMatchesReviewed(token: token, actionID: actionID, parameters: parameters,
+                                    threadID: threadID, reviewTitle: expectedReviewTitle)
+    }
+
+    private func confirmationMatchesReviewed(
+        token: String, actionID: String, parameters: [String: String], threadID: String, reviewTitle: String?
+    ) -> Bool {
         cleanupExpiredConfirmations()
         guard let pending = pendingConfirmations[token] else { return false }
-        return matches(pending, actionID: actionID, parameters: parameters, threadID: threadID)
+        return matches(pending, actionID: actionID, parameters: parameters, threadID: threadID, reviewTitle: reviewTitle)
     }
 
     private func matches(_ pending: PendingConfirmation, actionID: String,
-                         parameters: [String: String], threadID: String) -> Bool {
+                         parameters: [String: String], threadID: String, reviewTitle: String?) -> Bool {
         guard pending.actionID == actionID, pending.context.threadID == threadID,
+              reviewTitle.map({ $0.utf8.elementsEqual(pending.reviewTitle.utf8) }) ?? true,
               let action = actions[pending.actionID] else {
             return false
         }
@@ -333,7 +448,8 @@ public actor ACTAActionRegistry {
             parameters: pending.parameters,
             context: confirmedContext,
             confirmed: true,
-            expectedGeneration: pending.actionGeneration
+            expectedGeneration: pending.actionGeneration,
+            preparedExecution: pending.preparedExecution
         )
     }
 

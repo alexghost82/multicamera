@@ -1681,7 +1681,7 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
     /// Only implemented, explicitly reviewed Phase 1 actions are advertised.
     /// Stable transport names avoid dots, which OpenAI-compatible APIs may reject.
     static func registryTools(registry: ACTAActionRegistry = .shared) async throws -> [ACTAAgentToolSpec] {
-        let enabled: Set<String> = ["camera.list", "camera.get", "camera.set_enabled", "camera.set_favorite", "camera.remove", "camera.add_network", "camera.add_local",
+        let enabled: Set<String> = ["camera.list", "camera.get", "camera.set_enabled", "camera.set_favorite", "camera.remove", "camera.reconnect", "camera.add_network", "camera.add_local",
             "camera.add_screen", "camera.add_file", "camera.edit", "camera.set_processing",
             "canvas.set_columns", "canvas.reset_layout", "canvas.set_filter", "canvas.select_cameras", "canvas.set_arrange_mode", "canvas.set_presentation", "analysis.set_section", "camera.toggle_expand", "settings.get_section", "settings.update_system",
             "settings.update_feature_toggles", "settings.update_permissions", "settings.update_runtime_fall",
@@ -1692,7 +1692,7 @@ public final class ACTAAnalyticsCoordinator: @unchecked Sendable {
             "analytics.set_restricted_zone", "analytics.remove_restricted_zone", "analytics.update_restricted_zone",
             "analytics.set_sensitivity_profile", "analytics.remove_camera_override", "incident.list", "incident.get", "incident.transition_status", "incident.update_note",
             "watch.list", "watch.create", "watch.cancel", "memory.delete_frame", "incident.delete_evidence",
-            "alert.vlm_list", "alert.vlm_acknowledge", "alert.vlm_review", "monitor.get_isapi_events", "reid.calibrate", "memory.toggle_pin", "memory.set_chapter_text", "mission.list", "mission.create", "mission.edit",
+            "alert.vlm_list", "alert.vlm_acknowledge", "alert.vlm_review", "monitor.get_isapi_events", "reid.calibrate", "settings.update_reid_calibration", "memory.toggle_pin", "memory.set_chapter_text", "mission.list", "mission.create", "mission.edit",
             "mission.delete", "mission.history", "mission.clear_consult", "mission.run_now", "mission.ask_consult"]
         return try await registry.allActions().filter { enabled.contains($0.id) }.map { action in
             var properties: [String: Any] = [:]

@@ -131,6 +131,33 @@ final class LocalVoiceInputLifecycleTests: XCTestCase {
         XCTAssertTrue(hardware.captures.isEmpty)
     }
 
+    func testMicrophoneDenialAndCaptureFailureClearBusyForRetry() async throws {
+        let mic = PermissionGate()
+        var captureCalls = 0
+        let voice = LocalVoiceInput(speechPermission: { true },
+            microphonePermission: { await mic.request() }, makeCapture: { _, _ in
+                captureCalls += 1
+                throw NSError(domain: "SyntheticCaptureFailure", code: 1)
+            })
+        let denied = try XCTUnwrap(voice.start(localeIdentifier: "en"))
+        await mic.waitForRequests(1)
+        XCTAssertNil(voice.start(localeIdentifier: "en"))
+        mic.resolve(0, false)
+        await denied.value
+        XCTAssertFalse(voice.isBusy)
+        XCTAssertNotNil(voice.errorMessage)
+        XCTAssertEqual(captureCalls, 0)
+
+        let failed = try XCTUnwrap(voice.start(localeIdentifier: "en"))
+        await mic.waitForRequests(2)
+        mic.resolve(1, true)
+        await failed.value
+        XCTAssertFalse(voice.isBusy)
+        XCTAssertFalse(voice.isRecording)
+        XCTAssertNotNil(voice.errorMessage)
+        XCTAssertEqual(captureCalls, 1)
+    }
+
     func testDenialsAndLateCaptureCallbacksDoNotAffectNextAttempt() async throws {
         let speech = PermissionGate(), hardware = Hardware()
         let voice = LocalVoiceInput(speechPermission: { await speech.request() },

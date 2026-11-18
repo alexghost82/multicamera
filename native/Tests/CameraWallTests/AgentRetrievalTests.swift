@@ -4,6 +4,36 @@ import XCTest
 @testable import CameraWall
 
 final class AgentRetrievalTests: XCTestCase {
+    func testTrackSearchAuditRedactsQueryWithoutChangingSearchArguments() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try LocalTrackingStore(url: root.appendingPathComponent("history.sqlite3"))
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), transport: { _ in
+            XCTFail("Unexpected network request")
+            throw URLError(.notConnectedToInternet)
+        })
+        let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store)
+        let query = "sensitive-search-phrase"
+        let cameraID = UUID()
+        try store.saveAutomaticScan(CameraScanRecord(cameraID: cameraID, cameraName: "Entrance",
+                                                    observedAt: Date(), answer: query))
+        try store.saveAutomaticScan(CameraScanRecord(cameraID: cameraID, cameraName: "Entrance",
+                                                    observedAt: Date(), answer: "unrelated"))
+        let result = await coordinator.executeAgentTool(toolName: "search_tracked_objects",
+                                                         arguments: ["query": query, "limit": "3"])
+        XCTAssertEqual(result.resultRows, 1)
+        XCTAssertTrue(result.outputJSON.contains(query))
+        XCTAssertFalse(result.outputJSON.contains("unrelated"))
+        let rows = try store.executeReadOnlyACTASQL(
+            "SELECT args_json FROM ghost_chat_tool_calls WHERE tool_name = 'search_tracked_objects'"
+        )
+        let json = try XCTUnwrap(rows.first?["args_json"])
+        let arguments = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: String])
+        XCTAssertEqual(arguments["query"], "[redacted]")
+        XCTAssertEqual(arguments["limit"], "3")
+        XCTAssertFalse(json.contains(query))
+    }
+
     func testEvidenceIsRetrievedBeforeAnImmediateModelAnswerAndUnbackedCitationsAreRejected() async throws {
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
             .appendingPathComponent(".agent-retrieval-\(UUID().uuidString)")

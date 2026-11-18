@@ -832,16 +832,28 @@ JPEG/SQLite и действие принудительного закрытия 
 
 GUI reconnect сетевой камеры ожидает свежий кадр новой сессии, а поздний
 PATCH изолируется уникальным именем relay. Старые регистрации могут оставаться
-до перезапуска, после 64 попыток требуется перезапуск видеостены. Локальные
-источники, реальная сеть и завершение go2rtc не подтверждены; agent action не
-опубликован.
+до перезапуска, после 64 попыток требуется перезапуск видеостены.
+`camera.reconnect` опубликован для включённых сетевых камер запущенной
+видеостены; успех требует свежего кадра и проверки актуальной сессии.
+Отмена ограждает поздний запуск decoder. `Go2RTC.stop` не ожидает выхода
+процесса блокирующим вызовом; резервирование портов внутри процесса сохраняется
+до уведомления о завершении, ожидание ограничено. Локальные источники,
+реальная сеть и завершение реального go2rtc не проверены; межпроцессная
+эксклюзивность портов не гарантируется. Targeted-прогон reconnect, lifecycle
+и адаптера: **40 XCTest**, без ошибок, только с подставными зависимостями.
 
 Удаление кадров в GUI привязано к снимку индекса; добавлены журнал, явное
 восстановление и advisory lock. Старые процессы lock не соблюдают, а
 устойчивость к потере питания не доказана. Массовое агентское удаление
-не опубликовано. Проверка identity отклоняет изменённые треки и снимок
-графа, но гонка feature policy и crash-атомарность разных хранилищ
-остаются; action не опубликован.
+не опубликовано. Дополнительная проверка очистки обнаруживает новые записи,
+повторно созданные файлы и незавершённое восстановление; снимок не фиксирует
+байты изображений. Изолированные тесты хранилища: **16 XCTest**, без ошибок.
+Проверка identity отклоняет изменённые треки и снимок
+графа. Совместимые записи feature policy используют advisory lock и ревизию;
+занятый lock возвращает ошибку без ожидания. Старые процессы могут обходить
+lock, а crash-атомарность разных хранилищ не доказана; action не опубликован.
+Добавлены подготовка решения по ID и
+проверка сохранённого решения, связей и аудита; **20 XCTest**, без ошибок.
 
 Совместный targeted прогон этих изменений: **68 XCTest**, без ошибок;
 локализация и `git diff --check` прошли. Реальные устройства, сеть,
@@ -866,5 +878,57 @@ Keychain, установленная модель и полный suite не п�
 Поиск GUI по описаниям проверен на 503 синтетических треках: совпадения
 за пределами последних 500 находятся и подсчитываются. Agent action для
 этого поиска не опубликован: контекст action не содержит авторизации чтения
-истории, а действующий аудит сохраняет текст запроса. Итоговый совместный
+истории. Для существующего `search_tracked_objects` поисковый запрос теперь
+редактируется в аудите, не меняя результаты. Итоговый совместный
 прогон новых действий и связанных регрессий: **35 XCTest**, без ошибок.
+Повторная проверка local-only agent, retrieval, model retry и диктовки:
+**25 XCTest**, без ошибок с подставными зависимостями.
+
+Для очистки оповещений подготовлены планирование и журнал восстановления
+с проверкой снимков хранилищ; **11 тестов** прошли на подставных хранилищах
+и изолированном GUI-сервисе. Agent action не опубликован: реальные хранилища
+ещё не поддерживают общую блокировку и атомарную замену данных.
+
+Реестр поддерживает привязку подготовленного снимка и текста проверки к
+одноразовому токену. Экран подтверждения показывает этот текст и проверяет
+его совпадение до выполнения; подтверждение подготовленного снимка без
+точного текста отклоняется. Число ожидающих подтверждений ограничено.
+Подготовлены, но не опубликованы действия массового удаления и восстановления
+кадров, экспорта снимка, заданий описания и геометрии плитки: их производственные
+зависимости ещё не обеспечивают безопасной изоляции и проверки. В canvas
+совместимые записи используют ревизии и сохраняют конфликтный черновик для
+повтора, но старые процессы обходят блокировку, а при закрытии canvas черновик
+теряется. Совместный targeted-прогон: **140 XCTest и 52 Swift Testing**, без ошибок;
+реальные камеры, графический интерфейс, сеть и полный suite не проверялись.
+Дополнительная проверка существующих действий canvas и GUI-сервиса:
+**17 XCTest**, без ошибок.
+
+Команды последней проверки (код выхода 0):
+
+```sh
+swift test --package-path native --disable-automatic-resolution --jobs 2 --filter 'ACTAActionRegistryTests|ACTAOperationalAdapterTests/testTokenReviewClaimsProposalAndExecutesOnce|ACTACameraMemoryClearActionTests|ACTACameraMemoryRecoveryActionTests|CameraMemoryDeletionTests|CameraMemoryStoreTests|CrossCameraIdentityReviewServiceTests|FeaturePreferencesTests|CameraFeatureCoordinatorTests|ACTASettingsActionAdapterTests|ACTASnapshotExportFoundationTests|ACTASnapshotActionTests|ACTAAlertClearRecoveryTests|ClearVLMAlertsTests|ACTACanvasGestureTrackerTests|ACTACanvasLayoutStoreTests|ACTACanvasTileDraftTests|ACTACanvasTileFrameActionTests|VideoInteractionTests|ACTADescriptionJobActionsTests|Go2RTCLifecycleTests|CameraReconnectIntegrationTests|CameraReconnectAttemptTests|CameraSessionProvenanceTests'
+swift test --package-path native --disable-automatic-resolution --jobs 2 --filter 'ACTAAnalyticsActionAdapterTests/testCanvasActionsShareGUIStateAndVerifySavedLayout|ACTAServiceAdapterTests/testActionsApplyToLiveModelAndPersistThroughGUIService|ACTACanvasFilterActionTests|ACTACanvasPresentationActionTests|ACTACanvasArrangeActionTests|ACTACanvasSelectCamerasActionTests'
+env -u ACTA_TEST_CRASH_RECOVERY_ROOT swift test --package-path native --skip-build --filter CameraCoreTests
+make -C native localization-audit
+git diff --check
+```
+
+`settings.update_reid_calibration` изменяет только временное значение ползунка
+в единственном открытом представлении, проверяет шаг 0,005 и не применяет
+порог. Регистрация, каталог и проверки состояния: **10 XCTest**, без ошибок;
+фактическая отрисовка и обновление метрик не проверены. Навигационное action
+не опубликовано: сохранность диалогов и состояния при смене раздела не доказана.
+Регрессионный прогон ReID, регистрации, вкладок анализа и диктовки:
+**21 XCTest**, без ошибок:
+
+```sh
+swift test --package-path native --disable-automatic-resolution --jobs 2 --filter 'ACTAReIDCalibrationActionTests|ACTAServiceAdapterTests/testActionsApplyToLiveModelAndPersistThroughGUIService|ACTAAnalysisSectionActionTests|LocalVoiceInputLifecycleTests'
+```
+
+Диктовка теперь отменяет ожидающий запуск при уходе из Chat и игнорирует
+поздние разрешения и callbacks. Проверены **17 XCTest** с подставными
+разрешениями и захватом; реальный микрофон и системный диалог не проверялись.
+
+Дополнительно изолированно проверен CameraCore из обновлённого тестового
+бинарника: **190 XCTest и 53 Swift Testing**, без ошибок. Весь CameraWall suite
+и реальное оборудование при этом не запускались.

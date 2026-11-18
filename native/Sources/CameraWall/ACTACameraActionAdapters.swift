@@ -11,7 +11,7 @@ func actaAuditArguments(_ arguments: [String: String]) -> [String: String] {
 
 func actaActionAuditArguments(_ actionID: String, _ arguments: [String: String]) -> [String: String] {
     var result = actaAuditArguments(arguments)
-    if actionID == "incident.list", arguments["query"] != nil {
+    if ["incident.list", "search_tracked_objects"].contains(actionID), arguments["query"] != nil {
         result["query"] = "[redacted]"
     }
     if ["alert.vlm_review", "incident.update_note", "incident.transition_status"].contains(actionID), arguments["note"] != nil {
@@ -203,19 +203,84 @@ public struct CameraRemoveAction: ACTAActionProtocol {
 
 }
 
+@MainActor
+private final class CameraReconnectActionService {
+    private weak var model: WallModel?
+    private var inFlight = false
+    private var receipt: (request: String, camera: Camera, session: CameraSession)?
+
+    init(model: WallModel) { self.model = model }
+
+    func reconnect(_ request: String, actionID: String) async throws -> ACTAActionResult {
+        guard !inFlight, receipt == nil else {
+            return .failed(actionID: actionID, error: "ACTION_BUSY: A reconnect is executing or awaiting verification.")
+        }
+        guard let model else { return .failed(actionID: actionID, error: "UNAVAILABLE: Camera wall is unavailable.") }
+        try Task.checkCancellation()
+        _ = try model.cameraConfigurationChecked()
+        guard let camera = actaResolveCamera(request, model: model) else {
+            return .failed(actionID: actionID, error: "NOT_FOUND: Camera does not exist or its name is ambiguous.")
+        }
+        guard camera.fileURL == nil, camera.localDeviceID == nil, camera.screenDisplayID == nil else {
+            return .failed(actionID: actionID, error: "UNSUPPORTED: Only network cameras can be reconnected by this action.")
+        }
+        guard model.running, !model.connecting, camera.enabled else {
+            return .failed(actionID: actionID, error: "UNAVAILABLE: Camera wall must be running and the camera enabled.")
+        }
+        inFlight = true
+        defer { inFlight = false }
+        model.notice = "Reconnecting network camera; waiting for a fresh frame."
+        let session = try await model.reconnectNetworkVerified(camera)
+        try Task.checkCancellation()
+        guard try valid(camera: camera, session: session, model: model) else {
+            return .failed(actionID: actionID, error: "RECONNECT_NOT_VERIFIED: The replacement session is no longer current.")
+        }
+        receipt = (request, camera, session)
+        return ACTAActionResult(actionID: actionID, success: true,
+            summary: "Network camera reconnected and a fresh frame verified; continued availability is not guaranteed.")
+    }
+
+    func verify(_ request: String) throws -> Bool {
+        defer { receipt = nil }
+        guard !inFlight, let model, let receipt, receipt.request == request else { return false }
+        return try valid(camera: receipt.camera, session: receipt.session, model: model)
+    }
+
+    private func valid(camera: Camera, session: CameraSession, model: WallModel) throws -> Bool {
+        _ = try model.cameraConfigurationChecked()
+        let frame = session.snapshot()
+        let now = ContinuousClock.now
+        guard model.running, !model.connecting, model.config.cameras.contains(camera),
+              model.tiles[camera.id]?.session === session, frame.pixel != nil,
+              let evidence = frame.reconnectEvidence, evidence.attemptID == session.attemptID,
+              evidence.sequence > 0, evidence.receivedAt <= now else { return false }
+        return evidence.receivedAt.duration(to: now) <= .seconds(2)
+    }
+}
+
 public struct CameraReconnectAction: ACTAActionProtocol {
     public let id = "camera.reconnect"
     public let title = "Reconnect Camera"
-    public let description = "Restarts the stream connection and pipeline for a camera."
+    public let description = "Reconnect an enabled network camera on the running wall and verify a fresh frame. Local, screen and file sources are unsupported."
     public let classification = ACTAActionClassification.serviceAffecting
     public let parameters = [
         ACTAActionParameterSchema(name: "camera_id", type: "string", description: "Camera UUID or name", isRequired: true)
     ]
 
-    init(model: WallModel) {}
+    private let service: CameraReconnectActionService
+
+    @MainActor init(model: WallModel) { service = CameraReconnectActionService(model: model) }
 
     public func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
-        .failed(actionID: id, error: "UNSUPPORTED: Camera reconnection cannot yet be verified.")
+        guard let camera = parameters["camera_id"], !camera.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .failed(actionID: id, error: "INVALID_ARGUMENT: Specify a camera UUID or name.")
+        }
+        return try await service.reconnect(camera, actionID: id)
+    }
+
+    public func verify(parameters: [String: String], context: ACTAActionContext) async throws -> Bool {
+        guard let camera = parameters["camera_id"] else { return false }
+        return try await service.verify(camera)
     }
 }
 
@@ -357,7 +422,6 @@ struct WallAnalyticsSettingsProvider: ACTAVideoAnalyticsSettingsProvider {
 
 @MainActor
 func registerAllWallActions(registry: ACTAActionRegistry, model: WallModel, languageSettings: LanguageSettings? = nil) async {
-    await registry.unregister(actionID: "camera.reconnect")
     for kind in WallCameraConfigurationAction.Kind.allCases {
         await registry.register(WallCameraConfigurationAction(kind: kind, model: model))
     }
@@ -367,6 +431,7 @@ func registerAllWallActions(registry: ACTAActionRegistry, model: WallModel, lang
     await registry.register(ACTACameraSetFavoriteAction(storage: ACTAUserDefaultsCameraFavoritesStorage(),
         resolve: { [unowned model] value in actaResolveCamera(value, model: model)?.id }))
     await registry.register(CameraRemoveAction(model: model))
+    await registry.register(CameraReconnectAction(model: model))
     await registry.register(CameraToggleExpandAction(model: model))
     await registry.register(CanvasSetColumnsAction(model: model))
     await registry.register(CanvasResetLayoutAction(model: model))
@@ -419,6 +484,7 @@ func registerAllWallActions(registry: ACTAActionRegistry, model: WallModel, lang
     await registry.register(ACTAAlertMutationAction(kind: .review, provider: alertMutations))
     await registry.register(ACTAISAPIReadAction(provider: ACTAWallISAPIReadProvider(model: model)))
     await registry.register(ACTAReIDCalibrationAction(provider: ACTAWallReIDCalibrationProvider(model: model)))
+    await registry.register(ACTAUpdateReIDCalibrationAction(bridge: .shared))
     await registry.register(ACTARunHealthCheckAction(model: model))
     await registry.register(ACTARetryModelLoadingAction(model: model))
     await registry.register(ACTAAnalysisSetSectionAction(bridge: model.canvasFilterBridge))

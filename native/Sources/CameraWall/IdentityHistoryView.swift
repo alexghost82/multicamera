@@ -353,10 +353,15 @@ struct IdentityHistoryView: View {
 struct ReIDCalibrationView: View {
     @ObservedObject var model: WallModel
     @Environment(\.locale) private var locale
-    @State private var targetPrecision = ReIDThresholdCalibrator.defaultTargetPrecision
+    @StateObject private var calibrationState = ACTAReIDCalibrationViewState()
     @State private var lastDifferentCandidate: ReIDValidationCandidate?
 
     private var appLanguage: AppLanguage { locale.appLanguage }
+    private var targetPrecision: Double { calibrationState.targetPrecision }
+    private var currentCalibrationResult: ReIDCalibrationResult? {
+        guard let result = model.reidCalibrationResult, result.targetPrecision == targetPrecision else { return nil }
+        return result
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -385,7 +390,8 @@ struct ReIDCalibrationView: View {
                     Text("TARGET PRECISION")
                         .font(.system(size: ACTAType.metadata, weight: .semibold))
                         .foregroundStyle(ACTATheme.textMuted)
-                    Slider(value: $targetPrecision, in: 0.90...1.0, step: 0.005)
+                    Slider(value: Binding(get: { targetPrecision }, set: { _ = calibrationState.setTargetPrecision($0) }),
+                           in: 0.90...1.0, step: 0.005)
                         .accessibilityLabel("Target precision")
                     Text(targetPrecision.formatted(.percent.precision(.fractionLength(1))))
                         .font(.system(size: ACTAType.body, weight: .semibold).monospacedDigit())
@@ -393,7 +399,7 @@ struct ReIDCalibrationView: View {
                 }
                 .frame(width: 210)
 
-                if let result = model.reidCalibrationResult {
+                if let result = currentCalibrationResult {
                     metric("Same pairs", value: "\(result.positivePairs) / \(ReIDThresholdCalibrator.minimumPositivePairs)")
                     metric("Different pairs", value: "\(result.negativePairs) / \(ReIDThresholdCalibrator.minimumNegativePairs)")
                     VStack(alignment: .leading, spacing: 4) {
@@ -413,7 +419,7 @@ struct ReIDCalibrationView: View {
                 }
             }
 
-            if let result = model.reidCalibrationResult {
+            if let result = currentCalibrationResult {
                 if result.isReady {
                     HStack(spacing: 24) {
                         metric("Empirical precision", value: result.precision?.formatted(.percent.precision(.fractionLength(2))) ?? "—")
@@ -508,7 +514,11 @@ struct ReIDCalibrationView: View {
         .padding(ACTASpacing.section)
         .background(ACTATheme.background)
         .onAppear {
+            ACTAReIDCalibrationViewBridge.shared.attach(calibrationState)
             model.refreshReIDValidation(targetPrecision: targetPrecision, includeCandidates: true)
+        }
+        .onDisappear {
+            ACTAReIDCalibrationViewBridge.shared.detach(calibrationState)
         }
         .onChange(of: targetPrecision) { _, value in
             model.refreshReIDValidation(targetPrecision: value)

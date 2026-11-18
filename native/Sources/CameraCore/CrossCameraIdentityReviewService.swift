@@ -19,6 +19,69 @@ public struct CrossCameraIdentityPreparedReview: Identifiable, Sendable {
     fileprivate let preferences: CameraFeaturePreferences
 }
 
+public struct CrossCameraIdentityPolicyPreparedReview: Identifiable, Sendable {
+    public var id: UUID { review.id }
+    public let review: CrossCameraIdentityPreparedReview
+    fileprivate let policyRevision: String?
+}
+
+/// Serializes policy changes and identity writes for cooperating preferences-store writers.
+public struct CrossCameraIdentityPolicyReviewService: Sendable {
+    private let service: CrossCameraIdentityReviewService
+    private let preferencesURL: URL
+
+    public init(tracking: LocalTrackingStore, features: CameraFeatureStore, preferencesURL: URL) {
+        service = CrossCameraIdentityReviewService(tracking: tracking, features: features)
+        self.preferencesURL = preferencesURL
+    }
+
+    public func prepareReview(proposal: CrossCameraIdentityProposal, records: [TrackedObjectRecord],
+                              snapshot: CrossCameraIdentityReviewSnapshot,
+                              accept: Bool) throws -> CrossCameraIdentityPolicyPreparedReview {
+        try CameraFeaturePreferencesStore.withLockedSnapshot(from: preferencesURL) { policy in
+            let prepared = try service.prepareReview(proposal: proposal, records: records, snapshot: snapshot,
+                                                     accept: accept, preferences: policy.preferences)
+            return CrossCameraIdentityPolicyPreparedReview(review: prepared, policyRevision: policy.revision)
+        }
+    }
+
+    public func prepareReview(proposalID: UUID, accept: Bool) throws -> CrossCameraIdentityPolicyPreparedReview {
+        try CameraFeaturePreferencesStore.withLockedSnapshot(from: preferencesURL) { policy in
+            let prepared = try service.prepareReview(proposalID: proposalID, accept: accept,
+                                                     preferences: policy.preferences)
+            return CrossCameraIdentityPolicyPreparedReview(review: prepared, policyRevision: policy.revision)
+        }
+    }
+
+    @discardableResult
+    public func review(_ prepared: CrossCameraIdentityPolicyPreparedReview) throws -> CrossCameraIdentityProposal {
+        try CameraFeaturePreferencesStore.withLockedSnapshot(from: preferencesURL) { policy in
+            guard policy.revision == prepared.policyRevision else { throw CameraFeatureStoreError.identityReviewStale }
+            return try service.review(prepared.review, preferences: policy.preferences)
+        }
+    }
+
+    @discardableResult
+    public func reconcile() throws -> Int {
+        try CameraFeaturePreferencesStore.withLockedSnapshot(from: preferencesURL) {
+            try service.reconcile(preferences: $0.preferences)
+        }
+    }
+
+    @discardableResult
+    public func propose(candidate: ReIDValidationCandidate) throws -> CrossCameraIdentityProposal {
+        try CameraFeaturePreferencesStore.withLockedSnapshot(from: preferencesURL) {
+            try service.propose(candidate: candidate, preferences: $0.preferences)
+        }
+    }
+
+    public func undo(proposal: CrossCameraIdentityProposal, snapshot: CrossCameraIdentityReviewSnapshot) throws {
+        try CameraFeaturePreferencesStore.withLockedSnapshot(from: preferencesURL) {
+            try service.undo(proposal: proposal, snapshot: snapshot, preferences: $0.preferences)
+        }
+    }
+}
+
 /// Coordinates SQLite writers, not crash recovery across stores. Preferences are
 /// caller-supplied snapshots and are not locked against concurrent file writes.
 public struct CrossCameraIdentityReviewService: Sendable {
@@ -91,6 +154,31 @@ public struct CrossCameraIdentityReviewService: Sendable {
         )
     }
 
+    /// Captures the pending proposal and its current source records without modifying either store.
+    /// Callers must display this exact prepared review before seeking confirmation.
+    public func prepareReview(
+        proposalID: UUID, accept: Bool, preferences: CameraFeaturePreferences
+    ) throws -> CrossCameraIdentityPreparedReview {
+        try tracking.withIdentityReadReservation {
+            let snapshot = try snapshot()
+            guard let proposal = snapshot.proposals.first(where: { $0.id == proposalID }),
+                  let a = try tracking.track(trackID: proposal.trackA),
+                  let b = try tracking.track(trackID: proposal.trackB) else {
+                throw CameraFeatureStoreError.identityReviewStale
+            }
+            let prepared = try prepareReview(
+                proposal: proposal, records: [a, b], snapshot: snapshot,
+                accept: accept, preferences: preferences
+            )
+            for id in prepared.affectedTrackIDs {
+                guard try tracking.contains(trackID: id) else {
+                    throw CameraFeatureStoreError.identityReviewStale
+                }
+            }
+            return prepared
+        }
+    }
+
     @discardableResult
     public func review(_ prepared: CrossCameraIdentityPreparedReview,
                        preferences: CameraFeaturePreferences) throws -> CrossCameraIdentityProposal {
@@ -110,6 +198,47 @@ public struct CrossCameraIdentityReviewService: Sendable {
                 id: proposal.id, accept: prepared.accept, preferences: preferences,
                 expectedProposal: proposal, expectedGraph: prepared.snapshot.graph
             )
+        }
+    }
+
+    /// Conservative read-after-write verification. A false result can also mean the
+    /// review was subsequently changed or fell outside the bounded history queries.
+    public func verifyReview(_ prepared: CrossCameraIdentityPreparedReview,
+                             result: CrossCameraIdentityProposal) throws -> Bool {
+        let original = prepared.proposal
+        let expectedStatus: CrossCameraIdentityProposalStatus = prepared.accept ? .accepted : .rejected
+        guard result.id == original.id, result.trackA == original.trackA, result.trackB == original.trackB,
+              result.category == original.category, result.cosineDistance == original.cosineDistance,
+              result.createdAt == original.createdAt, result.status == expectedStatus,
+              let reviewedAt = result.reviewedAt,
+              prepared.accept ? result.identityID != nil : result.identityID == nil else { return false }
+
+        return try tracking.withIdentityReadReservation {
+            guard try tracking.track(trackID: original.trackA) == prepared.trackA,
+                  try tracking.track(trackID: original.trackB) == prepared.trackB else { return false }
+            for id in prepared.affectedTrackIDs {
+                guard try tracking.contains(trackID: id) else { return false }
+            }
+            let before = try snapshot()
+            guard try features.identityProposals(status: expectedStatus, limit: 1000).contains(result) else {
+                return false
+            }
+            let expectedAction: CrossCameraIdentityAuditAction = prepared.accept ? .accepted : .rejected
+            guard try features.crossCameraIdentityAudit(limit: 2000).contains(where: {
+                $0.proposalID == original.id && $0.action == expectedAction &&
+                $0.trackA == original.trackA && $0.trackB == original.trackB &&
+                $0.identityID == result.identityID && $0.occurredAt == reviewedAt
+            }) else { return false }
+            if let identityID = result.identityID {
+                guard prepared.affectedTrackIDs.allSatisfy({ before.assignments[$0] == identityID }) else {
+                    return false
+                }
+            } else {
+                let pair = [original.trackA.uuidString, original.trackB.uuidString].sorted()
+                guard before.graph.contains("cannot:\(pair[0]):\(pair[1])") else { return false }
+            }
+            let after = try snapshot()
+            return before.graph == after.graph && before.assignments == after.assignments
         }
     }
 

@@ -9,6 +9,33 @@ struct ReconnectFrameEvidence {
     let receivedAt: ContinuousClock.Instant
 }
 
+// Cancellation handlers run off-actor; serialize cancellation with decoder scheduling.
+final class ReconnectCancellationFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+    }
+
+    func isCancelled() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    @discardableResult
+    func runIfActive(_ action: () -> Void) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !cancelled else { return false }
+        action()
+        return true
+    }
+}
+
 @MainActor
 protocol ReconnectAttemptSession: AnyObject {
     var attemptID: UUID { get }
@@ -31,26 +58,29 @@ final class NetworkReconnectSession: ReconnectAttemptSession {
     let session: CameraSession
     private let register: @MainActor () async throws -> String
     private let startDecoder: @MainActor (CameraSession, String) -> Void
+    private let cancellation: ReconnectCancellationFlag
     private var registration: Task<Void, Never>?
     private var stopped = false
     private(set) var failure: Error?
 
     init(attemptID: UUID, register: @escaping @MainActor () async throws -> String,
-         startDecoder: @escaping @MainActor (CameraSession, String) -> Void) {
+         startDecoder: @escaping @MainActor (CameraSession, String) -> Void,
+         cancellation: ReconnectCancellationFlag = ReconnectCancellationFlag()) {
         self.attemptID = attemptID
         self.session = CameraSession(attemptID: attemptID)
         self.register = register
         self.startDecoder = startDecoder
+        self.cancellation = cancellation
     }
 
     func start() throws {
         guard !stopped, registration == nil else { throw CancellationError() }
         registration = Task {
             do {
-                guard !stopped, !Task.isCancelled else { return }
+                guard !stopped, !Task.isCancelled, !cancellation.isCancelled() else { return }
                 let url = try await register()
                 guard !stopped, !Task.isCancelled else { return }
-                startDecoder(session, url)
+                cancellation.runIfActive { startDecoder(session, url) }
             } catch {
                 if !stopped, !Task.isCancelled { failure = error }
             }

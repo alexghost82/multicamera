@@ -114,13 +114,24 @@ final class ACTAServiceAdapterTests: XCTestCase {
         let reconnectAction = CameraReconnectAction(model: model)
         let directReconnect = try await reconnectAction.execute(parameters: ["camera_id": UUID().uuidString], context: ACTAActionContext())
         XCTAssertFalse(directReconnect.success)
-        XCTAssertTrue(directReconnect.error?.hasPrefix("UNSUPPORTED:") == true)
+        XCTAssertTrue(directReconnect.error?.hasPrefix("NOT_FOUND:") == true)
         await registry.register(reconnectAction)
         await registerAllWallActions(registry: registry, model: model)
 
+        let calibrationState = ACTAReIDCalibrationViewState()
+        ACTAReIDCalibrationViewBridge.shared.attach(calibrationState)
+        defer { ACTAReIDCalibrationViewBridge.shared.detach(calibrationState) }
+        let tools = try await ACTAAnalyticsCoordinator.registryTools(registry: registry)
+        XCTAssertTrue(tools.contains { $0.name == "acta__settings__update_reid_calibration" })
+        let calibration = try await registry.execute(
+            actionID: "settings.update_reid_calibration", parameters: ["target_precision": "0.925"])
+        XCTAssertTrue(calibration.success, calibration.summary)
+        XCTAssertTrue(calibration.verified)
+        XCTAssertEqual(calibrationState.targetPrecision, 0.925)
+
         let reconnect = try await registry.execute(actionID: "camera.reconnect", parameters: ["camera_id": UUID().uuidString])
         XCTAssertFalse(reconnect.success)
-        XCTAssertTrue(reconnect.error?.hasPrefix("UNSUPPORTED:") == true)
+        XCTAssertTrue(reconnect.error?.hasPrefix("NOT_FOUND:") == true)
 
         let settings = try await registry.execute(actionID: "settings.update_system",
             parameters: ["columns": "7", "detection_fps": "3"])

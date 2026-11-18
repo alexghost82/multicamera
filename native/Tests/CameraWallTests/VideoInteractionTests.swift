@@ -77,7 +77,8 @@ final class VideoInteractionTests: XCTestCase {
         let initial = VideoTileFrame(x: 40, y: 30, width: 320, height: 200)
         var committed: VideoTileFrame?
         let tile = MovableVideoTile(camera: camera, tile: TileState(id: camera.id), savedFrame: initial,
-            expanded: false, rearrangeEnabled: true, selected: true, activate: {}, commit: { committed = $0 }, expand: {},
+            layoutSnapshot: nil, expanded: false, rearrangeEnabled: true, selected: true, activate: {},
+            commit: { frame, _ in committed = frame; return true }, refreshLayout: { nil }, expand: {},
             edit: {}, reconnect: {}, snapshot: {}, remove: {})
         let host = NSHostingView(rootView: tile.frame(width: 800, height: 600, alignment: .topLeading))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),

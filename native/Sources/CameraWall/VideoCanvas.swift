@@ -37,11 +37,16 @@ struct VideoCanvas: View {
                         ForEach(visibleCameras) { camera in
                             if let tile = model.tiles[camera.id], let frame = frames[camera.id] {
                                 MovableVideoTile(camera: camera, tile: tile, savedFrame: frame,
+                                    layoutSnapshot: model.canvasLayoutSnapshot,
                                     expanded: model.expanded == camera.id,
                                     rearrangeEnabled: arrangeCameras,
                                     selected: order.last == camera.id,
                                     activate: { order.removeAll { $0 == camera.id }; order.append(camera.id) },
-                                    commit: { model.setTileFrame($0, for: camera.id) },
+                                    commit: { model.setTileFrame($0, for: camera.id, expected: $1) },
+                                    refreshLayout: {
+                                        guard model.refreshCanvasLayout() else { return nil }
+                                        return model.canvasLayoutSnapshot
+                                    },
                                     expand: { model.toggleExpanded(camera) }, edit: { edit(camera) },
                                     reconnect: { model.reconnect(camera) }, snapshot: { model.snapshot(camera) },
                                     remove: { remove(camera) },
@@ -62,11 +67,13 @@ struct MovableVideoTile: View {
     let camera: Camera
     @ObservedObject var tile: TileState
     let savedFrame: VideoTileFrame
+    let layoutSnapshot: ACTACanvasLayoutStore.Snapshot?
     let expanded: Bool
     let rearrangeEnabled: Bool
     let selected: Bool
     var activate: () -> Void
-    var commit: (VideoTileFrame) -> Void
+    var commit: (VideoTileFrame, ACTACanvasLayoutStore.Snapshot?) -> Bool
+    var refreshLayout: () -> ACTACanvasLayoutStore.Snapshot?
     var expand: () -> Void
     var edit: () -> Void
     var reconnect: () -> Void
@@ -74,10 +81,9 @@ struct MovableVideoTile: View {
     var remove: () -> Void
     var toggleYOLO: (Bool) -> Void = { _ in }
     var toggleAIChat: (Bool) -> Void = { _ in }
-    @State private var origin: VideoTileFrame?
-    @State private var transient: VideoTileFrame?
+    @State private var draft = ACTACanvasTileDraft()
 
-    private var frame: VideoTileFrame { transient ?? savedFrame }
+    private var frame: VideoTileFrame { draft.frame ?? savedFrame }
 
     var body: some View {
         CameraTile(camera: camera, tile: tile, expanded: expanded, expand: expand,
@@ -105,6 +111,16 @@ struct MovableVideoTile: View {
                         .overlay { Image(systemName: "arrow.up.left.and.arrow.down.right").font(.system(size: ACTAType.metadata)).foregroundStyle(.white).allowsHitTesting(false) }
                 }
             }
+            .overlay(alignment: .bottom) {
+                if draft.pending {
+                    HStack {
+                        Button("Discard draft") { cancelGesture() }
+                        Button("Apply draft over newer layout") { retryDraft() }
+                    }
+                    .padding(6)
+                    .background(.regularMaterial)
+                }
+            }
             .focusable()
             .onMoveCommand { direction in
                 guard rearrangeEnabled, !expanded else { return }
@@ -118,26 +134,38 @@ struct MovableVideoTile: View {
             .accessibilityAction(named: Text("Move down")) { nudge(dx: 0, dy: 10) }
             .accessibilityAction(named: Text("Increase size")) { nudge(dx: 20, dy: 12, resize: true) }
             .accessibilityAction(named: Text("Decrease size")) { nudge(dx: -20, dy: -12, resize: true) }
-            .onChange(of: savedFrame) { _, _ in if origin == nil { transient = nil } }
+            .onChange(of: rearrangeEnabled) { _, enabled in if !enabled && !draft.pending { cancelGesture() } }
+            .onChange(of: expanded) { _, isExpanded in if isExpanded && !draft.pending { cancelGesture() } }
+            .onDisappear { cancelGesture() }
             .offset(x: frame.x, y: frame.y)
     }
 
     private func grip(edges: ResizeEdges, label: String) -> MouseGrip {
-        MouseGrip(edges: edges, label: label, begin: { activate(); origin = frame },
+        MouseGrip(edges: edges, label: label, begin: {
+                      let initial = frame
+                      guard draft.begin(frame: initial, base: layoutSnapshot,
+                                        tracker: .shared) else { return }
+                      activate()
+                  },
                   change: { dx, dy in
-                      let initial = origin ?? savedFrame
-                      transient = edges.isEmpty ? initial.moved(dx: dx, dy: dy) : initial.resized(edges: edges, dx: dx, dy: dy)
+                      draft.change(edges: edges, dx: dx, dy: dy)
                   }, end: { cancelled in
-                      if !cancelled, let transient { commit(transient) }
-                      transient = nil
-                      origin = nil
+                      draft.end(cancelled: cancelled, tracker: .shared, commit: commit)
                   }, doubleClick: expand, nudge: { dx, dy, resize in nudge(dx: dx, dy: dy, resize: resize) })
     }
 
+    private func cancelGesture() {
+        draft.discard(tracker: .shared)
+    }
+
+    private func retryDraft() {
+        draft.retry(tracker: .shared, refresh: refreshLayout, commit: commit)
+    }
+
     private func nudge(dx: Double, dy: Double, resize: Bool = false) {
-        guard rearrangeEnabled, !expanded else { return }
+        guard rearrangeEnabled, !expanded, draft.token == nil else { return }
         activate()
-        commit(resize ? savedFrame.resized(edges: [.bottom, .right], dx: dx, dy: dy) : savedFrame.moved(dx: dx, dy: dy))
+        _ = commit(resize ? savedFrame.resized(edges: [.bottom, .right], dx: dx, dy: dy) : savedFrame.moved(dx: dx, dy: dy), layoutSnapshot)
     }
 }
 
@@ -207,6 +235,11 @@ final class MouseGripView: NSView {
         anchor = nil
         end(true)
         NSCursor.arrow.set()
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil { cancelOperation(nil) }
+        super.viewWillMove(toWindow: newWindow)
     }
 
     override func keyDown(with event: NSEvent) {

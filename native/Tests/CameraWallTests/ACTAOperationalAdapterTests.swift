@@ -528,6 +528,14 @@ final class ACTAOperationalAdapterTests: XCTestCase {
             actionType: action.id, title: proposal.summary, parameters: ["enabled": "1"])
         try store.saveACTAChatAction(displayed)
 
+        var changedTitle = displayed
+        changedTitle.title = "Altered review"
+        try store.saveACTAChatAction(changedTitle)
+        await model.reviewACTATokenAction(changedTitle, confirmed: true)
+        XCTAssertEqual(try store.loadACTAChatAction(actionID: token)?.status, "proposed")
+        XCTAssertTrue(model.notice.contains("no longer matches"))
+        try store.saveACTAChatAction(displayed)
+
         var changed = displayed
         changed.parameters["enabled"] = "false"
         await model.reviewACTATokenAction(changed, confirmed: true)

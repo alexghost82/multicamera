@@ -1132,3 +1132,46 @@
 "Mission data cannot be rewritten without loss; no changes were saved." = "Mission data cannot be rewritten without loss; no changes were saved.";
 "Mission settings or camera inventory changed; reload before saving." = "Mission settings or camera inventory changed; reload before saving.";
 "Mission save requires reconciliation after a concurrent change." = "Mission save requires reconciliation after a concurrent change.";
+
+/* Phase 2 local voice & conversation */
+"Read confirmation prompt aloud" = "Read confirmation prompt aloud";
+"Interrupt speech and start local dictation" = "Interrupt speech and start local dictation";
+"Local voice disabled in permissions" = "Local voice disabled in permissions";
+"Microphone permission denied" = "Microphone permission denied";
+"Speech recognition permission denied" = "Speech recognition permission denied";
+"Listening locally (offline)" = "Listening locally (offline)";
+"Finalizing local dictation…" = "Finalizing local dictation…";
+"Speaking locally (offline)" = "Speaking locally (offline)";
+"On-device voice ready (offline)" = "On-device voice ready (offline)";
+"Voice input was too brief and ignored as an accidental tap." = "Voice input was too brief and ignored as an accidental tap.";
+"Only background noise was heard; repeat your request clearly." = "Only background noise was heard; repeat your request clearly.";
+
+/* Phase 3 local vLLM Metal serving */
+"Max parallel local vLLM requests: %@" = "Max parallel local vLLM requests: %@";
+"Allow local MLX fallback if vLLM Metal is unavailable" = "Allow local MLX fallback if vLLM Metal is unavailable";
+"Local vLLM Metal status: %@" = "Local vLLM Metal status: %@";
+"Stop local vLLM" = "Stop local vLLM";
+"Start local vLLM" = "Start local vLLM";
+"Check health" = "Check health";
+"Last TTFT: %.0f ms · %.1f tok/s" = "Last TTFT: %.0f ms · %.1f tok/s";
+"VLLM_INVALID_ENDPOINT: Local vLLM Metal requires a loopback 127.0.0.1 or localhost URL." = "VLLM_INVALID_ENDPOINT: Local vLLM Metal requires a loopback 127.0.0.1 or localhost URL.";
+"VLLM_NOT_INSTALLED: Local vLLM Metal binary was not found in Homebrew paths." = "VLLM_NOT_INSTALLED: Local vLLM Metal binary was not found in Homebrew paths.";
+"VLLM_UNAVAILABLE: %@" = "VLLM_UNAVAILABLE: %@";
+"VLLM_MODEL_MISMATCH: Expected model '%@', loaded: %@." = "VLLM_MODEL_MISMATCH: Expected model '%@', loaded: %@.";
+"VLLM_BACKPRESSURE: Local vLLM Metal queue is full; background request was shed to protect interactive latency." = "VLLM_BACKPRESSURE: Local vLLM Metal queue is full; background request was shed to protect interactive latency.";
+"VLLM_HTTP_ERROR: Local vLLM Metal returned HTTP %@." = "VLLM_HTTP_ERROR: Local vLLM Metal returned HTTP %@.";
+"VLLM_INVALID_RESPONSE: Local vLLM Metal returned an unreadable response." = "VLLM_INVALID_RESPONSE: Local vLLM Metal returned an unreadable response.";
+"Check local vLLM concurrency (1-16) and GPU memory utilization (0.30-0.90)." = "Check local vLLM concurrency (1-16) and GPU memory utilization (0.30-0.90).";
+"Local vLLM Metal server started" = "Local vLLM Metal server started";
+"Local vLLM Metal server stopped" = "Local vLLM Metal server stopped";
+"Get local vLLM Metal status and settings" = "Get local vLLM Metal status and settings";
+"settings.get_vllm_status accepts no parameters." = "settings.get_vllm_status accepts no parameters.";
+"Update local vLLM Metal serving settings" = "Update local vLLM Metal serving settings";
+"Specify at least one supported vLLM serving field: maxConcurrentRequests, allowLocalMLXFallback, or gpuMemoryUtilization." = "Specify at least one supported vLLM serving field: maxConcurrentRequests, allowLocalMLXFallback, or gpuMemoryUtilization.";
+"maxConcurrentRequests must be an integer between 1 and 16." = "maxConcurrentRequests must be an integer between 1 and 16.";
+"allowLocalMLXFallback must be a boolean." = "allowLocalMLXFallback must be a boolean.";
+"gpuMemoryUtilization must be a finite number between 0.30 and 0.90." = "gpuMemoryUtilization must be a finite number between 0.30 and 0.90.";
+"Local vLLM serving settings persistence or runtime verification failed." = "Local vLLM serving settings persistence or runtime verification failed.";
+"Control managed local vLLM Metal server" = "Control managed local vLLM Metal server";
+"Specify operation as start, stop, or check_health." = "Specify operation as start, stop, or check_health.";
+"Unsupported vLLM server operation: %@" = "Unsupported vLLM server operation: %@";

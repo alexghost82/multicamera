@@ -22,6 +22,9 @@ struct VLMPanel: View {
     @State private var voiceLanguage = LocalVoiceLanguage.interface
     @State private var questionUsesVoice = false
     @State private var speakVoiceAnswers = true
+    @State private var dictationStartedAt: Date?
+    @State private var lastDictationDuration: TimeInterval?
+    @State private var bargeIn = LocalVoiceBargeInCoordinator()
     @State private var saveError = ""
     @State private var descriptionJobs: [CameraFeatureJob] = []
     @State private var alertClearConfirmation: VLMAlertClearConfirmation?
@@ -145,9 +148,9 @@ struct VLMPanel: View {
                                 Spacer()
                                 if msg.role == "assistant" {
                                     Button {
-                                        speakAnswer(msg.text, owner: voiceOwner)
+                                        speakAnswer(msg.text, owner: voiceOwner, interruptActiveSpeech: true)
                                     } label: { Image(systemName: "speaker.wave.2") }
-                                    .disabled(voiceOutput.isBusy || voiceInput.isBusy)
+                                    .disabled(voiceInput.isBusy)
                                     .help("Read answer aloud")
                                     .accessibilityLabel("Read answer aloud")
                                 }
@@ -199,17 +202,23 @@ struct VLMPanel: View {
                     ForEach(model.actaBrokerReviews) { controller in
                         ACTABrokerReviewView(controller: controller, voiceInput: voiceInput,
                             voiceAllowed: model.featurePreferences.allowVoiceInput && !voiceOutput.isBusy,
-                            voiceLocaleIdentifier: voiceLanguage.localeIdentifier(interfaceLocale: languageSettings.locale)) { result, voiceConfirmed in
-                            model.finishACTABrokerReview(controller, result: result)
-                            if voiceConfirmed, speakVoiceAnswers, model.featurePreferences.allowVoiceInput,
-                               windowState.analysisSection == .ask, windowState.analysisChatLifecycle == voiceOwner,
-                               model.activeACTAThreadID == controller.review.threadID {
-                                let locale = voiceLanguage.localeIdentifier(interfaceLocale: languageSettings.locale)
-                                let status = LocalVoiceReviewStatus.message(verified: result.success && result.verified,
-                                    operationID: controller.review.operationID, localeIdentifier: locale)
-                                speakAnswer(status, owner: voiceOwner)
-                            }
-                        }
+                            voiceLocaleIdentifier: voiceLanguage.localeIdentifier(interfaceLocale: languageSettings.locale),
+                            onResult: { result, _ in
+                                model.finishACTABrokerReview(controller, result: result)
+                            },
+                            onOutcome: { _, voiceConfirmed, outcome in
+                                if voiceConfirmed, speakVoiceAnswers, model.featurePreferences.allowVoiceInput,
+                                   windowState.analysisSection == .ask, windowState.analysisChatLifecycle == voiceOwner,
+                                   model.activeACTAThreadID == controller.review.threadID {
+                                    let locale = voiceLanguage.localeIdentifier(interfaceLocale: languageSettings.locale)
+                                    let status = LocalVoiceReviewStatus.message(
+                                        outcome: outcome,
+                                        operationID: controller.review.operationID,
+                                        localeIdentifier: locale
+                                    )
+                                    speakAnswer(status, owner: voiceOwner, interruptActiveSpeech: true)
+                                }
+                            })
                         .padding(8)
                         .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
                     }
@@ -229,29 +238,63 @@ struct VLMPanel: View {
             if model.actaAgentBusy {
                 Button("Cancel request") { model.cancelACTAAgent() }
             }
+            HStack(spacing: 8) {
+                let perms = LocalVoiceStatusDescriptor.currentSystemPermissions()
+                let descriptor = LocalVoiceStatusDescriptor.resolve(
+                    allowVoiceInput: model.featurePreferences.allowVoiceInput,
+                    isRecording: voiceInput.isRecording,
+                    isFinalizing: voiceInput.isFinalizing,
+                    isSpeaking: voiceOutput.isBusy,
+                    microphoneAuthorized: perms.microphoneNotDenied,
+                    speechAuthorized: perms.speechNotDenied
+                )
+                Label(languageSettings.localized(descriptor.localizationKey), systemImage: descriptor.systemImage)
+                    .font(.system(size: ACTAType.metadata))
+                    .foregroundStyle(
+                        descriptor == .microphoneDenied || descriptor == .speechDenied
+                            ? ACTATheme.danger
+                            : (descriptor == .listening || descriptor == .speaking ? Color.accentColor : .secondary)
+                    )
+                Spacer()
+                if voiceOutput.isOwned(by: voiceOwner) {
+                    Button("Stop speaking") {
+                        bargeIn.cancelPending()
+                        voiceOutput.stop(owner: voiceOwner)
+                    }
+                    .font(.system(size: ACTAType.caption))
+                }
+            }
             Toggle("Speak voice answers automatically", isOn: $speakVoiceAnswers)
                 .font(.system(size: ACTAType.caption))
-            if voiceOutput.isOwned(by: voiceOwner) {
-                Button("Stop speaking") { voiceOutput.stop(owner: voiceOwner) }
-            }
             HStack(alignment: .bottom, spacing: 8) {
             Button {
-                if voiceInput.isOwned(by: voiceOwner) { voiceInput.finishAndWaitForFinal(owner: voiceOwner) }
-                else if voiceOutput.isOwned(by: voiceOwner) { voiceOutput.stop(owner: voiceOwner) }
-                else if windowState.analysisSection == .ask && model.featurePreferences.allowVoiceInput {
-                    guard !voiceOutput.isAttemptActive else { return }
-                    voiceDraftNotice = nil
-                    voiceDraft = LocalVoiceDraft(originalText: model.actaQuestionDraft, originallyUsedVoice: questionUsesVoice)
-                    voiceInput.start(localeIdentifier: voiceLanguage.localeIdentifier(interfaceLocale: languageSettings.locale),
-                                     owner: voiceOwner)
+                if voiceInput.isOwned(by: voiceOwner) {
+                    if let started = dictationStartedAt {
+                        lastDictationDuration = Date().timeIntervalSince(started)
+                    }
+                    dictationStartedAt = nil
+                    voiceInput.finishAndWaitForFinal(owner: voiceOwner)
+                } else if windowState.analysisSection == .ask && model.featurePreferences.allowVoiceInput {
+                    let locale = voiceLanguage.localeIdentifier(interfaceLocale: languageSettings.locale)
+                    bargeIn.bargeInToDictation(
+                        voiceOutput: voiceOutput,
+                        voiceInput: voiceInput,
+                        localeIdentifier: locale,
+                        owner: voiceOwner,
+                        onBeforeStart: {
+                            voiceDraftNotice = nil
+                            dictationStartedAt = Date()
+                            lastDictationDuration = nil
+                            voiceDraft = LocalVoiceDraft(originalText: model.actaQuestionDraft, originallyUsedVoice: questionUsesVoice)
+                        }
+                    )
                 }
-            } label: { Image(systemName: voiceInput.isOwned(by: voiceOwner) || voiceOutput.isOwned(by: voiceOwner) ? "stop.fill" : "mic") }
+            } label: { Image(systemName: voiceInput.isOwned(by: voiceOwner) ? "stop.fill" : "mic") }
             .disabled(voiceInput.isFinalizing || (voiceInput.isBusy && !voiceInput.isOwned(by: voiceOwner)) ||
-                      (voiceOutput.isBusy && !voiceOutput.isOwned(by: voiceOwner)) ||
                       ((windowState.analysisSection != .ask || !model.featurePreferences.allowVoiceInput) && !voiceInput.isOwned(by: voiceOwner)))
-            .help(voiceOutput.isOwned(by: voiceOwner) ? "Stop speaking" :
+            .help(voiceOutput.isBusy ? "Interrupt speech and start local dictation" :
                   (voiceInput.isOwned(by: voiceOwner) ? "Stop local dictation" : "Start local dictation"))
-            .accessibilityLabel(voiceOutput.isOwned(by: voiceOwner) ? "Stop speaking" :
+            .accessibilityLabel(voiceOutput.isBusy ? "Interrupt speech and start local dictation" :
                                 (voiceInput.isOwned(by: voiceOwner) ? "Stop local dictation" : "Start local dictation"))
             Menu {
                 Picker("Dictation language", selection: $voiceLanguage) {
@@ -314,34 +357,67 @@ struct VLMPanel: View {
             speakAnswer(answer.text, owner: voiceOwner)
         }
         .onChange(of: model.activeACTAThreadID) { _, _ in
+            bargeIn.cancelPending()
             voiceOutput.stop(owner: voiceOwner)
         }
         .onDisappear {
+            bargeIn.cancelPending()
+            dictationStartedAt = nil
             voiceInput.stop(owner: voiceOwner)
             voiceOutput.stop(owner: voiceOwner)
         }
     }
 
-    private func speakAnswer(_ text: String, owner: UUID) {
-        guard !voiceInput.isAttemptActive, !model.canvasFilterBridge.hasActiveVoiceInput,
-              !voiceOutput.isAttemptActive else {
+    private func speakAnswer(_ text: String, owner: UUID, interruptActiveSpeech: Bool = false) {
+        guard !voiceInput.isAttemptActive, !model.canvasFilterBridge.hasActiveVoiceInput else {
             voiceDraftNotice = "Stop dictation or speech before speaking."
             return
         }
+        let sanitized = LocalVoiceSpeechSanitizer.sanitize(text)
+        guard !sanitized.isEmpty else { return }
         voiceDraftNotice = nil
-        voiceOutput.speak(text, localeIdentifier: voiceLanguage.localeIdentifier(interfaceLocale: languageSettings.locale), owner: owner)
+        let locale = voiceLanguage.localeIdentifier(interfaceLocale: languageSettings.locale)
+        if interruptActiveSpeech {
+            voiceOutput.interruptAndSpeak(sanitized, localeIdentifier: locale, owner: owner)
+        } else {
+            guard !voiceOutput.isAttemptActive else {
+                voiceDraftNotice = "Stop dictation or speech before speaking."
+                return
+            }
+            voiceOutput.speak(sanitized, localeIdentifier: locale, owner: owner)
+        }
     }
 
     private func submitHistoryQuestion() {
         guard !voiceInput.isBusy else { return }
-        let trimmed = model.actaQuestionDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        if model.askACTAAgent(question: trimmed, input: questionUsesVoice ? .voice : .chat,
+        let rawDraft = model.actaQuestionDraft
+        let questionToSend: String
+        if questionUsesVoice {
+            switch LocalVoiceTranscriptGuard.evaluate(rawDraft, durationSeconds: lastDictationDuration) {
+            case .accepted(let cleaned):
+                questionToSend = cleaned
+            case .rejectedAccidentalActivation:
+                voiceDraftNotice = "Voice input was too brief and ignored as an accidental tap."
+                return
+            case .rejectedNoise:
+                voiceDraftNotice = "Only background noise was heard; repeat your request clearly."
+                return
+            case .rejectedEmpty:
+                return
+            }
+        } else {
+            let trimmed = rawDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            questionToSend = trimmed
+        }
+        if model.askACTAAgent(question: questionToSend, input: questionUsesVoice ? .voice : .chat,
                               voiceAnswerOwner: questionUsesVoice ? windowState.analysisChatLifecycle : nil) {
+            bargeIn.cancelPending()
             voiceOutput.stop(owner: windowState.analysisChatLifecycle)
             model.actaQuestionDraft = ""
             questionUsesVoice = false
             voiceDraft = nil
+            lastDictationDuration = nil
         }
     }
 

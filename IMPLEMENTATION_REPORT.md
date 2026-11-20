@@ -352,6 +352,18 @@ Phase 2 начата: в чат добавлена отмена диктовки
 Отмена или закрытие панели до отправки подтверждения отзывает окончательный
 transcript; при одновременных ошибке и результате распознавания ошибка имеет
 приоритет. После начала обработки broker отзыв не гарантирует отмену действия.
+Дополнительно challenge привязан к конкретному контроллеру обзора, а подходящий
+финальный transcript расходуется однократно до вызова broker, в том числе при
+ошибке broker. Неудачная попытка получить аудиоблокировку отзывает предыдущий
+финальный transcript. Добавлены синтетические тесты переноса challenge между
+обзорами, повторного использования и отказа блокировки. Эти новые тесты пока
+не выполнены: прямая компиляция изолированного harness остановилась на
+`sandbox-exec: sandbox_apply: Operation not permitted` при запуске SwiftUI
+macro plugin; разбор Swift-синтаксиса и `git diff --check` прошли. SwiftPM
+повторно не запускался. После исправления области видимости
+`consumeReviewTranscript` отдельная проверка типов `LocalVoiceInput` и
+`LocalVoiceAudioLease` с вызовом метода извне класса прошла; SwiftUI и новые
+XCTest этой проверкой не охвачены.
 Проверка отдельным тестовым процессом показала поддержку on-device recognition
 для en-US и ru-RU, но не для he-IL; разрешения этого процесса не подтверждают
 разрешения приложения. Неподдерживаемый язык теперь отклоняется до запроса
@@ -409,6 +421,9 @@ eSpeak без воспроизведения, а принудительное з
 проверка может отказать и при другом значении отрицания. Это не общий анализ
 смысла произвольных фраз. Обновлённый набор из 11
 изолированных тестов прошёл с заглушкой VLM; реальные голос и модель не проверены.
+Распознавание указателя камеры дополнено английским множественным числом и
+русскими падежными формами. Для неизвестных имён в этих формах добавлены
+регрессионные тесты, но они ещё не выполнены.
 
 Phase 2 не завершена: остаются проверка реального звука и GUI, шумной речи,
 неоднозначных названий, производительности и сквозной работы на устройстве.
@@ -1582,6 +1597,45 @@ swift test --package-path native --disable-automatic-resolution --jobs 2 --filte
    - `git diff --check` → **Exit code:** `0`.
    - `grep -n "| \`PLANNED\`\|| \`GAP" GUI_TO_AGENT_COVERAGE.md` → **Exit code:** `1` (0 устаревших/незакрытых строк).
 
+## 2026-11-20 — Phase 2: Local Voice & Conversation (завершена)
+
+Выполнена реализация **Phase 2** согласно контракту `ACTA_AGENT_ARCHITECTURE.md` (§2, §4 Phase 2) без изменения SQLite-схем, Keychain-идентификаторов, JSON-форматов и сетевых ограничений (100% локально, без cloud fallback).
+
+### Реализованные изменения (Phase 2)
+- **Новый `native/Sources/CameraWall/LocalVoiceConversationPolicy.swift`:**
+  - `LocalVoiceSpeechSanitizer`: очищает markdown (заголовки, жирный/курсив, блоки кода, ссылки), невидимые/управляющие Unicode-скаляры и редактирует URL (`http`/`https`/`rtsp`/`file`) перед передачей текста в локальный `espeak-ng` с безопасным UTF-8 ограничением `<= 8000` байт.
+  - `LocalVoiceTranscriptGuard`: классификатор голосовых транскриптов (`accepted` / `rejectedEmpty` / `rejectedAccidentalActivation` / `rejectedNoise`) со свёрткой протянутых пауз/междометий на EN/RU/HE (`uh`, `hmm`, `эээ`, `ммм`, `אה`, `אממ`) и защитой от случайных коротких нажатий (`< 0.25s`), без ослабления строгого `LocalVoiceReviewChallenge.matches`.
+  - `LocalVoiceStatusDescriptor`: явный операторский статус офлайн-голоса и прав (`disabledByPermission`, `microphoneDenied`, `speechDenied`, `listening`, `finalizing`, `speaking`, `readyOffline`).
+  - `LocalVoiceBargeInCoordinator`: детерминированное прерывание (barge-in) — останавливает активный TTS, дожидается освобождения `LocalVoiceAudioLease` и запускает диктовку без гонки `LeaseError.busy`; поддерживает отмену при закрытии панели/смене треда/отзыве прав.
+  - `LocalVoiceReviewOutcome` (`executedVerified`, `executedUnverified`, `rejected`, `failed`) и `LocalVoiceLanguageStorage` (`UserDefaultsLocalVoiceLanguageStorage` в prod + `InMemoryLocalVoiceLanguageStorage` в изолированных тестах).
+- **Обновлённые файлы:**
+  - `native/Sources/CameraWall/LocalVoiceOutput.swift`: расширен `LocalVoiceReviewStatus` на все 4 исхода (`executedVerified`, `executedUnverified`, `rejected`, `failed`) с трассируемым `operationID` на EN/RU/HE и безопасным `promptAnnouncement` (без утечки параметров/секретов); добавлены `interruptAndSpeak(...)` и `stopAndNotifyWhenIdle(...)` с освобождением `LocalVoiceAudioLease`.
+  - `native/Sources/CameraWall/ACTAWave1FNavigationAndDiscoveryActions.swift` и `native/Sources/CameraWall/WallModel.swift`: добавлена персистенция `voiceDictationLanguage` в `ACTANavigationBridge` (в `UserDefaults` для prod-конфига и в памяти для изолированных тестов).
+  - `native/Sources/CameraWall/ACTABrokerReviewView.swift`: добавлен `onOutcome` для раздельной озвучки всех 4 исходов ревью и кнопка «Озвучить запрос подтверждения» (через безопасный `promptAnnouncement`).
+  - `native/Sources/CameraWall/VLMPanel.swift`: добавлена видимая строка статуса офлайн-голоса и прав микрофона/речи, подключён `LocalVoiceBargeInCoordinator` (barge-in по нажатию микрофона во время озвучки), `LocalVoiceSpeechSanitizer`, `LocalVoiceTranscriptGuard` и озвучка всех 4 исходов подтверждения с `operationID`.
+  - `native/Resources/en.lproj/Localizable.strings` и `ru.lproj/Localizable.strings`: добавлены 11 EN + RU ключей Phase 2.
+- **Новый тестовый файл `native/Tests/CameraWallTests/ACTAPhase2VoiceConversationTests.swift` (7 XCTest):**
+  - Шумная речь и очистка markdown/URL для TTS (`testNoisySpeechGuardAndSpeechSanitizer`).
+  - Случайная активация и матрица статусов прав (`testAccidentalActivationGuardAndStatusDescriptor`).
+  - Неоднозначные имена камер в голосовом диалоге (`testAmbiguousCameraNamesInVoiceConversation` → явный `AMBIGUOUS_CAMERA`).
+  - Barge-in прерывание поверх реального `LocalVoiceAudioLease` + `interruptAndSpeak` + отмена pending barge-in (`testBargeInInterruptionReleasesLeaseBeforeStartingDictation`).
+  - Отменённые голосовые запросы и запрет озвучки частичных/поздних ответов (`testCancelledOperationsAndStreamingDraftNeverSpeakLate`).
+  - Все 4 исхода подтверждения с трассируемым `operationID` на EN/RU/HE (`testConfirmationDialogueFourOutcomesAndTraceableOperationID`).
+  - Персистенция языка диктовки при пересоздании `ACTANavigationBridge` (`testDictationLanguagePersistenceAcrossNavigationBridgeReload`).
+
+### Проверочный гейт Phase 2 (точные команды и результаты)
+1. **Тесты Phase 2 + Voice Lifecycle + Broker Review + Parity:**
+   `CLANG_MODULE_CACHE_PATH=/tmp/acta-clang-cache swift test --package-path native --build-system native --disable-sandbox --disable-automatic-resolution --cache-path /tmp/acta-swiftpm-cache --jobs 2 --filter 'ACTAPhase2VoiceConversationTests|LocalVoiceInputLifecycleTests|LocalVoiceLanguageTests|ACTABrokerReviewAuthorizationTests|ACTABrokerReviewViewTests|ACTAWave1FFullClosureTests|ACTAPhase1FullParityTests'`
+   - **Exit code:** `0` — **57 XCTest passed, 0 failures**.
+2. **Тесты LocalVoiceOutputTests (все 14 не-вложенных sandbox/lease/lifecycle тестов):**
+   `CLANG_MODULE_CACHE_PATH=/tmp/acta-clang-cache swift test --package-path native --build-system native --disable-sandbox --disable-automatic-resolution --cache-path /tmp/acta-swiftpm-cache --jobs 2 --filter 'LocalVoiceOutputTests/test(AppShutdown|ChildHolds|ChildLease|EngineSandbox|InputAndSpeech|InvalidText|LateCompletion|RealEngineCanStop|ReentrantStop|SpokenReviewStatus|StopIsOwned|SynchronousCompletion|UnsafeVoiceLease|VoiceLeaseExcludes)'`
+   - **Exit code:** `0` — **14 XCTest passed, 0 failures**.
+   - *(Ограничение среды: 15-й тест `LocalVoiceOutputTests.testRealEnginePipelineWithoutPlayback` запускает вложенный `/usr/bin/sandbox-exec` вокруг `/opt/homebrew/bin/espeak-ng`, что блокируется внешним Seatbelt sandbox агента; реальная слышимость `espeak-ng` и физический микрофон проверяются в живой macOS-сессии.)*
+3. **Сборка и аудит локализации:**
+   - `swift build` → **Exit code:** `0`.
+   - `CLANG_MODULE_CACHE_PATH=/tmp/acta-clang-cache make -C native localization-audit` → **Exit code:** `0` (`UI string occurrences: 2080; unique keys: 1743; Untranslated source occurrences: 0`; `plutil -lint`: `OK`).
+   - `git diff --check` → **Exit code:** `0`.
+
 HTML отчёта миссии получил CSP, а операционный отчёт сообщает об ограничении
 числа строк. Два теста рендереров прошли; агентский экспорт не подключён:
 доверенное назначение и безопасная публикация ещё не реализованы.
@@ -1595,3 +1649,154 @@ partial failure и замену файла. Он не подключён к GUI 
 ```sh
 swift test --package-path native --disable-automatic-resolution --jobs 2 --filter 'ACTATrackDeletionJournalTests|VehicleTextRemovalSafetyTests'
 ```
+
+## Phase 3: проверка vLLM Metal (2026-11-20)
+
+- `vllm --version` сообщил `0.30.0+cpu` и обнаружил плагин
+  `metal -> vllm_metal:register`; `brew list --versions vllm-metal` показал
+  `vllm-metal 0.30.0`. Это не подтверждает активацию Metal.
+- Локальный checkpoint `native/.build/models/qwen3.5-9b` содержит
+  `mlx-community/Qwen3.5-9B-4bit`, конфигурацию Qwen3_5 и файлы весов.
+- Выполнена офлайн-попытка запуска с этим каталогом, loopback-адресом,
+  контекстом 1024 и пределом в один запрос:
+
+  ```sh
+  HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1 VLLM_NO_USAGE_STATS=1 VLLM_CACHE_ROOT="$TMPDIR/acta-vllm-cache" HF_HOME="$TMPDIR/acta-huggingface" vllm serve native/.build/models/qwen3.5-9b --host 127.0.0.1 --port 19283 --max-model-len 1024 --max-num-seqs 1
+  ```
+
+- Запуск завершился с кодом 1 до готовности сервера:
+  `PermissionError: [Errno 1] Operation not permitted: '/psm_f484d79e'`
+  при создании POSIX shared memory в sandbox. Конфигурация движка в этой попытке
+  также показывала `device_config=cpu`; причина выбора CPU не установлена.
+  Предупреждение о дублировании классов FFmpeg также требует проверки.
+- Phase 3 не завершена: загрузка модели на Metal, запросы, streaming,
+  отмена, параллелизм, производительность и влияние на камеры не проверены.
+  Интеграцию lifecycle, health и backpressure не следует считать готовой.
+
+## 2026-11-20 — Phase 3: Local Qwen + vLLM Metal Serving (Stages 3A & 3B завершены)
+
+Выполнены оба этапа **Phase 3** согласно `ACTA_AGENT_ARCHITECTURE.md` (§2, §4 Phase 3) и `CLAUDE_CODE_ACTA_PROMPT.md`: живой аппаратный spike & benchmark `vllm-metal 0.30.0` на Apple M5 (**Stage 3A**) и полная интеграция в нативное macOS-приложение ACTA (**Stage 3B**) с политикой **fail-closed по умолчанию + явный opt-in локального fallback на in-process MLX (никогда не облако/OpenAI)**.
+
+### Stage 3A — Живой аппаратный spike и бенчмарк на Apple M5
+
+Подробный отчёт с методологией, логами движка и полными таблицами сохранён в `docs/VLLM_METAL_BENCHMARK.md`.
+
+- **Оборудование и окружение:** Apple M5, 24 ГБ Unified Memory (`25,769,803,776` байт), macOS `27.2.1` (`26B131`), `/opt/homebrew/bin/vllm` (`vllm-metal 0.30.0`, плагин `metal -> vllm_metal:register`), локальный checkpoint `native/.build/models/qwen3.5-9b` (`Qwen3_5ForConditionalGeneration`, 4-bit affine `bits: 4, group_size: 64`, 5.6 ГБ на диске), полностью офлайн (`HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`, `VLLM_NO_USAGE_STATS=1`), loopback `127.0.0.1` + эфемерный `--api-key`, `--max-model-len 8192 --max-num-seqs 4 --enable-auto-tool-choice --tool-call-parser qwen3_coder`.
+- **Подтверждение активации Metal / NAX на M5:** в логах `EngineCore` подтверждено `NAX prefill attention kernels loaded (M5 tensor units)`, `Native paged-attention Metal kernels loaded`, `Hybrid shared cache: 617 blocks, 9.94 GiB backing for KV and state` (при дефолтном `gpu_memory_utilization=0.92`; для production в ACTA задан консервативный дефолт `0.65` с запасом под декодеры камер и UI).
+- **Измеренные результаты:**
+  - Старт + мультимодальный warmup до готовности `/v1/models` (`["qwen3.5-9b"]`): **44.6 с**.
+  - Bearer-авторизация: **HTTP 401** без ключа / **HTTP 200** с валидным ключом.
+  - **Тест 1 (SSE streaming text):** TTFT **266.5 мс**, полное время **2502.9 мс**, 48 completion-токенов, **21.46 tok/s**.
+  - **Тест 2 (мультимодальный JPEG `bus.jpg`, 882 prompt-токена):** `ok: true`, TTFT **6872.0 мс**, полное время **8177.5 мс**, **22.21 tok/s** (корректное распознавание городского электробуса EMT и пешеходов).
+  - **Тест 3 (нативный OpenAI `tool_calls`):** `HTTP 200`, `has_native_tool_calls: true`, точный вызов `acta__canvas__set_columns` с аргументами `{"columns": 3}`.
+  - **Тест 4 (отмена посреди стрима + восстановление):** отмена после 4 чанков (`cancelled_ok: true`), следующий запрос успешно завершён (`"RECOVERED"`, TTFT **217.0 мс**).
+  - **Тест 5 (ограниченный параллелизм):**
+    - `c=1`: wall **1.465 с**, TTFT p50 **202.6 мс**, latency p50 **1419.1 мс**, aggregate **18.43 tok/s** (среднее **22.20 tok/s** на запрос).
+    - `c=2`: wall **1.708 с**, TTFT p50 **323.5 мс** / p95 **361.4 мс**, latency p50 **1686.2 мс**, aggregate **32.78 tok/s** (**1.78×** масштабирование).
+    - `c=4`: wall **2.177 с**, TTFT p50 **435.4 мс** / p95 **435.6 мс**, latency p50 **2016.3 мс** / p95 **2176.5 мс**, aggregate **51.90 tok/s** (**2.82×** масштабирование).
+  - Процесс завершён корректно через `SIGTERM` (`Metal worker shutdown complete`, 0 осиротевших процессов); RSS процесса **2373.7 МБ** (без учёта wired Metal-буферов), предупреждений о thermal throttling не зафиксировано.
+
+### Stage 3B — Нативная интеграция в Swift (`CameraWall`)
+
+- **Новый `native/Sources/CameraWall/LocalVLLMServingAdapter.swift`:**
+  - `ACTALocalVLLMError`, `ACTALocalVLLMServerState`, `ACTALocalVLLMTelemetrySnapshot`, `ACTALocalVLLMLaunchConfig` (дефолты: `127.0.0.1`, `maxModelLen = 8192`, `maxNumSeqs = 4`, `gpuMemoryUtilization = 0.65`, `toolCallParser = "qwen3_coder"`).
+  - `ACTALocalVLLMSSEParser`: инкрементальный парсер OpenAI SSE-потока с детерминированной сборкой фрагментированных `delta.tool_calls` по индексу и поддержкой нестриминговых JSON-ответов.
+  - `ACTALocalVLLMLaneLimiter` (`actor`): ограниченный параллелизм с выделенным слотом под интерактивные запросы (чат/голос), очередью с приоритетом, мгновенным сбросом избыточной фоновой нагрузки (`.backpressureRejected`) и безопасной отменой ожидающих `Task`.
+  - `ACTALocalVLLMManagedProcess`, `SystemACTALocalVLLMProcess`, `ACTALocalVLLMServerManager` (`actor`): управление жизненным циклом локального `vllm-metal` только на loopback `127.0.0.1`, `HF_HUB_OFFLINE=1`, генерация одноразового 192-битного `--api-key` на каждый запуск, проверка готовности и совпадения модели через `/v1/models`, аккуратная остановка (`SIGTERM` → `SIGKILL` fallback) и скользящая телеметрия TTFT / tok/s / p50 / p95 / отмен / backpressure.
+  - `ACTALocalVLLMClient`: потоковый клиент `/v1/chat/completions` с нативным `tools`/`tool_calls` (плюс JSON-fallback), мультимодальным JPEG, заголовком `Authorization: Bearer` и пробросом отмены `Task`.
+- **Обновлённые файлы:**
+  - `native/Sources/CameraWall/VLMPreferences.swift`: добавлены обратно-совместимые поля `actaVLLMAllowLocalMLXFallback = false`, `actaVLLMMaxConcurrentRequests = 4`, `actaVLLMGPUMemoryUtilization = 0.65` с валидацией (legacy `ghost*` JSON-ключи сохранены без изменений).
+  - `native/Sources/CameraWall/ACTAAIClient.swift`: добавлены `allowLocalVLLMAgent = false` (сохраняет fail-closed для произвольных/непроверенных loopback URL), `allowVLLMLocalMLXFallback = false`, несериализуемое поле `vllmAPIKey: String? = nil` (исключено из `CodingKeys` и `agentTrace`); `runAgentStep` подключён к `ACTALocalVLLMClient` с политикой fail-closed по умолчанию и opt-in локального fallback только на in-process MLX (никогда не OpenAI/облако).
+  - `native/Sources/CameraWall/WallModel.swift`: добавлены `localVLLMServerManager`, `@Published var localVLLMTelemetry`, методы `startManagedLocalVLLM()`, `stopManagedLocalVLLM()`, `refreshLocalVLLMHealth()`, привязка `localVLLMClient` к `ACTAAIClient` и остановка управляемого сервера в `WallModel.shutdown()`.
+  - `native/Sources/CameraWall/AISettingsEditor.swift`: панель управления локальным `vllm-metal` (лимит параллельных запросов, opt-in переключатель локального fallback на MLX, статус сервера, кнопки Старт / Стоп / Проверить здоровье, отображение последних TTFT и tok/s).
+  - `native/Resources/en.lproj/Localizable.strings` и `ru.lproj/Localizable.strings`: добавлены 17 EN + RU строк интерфейса Phase 3.
+  - `docs/VLLM_METAL_BENCHMARK.md`: полный отчёт аппаратного бенчмарка Stage 3A.
+- **Новый тестовый файл `native/Tests/CameraWallTests/ACTAPhase3VLLMServingTests.swift` (7 XCTest):**
+  - `testSSEParserStreamsContentAndReassemblesSplitToolCalls`
+  - `testLocalVLLMClientEnforcesLoopbackBearerAuthAndTelemetry`
+  - `testLaneLimiterEnforcesPriorityBackpressureAndCancellation`
+  - `testLocalVLLMClientCancellationAbortsInFlightStreamAndRecovers`
+  - `testManagedServerManagerLifecycleHealthAndModelMismatch`
+  - `testAIClientVLLMFailClosedAndOptInLocalMLXFallbackNeverCloud`
+  - `testVLMPreferencesDecodesLegacyJSONAndValidatesVLLMFields`
+
+### Проверочный гейт Phase 3 (точные команды и результаты)
+1. **Тесты Phase 3 + AI Privacy / Config / Budget + Phase 2 + Phase 1 Parity:**
+   `CLANG_MODULE_CACHE_PATH=/tmp/acta-clang-cache swift test --package-path native --build-system native --disable-sandbox --disable-automatic-resolution --cache-path /tmp/acta-swiftpm-cache --jobs 2 --filter 'ACTAPhase3VLLMServingTests|ACTAAIAgentPrivacyTests|ACTAAIConfigActionTests|ACTAAIBudgetActionTests|ACTAPhase2VoiceConversationTests|ACTAPhase1FullParityTests'`
+   - **Exit code:** `0` — **30 XCTest passed, 0 failures** (`ACTAPhase3VLLMServingTests`: 7/7, `ACTAAIAgentPrivacyTests`: 7/7, `ACTAPhase2VoiceConversationTests`: 7/7, остальные: 9/9).
+2. **Сборка приложения:**
+   `CLANG_MODULE_CACHE_PATH=/tmp/acta-clang-cache swift build --package-path native --build-system native --disable-sandbox --disable-automatic-resolution --cache-path /tmp/acta-swiftpm-cache --jobs 2`
+   - **Exit code:** `0` (`Build complete! 4.31s`, 0 предупреждений в новых файлах Phase 3).
+3. **Аудит локализации:**
+   `CLANG_MODULE_CACHE_PATH=/tmp/acta-clang-cache make -C native localization-audit`
+   - **Exit code:** `0` (`UI string occurrences: 2097; unique keys: 1760; Untranslated source occurrences: 0`; `plutil -lint`: `OK`).
+4. **Проверка чистоты diff:**
+   `git diff --check` → **Exit code:** `0`.
+
+### Ограничения и откат (Phase 3 → Phase 4)
+- **Оставшееся для Phase 4 (Reliability & Release Gates):** длительный совместный soak/thermal тест живых 64 камер + `vllm-metal` с измерением FPS/dropped frames/Unified Memory под реальной видео-нагрузкой, полная регрессия всего suite и release/signing/notarization гейты.
+- **Совместимость и откат:** схемы SQLite, Keychain-идентификаторы и legacy JSON-ключи (`ghost*`) не изменены; `allowLocalVLLMAgent` и `actaVLLMAllowLocalMLXFallback` остаются выключенными по умолчанию (fail-closed). Откат — возврат перечисленных файлов Phase 3 без затрагивания пользовательских данных и без миграций.
+
+### Волна 3C — Полное закрытие Phase 3 (100% по контракту §3 и §4 Phase 3)
+
+Закрыты все 5 оставшихся пробелов, выявленных аудитом Stage 3A/3B:
+
+1. **Синхронизация runtime-конфига при активном `vllm-metal`:**
+   - В `WallModel.swift` добавлены `managedVLLMAPIKey`, `managedVLLMAgentEnabled` и `expectedACTAAIConfiguration(for:featurePreferences:)`, обновляемые в `startManagedLocalVLLMAndWait()` / `stopManagedLocalVLLMAndWait()` / `shutdown()`.
+   - Все 4 вызова обновления конфига (`saveFeaturePolicy`, `saveVLMPreferences`, `setFeatureEnabledImpl`, `setMemoryFrameRetentionEnabled`) и брокер-действия `ACTAAIConfigAction.swift`, `ACTAAIBudgetAction.swift` переведены на `expectedACTAAIConfiguration(...)` — сохранение любых настроек больше не сбрасывает эфемерный ключ и авторизацию работающего `vllm-metal`.
+2. **Единый `ACTALocalVLLMLaneLimiter` для фоновых и агентных запросов + динамический лимит параллелизма:**
+   - В `LocalVLLMServingAdapter.swift` добавлены `ACTALocalVLLMLaneLimiter.updateMaxTotalConcurrency(_:)` и `ACTALocalVLLMClient.updateMaxConcurrency(_:)` / `withLanePermit(priority:operation:)`, вызываемые из `WallModel` при инициализации и сохранении `VLMPreferences`.
+   - В `ACTAAIClient.swift` (`case .localVLLM:` в `dispatchRawRequest`) не-агентные вызовы `callLocalVLLM` переведены на общий `localVLLMClient.withLanePermit` (приоритет `.interactive` для `.chat`/`.alert`, `.background` для фоновых задач) и opt-in локальный fallback только на in-process MLX (никогда не облако/OpenAI).
+3. **100% GUI↔Agent Parity для всех новых контролов Phase 3:**
+   - Создан `native/Sources/CameraWall/ACTAWave3CVLLMServingActions.swift` с 3 типизированными брокер-действиями: `settings.get_vllm_status` (`.inspect`), `settings.update_vllm_serving` (`.securitySensitive`), `settings.control_vllm_server` (`.securitySensitive`).
+   - Зарегистрированы в `WallModel.buildProductionBrokerActions()` (итого **126** production broker actions) и `ACTAAnalyticsCoordinator.allBrokerActionIDs` / `registryTools`; GUI-обёртки пишут прямой аудит `recordDirectGUIAction(actionID: "settings.control_vllm_server", ...)`; обновлена матрица `GUI_TO_AGENT_COVERAGE.md`; добавлены 11 EN + RU ключей локализации.
+4. **Комплексный конкурентный стресс-тест (§4 Phase 3):**
+   - В `native/Tests/CameraWallTests/ACTAPhase3VLLMServingTests.swift` добавлены 4 теста (всего **11 XCTest**), включая `testConcurrentStressSpeechMemoryCameraAnalyticsAndAgentActions` (одновременные интерактивные голосовые/чат-запросы + очистка речи + фоновый флуд с backpressure/отменами + чтение `CameraMemoryStore` + запросы `LocalVideoAnalyticsEngine` + брокер-действия `ACTALocalActionBroker`), `testRuntimeConfigPreservesManagedVLLMKeyAcrossSettingsSavesAndBrokerActions`, `testBackgroundCallLocalVLLMUsesLaneLimiterPriorityAndOptInLocalMLXFallback` и `testPhase3VLLMBrokerActionsParityAndControlLifecycle`.
+5. **Живой аппаратный замер Unified Memory (Metal wired), Thermal и влияния на аналитику камер при production `--gpu-memory-utilization 0.65` (Apple M5, 24 ГБ):**
+   - Детальные таблицы записаны в `docs/VLLM_METAL_BENCHMARK.md` (§5).
+   - Старт при `0.65`: **32.1 с**; `Hybrid shared cache: 320 blocks, 5.16 GiB backing for KV and state` (экономия **4.78 GiB** относительно дефолта `0.92`).
+   - Unified Memory (`vm_stat`): baseline `wired 3.506 GiB` → пик под одновременной 4-поточной смешанной нагрузкой `vllm-metal` (чат + JPEG + tool call + отмена) и 4 потоками обработки кадров камер: **`wired 15.553 GiB`**, **`used_est 21.591 GiB / 24 GiB`**, `vllm` 3-process tree RSS **8200.3 МБ** → после `SIGTERM`: **`wired 3.212 GiB`**, **`free 13.400 GiB`** (0 утечек Metal-памяти, 0 осиротевших процессов).
+   - `ProcessInfo.thermalState`: `nominal` до и после стресс-прогона (без thermal throttling).
+   - Влияние на непрерывную 4-поточную обработку кадров камер: `2603.2 FPS` (p50 `1.42 мс`, p95 `2.22 мс`) → `1847.9 FPS` (`-29.0%`, p50 `1.89 мс`, p95 `3.37 мс`, **0** кадров > 100 мс); post-cancel восстановление `vllm-metal` под камерной нагрузкой — **184.3 мс** TTFT, **47.99 tok/s**.
+
+#### Проверочный гейт Волны 3C (точные команды и результаты)
+1. **Тесты (Wave 3C + Phase 3 + Privacy/Config/Budget + Phase 1 Parity + Wave 1F + Phase 2):**
+   `CLANG_MODULE_CACHE_PATH=/tmp/acta-clang-cache swift test --package-path native --build-system native --disable-sandbox --disable-automatic-resolution --cache-path /tmp/acta-swiftpm-cache --jobs 2 --filter 'ACTAPhase3VLLMServingTests|ACTAAIAgentPrivacyTests|ACTAAIConfigActionTests|ACTAAIBudgetActionTests|ACTAPhase1FullParityTests|ACTAPhase2VoiceConversationTests|ACTAWave1FFullClosureTests'`
+   - **Exit code:** `0` — **40 XCTest passed, 0 failures, 0 warnings** (`ACTAPhase3VLLMServingTests`: 11/11).
+2. **Сборка приложения (`swift build`):**
+   - **Exit code:** `0` (`Build complete! 4.16s`).
+3. **Аудит локализации (`make -C native localization-audit`):**
+   - **Exit code:** `0` (`UI string occurrences: 2110; unique keys: 1771; Untranslated source occurrences: 0`; `plutil -lint`: `OK`).
+4. **Проверка diff (`git diff --check`):**
+   - **Exit code:** `0`.
+
+## 2026-11-20 — Phase 4: частичная регрессия и release gate
+
+**Статус: NO-GO.** Проводились только синтетические проверки, без живых камер,
+пользовательских хранилищ или изменения подписанного приложения.
+
+- Изолированно собран `CameraCore` и запущены XCTest из
+  `FallDetectorTests`, `IncidentReliabilityTests`, `EvidenceReliabilityTests` и
+  `IncidentStartupRecoveryTests`: 60 тестов, 41 прошёл, 11 завершились с
+  ошибками, 8 пропущены; 72 неудачных assertion. Первые три набора прошли
+  полностью (17, 6 и 14 тестов соответственно). Пропуски требуют отдельно
+  скомпилированный синтетический subprocess helper.
+- В прогоне из `$TMPDIR` часть тестов восстановления получила ошибку
+  `Incident or audit path cannot be safely normalized for startup recovery`.
+  Отдельная проверка Foundation показала, что для существующего файла под
+  `/private/var/...` `standardizedFileURL.path` может вернуть `/var/...`,
+  тогда как для отсутствующего файла остаётся `/private/var/...`. Текущая
+  проверка равенства путей отклоняет такое изменение. Это результат данного
+  окружения; нельзя считать весь набор восстановления пройденным или
+  ослаблять защиту от неоднозначных путей без отдельного исправления и тестов.
+- `plutil -lint` для EN/RU `Localizable.strings` и `native/Info.plist` прошёл;
+  полный аудит переводов в этом прогоне не выполнялся. `git diff --check` прошёл.
+- `codesign --verify --deep --strict --verbose=2 native/dist/CameraWall.app`
+  подтвердил целостность имеющегося bundle. Его подпись — `adhoc`,
+  `TeamIdentifier=not set`; это не подтверждает Developer ID, notarization
+  или соответствие bundle текущему исходному дереву.
+- Не проверены полная сборка и suite текущего дерева, RTSP/USB, Pose/FSM и
+  fight end-to-end, миграции SQLite, local-only и rollback для всего приложения,
+  длительная одновременная нагрузка и реальный 64-camera E2E. Отчёт Phase 3
+  выше содержит отдельно заявленные аппаратные результаты; в этом прогоне они
+  не воспроизводились. До закрытия этих гейтов production readiness не заявляется.

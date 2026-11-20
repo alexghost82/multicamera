@@ -16,6 +16,28 @@ struct AISettingsEditor: View {
                     }
                     TextField("Local vLLM URL", text: $draft.actaVLLMBaseURL)
                     TextField("Local vLLM Model", text: $draft.actaVLLMModelName)
+                    if draft.actaBackendMode == .localVLLM {
+                        Stepper("Max parallel local vLLM requests: \(draft.actaVLLMMaxConcurrentRequests)", value: $draft.actaVLLMMaxConcurrentRequests, in: 1...16)
+                        Toggle("Allow local MLX fallback if vLLM Metal is unavailable", isOn: $draft.actaVLLMAllowLocalMLXFallback)
+                        HStack(spacing: 8) {
+                            Text("Local vLLM Metal status: \(model.localVLLMTelemetry.state.rawValue)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            if model.localVLLMTelemetry.state == .running || model.localVLLMTelemetry.state == .starting {
+                                Button("Stop local vLLM") { model.stopManagedLocalVLLM() }
+                            } else {
+                                Button("Start local vLLM") { model.startManagedLocalVLLM() }
+                            }
+                            Button("Check health") { model.refreshLocalVLLMHealth() }
+                        }
+                        if let ttft = model.localVLLMTelemetry.lastTTFTMs,
+                           let tokS = model.localVLLMTelemetry.lastTokensPerSecond {
+                            Text(String(format: "Last TTFT: %.0f ms · %.1f tok/s", ttft, tokS))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     TextField("OpenAI Responses URL", text: $draft.actaOpenAIBaseURL)
                     TextField("Backup relay URL", text: $draft.actaBackupRelayURL)
                     TextField("Cloud nano model", text: $draft.cloudNanoModel)

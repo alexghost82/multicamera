@@ -32,6 +32,7 @@ final class ACTABrokerReviewController: ObservableObject, Identifiable {
     private let operatorKey: ACTABrokerOperator
     private let session: ACTABrokerSession
     private let isCurrent: @MainActor () -> Bool
+    private let voiceReviewBinding = UUID()
 
     init(broker: ACTALocalActionBroker, operatorKey: ACTABrokerOperator,
          session: ACTABrokerSession, review: ACTABrokerReview,
@@ -48,21 +49,31 @@ final class ACTABrokerReviewController: ObservableObject, Identifiable {
         await resolve(approved, authorized: { true })
     }
 
-    private func resolve(_ approved: Bool, authorized: @MainActor () -> Bool) async -> ACTAActionResult? {
+    private func resolve(_ approved: Bool, authorized: @MainActor () -> Bool,
+                         consume: @MainActor () -> Bool = { true }) async -> ACTAActionResult? {
         guard isCurrent(), !resolving, (!approved || reviewedAll), authorized() else { return nil }
         resolving = true
         defer { resolving = false }
-        guard isCurrent(), (!approved || reviewedAll), authorized() else { return nil }
+        guard isCurrent(), (!approved || reviewedAll), authorized(), consume() else { return nil }
         return await broker.resolve(operatorKey: operatorKey, session: session,
                                     reviewed: review, approved: approved)
+    }
+
+    func makeVoiceChallenge(localeIdentifier: String, voiceInput: LocalVoiceInput) -> LocalVoiceReviewChallenge {
+        LocalVoiceReviewChallenge(localeIdentifier: localeIdentifier,
+                                  permissionRevision: voiceInput.permissionRevision,
+                                  reviewBinding: voiceReviewBinding)
     }
 
     func resolveVoice(_ transcript: LocalVoiceFinalTranscript, challenge: LocalVoiceReviewChallenge,
                       voiceInput: LocalVoiceInput) async -> ACTAActionResult? {
         await resolve(true, authorized: {
-            voiceInput.isInputAllowed && voiceInput.finalTranscript == transcript
+            challenge.reviewBinding == self.voiceReviewBinding
+                && voiceInput.isInputAllowed && voiceInput.finalTranscript == transcript
                 && voiceInput.permissionRevision == challenge.permissionRevision
                 && challenge.matches(transcript)
+        }, consume: {
+            voiceInput.consumeReviewTranscript(transcript, challenge: challenge)
         })
     }
 }
@@ -74,6 +85,7 @@ struct ACTABrokerReviewView: View {
     let voiceAllowed: Bool
     let voiceLocaleIdentifier: String
     let onResult: @MainActor (ACTAActionResult, Bool) -> Void
+    var onOutcome: (@MainActor (ACTAActionResult, Bool, LocalVoiceReviewOutcome) -> Void)? = nil
     @State private var voiceChallenge: LocalVoiceReviewChallenge?
     @State private var voiceNotice: String?
 
@@ -129,8 +141,8 @@ struct ACTABrokerReviewView: View {
                             voiceNotice = "Stop dictation or speech before speaking."
                             return
                         }
-                        let challenge = LocalVoiceReviewChallenge(localeIdentifier: voiceLocaleIdentifier,
-                                                                  permissionRevision: voiceInput.permissionRevision)
+                        let challenge = controller.makeVoiceChallenge(localeIdentifier: voiceLocaleIdentifier,
+                                                                      voiceInput: voiceInput)
                         voiceChallenge = challenge
                         voiceNotice = nil
                         if voiceInput.start(localeIdentifier: voiceLocaleIdentifier, owner: challenge.owner) == nil {
@@ -148,6 +160,19 @@ struct ACTABrokerReviewView: View {
                         voiceNotice = "Voice confirmation cancelled."
                     }
                 }
+                Button {
+                    let prompt = LocalVoiceReviewStatus.promptAnnouncement(
+                        actionID: review.actionID,
+                        operationID: review.operationID,
+                        localeIdentifier: voiceLocaleIdentifier
+                    )
+                    LocalVoiceOutput.shared.interruptAndSpeak(prompt, localeIdentifier: voiceLocaleIdentifier, owner: review.operationID)
+                } label: {
+                    Image(systemName: "speaker.wave.2")
+                }
+                .disabled(!voiceAllowed || voiceInput.isBusy)
+                .help("Read confirmation prompt aloud")
+                .accessibilityLabel("Read confirmation prompt aloud")
             }
         }
         .onChange(of: voiceInput.finalTranscript) { _, transcript in
@@ -164,6 +189,7 @@ struct ACTABrokerReviewView: View {
                 if challengeIsCurrent { voiceChallenge = nil }
                 if let result {
                     onResult(result, true)
+                    onOutcome?(result, true, LocalVoiceReviewOutcome.classify(result: result, approved: true))
                 } else if challengeIsCurrent {
                     voiceNotice = "Voice confirmation did not match; the action was not approved."
                 }
@@ -194,7 +220,10 @@ struct ACTABrokerReviewView: View {
 
     private func resolve(_ approved: Bool) {
         Task { @MainActor in
-            if let result = await controller.resolve(approved) { onResult(result, false) }
+            if let result = await controller.resolve(approved) {
+                onResult(result, false)
+                onOutcome?(result, false, LocalVoiceReviewOutcome.classify(result: result, approved: approved))
+            }
         }
     }
 }

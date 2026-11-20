@@ -327,7 +327,11 @@ final class WallModel: ObservableObject {
 
     let canvasFilterBridge = ACTACanvasFilterBridge(voiceInputAllowed: false)
     let reidCalibrationViewBridge = ACTAReIDCalibrationViewBridge()
-    let navigationBridge = ACTANavigationBridge()
+    let navigationBridge: ACTANavigationBridge
+    let localVLLMServerManager: ACTALocalVLLMServerManager
+    @Published var localVLLMTelemetry: ACTALocalVLLMTelemetrySnapshot = .stopped
+    private var managedVLLMAPIKey: String?
+    private var managedVLLMAgentEnabled = false
     private(set) var cameraInventoryRevision = UUID()
     @Published var config = WallConfiguration() {
         willSet {
@@ -582,7 +586,9 @@ final class WallModel: ObservableObject {
          alertClipStore: CriticalAlertClipStore = CriticalAlertClipStore(),
          languageSettings: LanguageSettings? = nil,
          monitorHistoryURL: URL = LocalOperationsMonitorStore.defaultURL,
-         analyticsModelDiscovery: AnalyticsModelDiscovery = .production) {
+         analyticsModelDiscovery: AnalyticsModelDiscovery = .production,
+         localVLLMServerManager: ACTALocalVLLMServerManager = ACTALocalVLLMServerManager()) {
+        self.localVLLMServerManager = localVLLMServerManager
         self.monitorHistoryURL = monitorHistoryURL
         self.interfaceLanguageSettings = languageSettings
         self.alertClipStore = alertClipStore
@@ -649,6 +655,11 @@ final class WallModel: ObservableObject {
             }
         }
         self.configURL = configURL
+        self.navigationBridge = ACTANavigationBridge(
+            voiceLanguageStorage: configURL == ConfigurationStore.defaultURL
+                ? UserDefaultsLocalVoiceLanguageStorage()
+                : InMemoryLocalVoiceLanguageStorage()
+        )
         self.relayFactory = relayFactory
         self.relay = relayFactory()
         do { modelPreferences = try ModelSelectionPreferences.load(from: configURL.deletingLastPathComponent().appendingPathComponent("model-preferences.json")) }
@@ -742,8 +753,12 @@ final class WallModel: ObservableObject {
         )
         let actaClient = agentClient ?? ACTAAIClient(
             config: actaConfig,
-            localVLM: LocalVLMClient(model: vlmPreferences.model, workload: .interactive)
+            localVLM: LocalVLMClient(model: vlmPreferences.model, workload: .interactive),
+            localVLLMClient: ACTALocalVLLMClient(serverManager: localVLLMServerManager)
         )
+        let initialVLLMConcurrency = vlmPreferences.actaVLLMMaxConcurrentRequests
+        let initialVLLMManager = localVLLMServerManager
+        Task { await initialVLLMManager.limiter.updateMaxTotalConcurrency(initialVLLMConcurrency) }
         self.actaAnalytics = ACTAAnalyticsCoordinator(
             aiClient: actaClient,
             trackingStore: trackingStore,
@@ -1115,6 +1130,11 @@ final class WallModel: ObservableObject {
         actaAnswerPreview = nil
         actaAgentBusy = false
         actaAgentTask = nil
+        let vllmManager = localVLLMServerManager
+        Task { await vllmManager.stop() }
+        managedVLLMAPIKey = nil
+        managedVLLMAgentEnabled = false
+        localVLLMTelemetry = .stopped
         stop(resumeAnalyticsAfterDrain: false)
         timer?.invalidate()
     }
@@ -1774,13 +1794,20 @@ final class WallModel: ObservableObject {
 
     static func makeACTAAIConfiguration(
         from preferences: VLMPreferences,
-        featurePreferences: CameraFeaturePreferences
+        featurePreferences: CameraFeaturePreferences,
+        managedVLLMAPIKey: String? = nil,
+        allowLocalVLLMAgent: Bool? = nil
     ) -> ACTAAIConfiguration {
-        ACTAAIConfiguration(
+        let isLoopback = URL(string: preferences.actaVLLMBaseURL).map(ACTAAIClient.isLoopbackURL) ?? false
+        let allowAgentVLLM = allowLocalVLLMAgent ?? (preferences.actaBackendMode == .localVLLM && isLoopback && managedVLLMAPIKey != nil)
+        return ACTAAIConfiguration(
             mode: preferences.actaBackendMode,
             tierModelNames: [ACTAAITier.nano.rawValue: preferences.cloudNanoModel, ACTAAITier.mini.rawValue: preferences.cloudMiniModel, ACTAAITier.full.rawValue: preferences.cloudFullModel],
             vllmBaseURL: preferences.actaVLLMBaseURL,
             vllmModelName: preferences.actaVLLMModelName,
+            allowLocalVLLMAgent: allowAgentVLLM,
+            allowVLLMLocalMLXFallback: preferences.actaVLLMAllowLocalMLXFallback,
+            vllmAPIKey: managedVLLMAPIKey,
             openAIBaseURL: preferences.actaOpenAIBaseURL,
             backupRelayURL: preferences.actaBackupRelayURL,
             privacyBlurFacesInCloud: preferences.privacyBlurFacesInCloud,
@@ -1791,6 +1818,115 @@ final class WallModel: ObservableObject {
             monthlyBudgetLimitUSD: preferences.monthlyBudgetLimitUSD,
             preferredLanguage: preferences.actaPreferredLanguage
         )
+    }
+
+    func expectedACTAAIConfiguration(
+        for preferences: VLMPreferences? = nil,
+        featurePreferences: CameraFeaturePreferences? = nil
+    ) -> ACTAAIConfiguration {
+        Self.makeACTAAIConfiguration(
+            from: preferences ?? vlmPreferences,
+            featurePreferences: featurePreferences ?? self.featurePreferences,
+            managedVLLMAPIKey: managedVLLMAPIKey,
+            allowLocalVLLMAgent: managedVLLMAgentEnabled ? true : nil
+        )
+    }
+
+    @discardableResult
+    func startManagedLocalVLLMAndWait() async throws -> ACTALocalVLLMTelemetrySnapshot {
+        let modelPath = ModelSelectionRegistry.path(.qwen)?.path ?? vlmPreferences.model
+        let parsedPort = URLComponents(string: vlmPreferences.actaVLLMBaseURL)?.port ?? 8000
+        let launch = ACTALocalVLLMLaunchConfig(
+            modelPath: modelPath,
+            servedModelName: vlmPreferences.actaVLLMModelName,
+            port: parsedPort,
+            maxModelLen: 8192,
+            maxNumSeqs: vlmPreferences.actaVLLMMaxConcurrentRequests,
+            gpuMemoryUtilization: vlmPreferences.actaVLLMGPUMemoryUtilization
+        )
+        localVLLMTelemetry = ACTALocalVLLMTelemetrySnapshot(
+            state: .starting, loadedModel: nil, activeInteractiveRequests: 0,
+            activeBackgroundRequests: 0, queuedRequests: 0,
+            lastTTFTMs: nil, lastTokensPerSecond: nil, p50LatencyMs: nil, p95LatencyMs: nil, lastError: nil
+        )
+        do {
+            await localVLLMServerManager.limiter.updateMaxTotalConcurrency(vlmPreferences.actaVLLMMaxConcurrentRequests)
+            let snapshot = try await localVLLMServerManager.start(config: launch)
+            localVLLMTelemetry = snapshot
+            if let creds = await localVLLMServerManager.managedCredentials() {
+                managedVLLMAPIKey = creds.apiKey
+                managedVLLMAgentEnabled = true
+                actaAnalytics?.aiClient.updateConfiguration(expectedACTAAIConfiguration())
+            }
+            notice = "Local vLLM Metal server started"
+            return snapshot
+        } catch {
+            localVLLMTelemetry = await localVLLMServerManager.telemetrySnapshot()
+            notice = error.localizedDescription
+            throw error
+        }
+    }
+
+    @discardableResult
+    func stopManagedLocalVLLMAndWait() async -> ACTALocalVLLMTelemetrySnapshot {
+        await localVLLMServerManager.stop()
+        managedVLLMAPIKey = nil
+        managedVLLMAgentEnabled = false
+        let snapshot = await localVLLMServerManager.telemetrySnapshot()
+        localVLLMTelemetry = snapshot
+        actaAnalytics?.aiClient.updateConfiguration(expectedACTAAIConfiguration())
+        notice = "Local vLLM Metal server stopped"
+        return snapshot
+    }
+
+    @discardableResult
+    func refreshLocalVLLMHealthAndWait() async throws -> ACTALocalVLLMTelemetrySnapshot {
+        let baseURL = vlmPreferences.actaVLLMBaseURL
+        let expectedModel = vlmPreferences.actaVLLMModelName
+        do {
+            let snapshot = try await localVLLMServerManager.checkHealth(
+                baseURL: baseURL,
+                expectedModel: expectedModel
+            )
+            localVLLMTelemetry = snapshot
+            return snapshot
+        } catch {
+            localVLLMTelemetry = await localVLLMServerManager.telemetrySnapshot()
+            notice = error.localizedDescription
+            throw error
+        }
+    }
+
+    func startManagedLocalVLLM() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await self.startManagedLocalVLLMAndWait()
+                self.recordDirectGUIAction(actionID: "settings.control_vllm_server", parameters: ["operation": "start"], ok: true)
+            } catch {
+                self.recordDirectGUIAction(actionID: "settings.control_vllm_server", parameters: ["operation": "start"], ok: false, error: error.localizedDescription)
+            }
+        }
+    }
+
+    func stopManagedLocalVLLM() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            _ = await self.stopManagedLocalVLLMAndWait()
+            self.recordDirectGUIAction(actionID: "settings.control_vllm_server", parameters: ["operation": "stop"], ok: true)
+        }
+    }
+
+    func refreshLocalVLLMHealth() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await self.refreshLocalVLLMHealthAndWait()
+                self.recordDirectGUIAction(actionID: "settings.control_vllm_server", parameters: ["operation": "check_health"], ok: true)
+            } catch {
+                self.recordDirectGUIAction(actionID: "settings.control_vllm_server", parameters: ["operation": "check_health"], ok: false, error: error.localizedDescription)
+            }
+        }
     }
 
     var runtimePreferencesURL: URL { configURL.deletingLastPathComponent().appendingPathComponent("runtime-preferences.json") }
@@ -1859,7 +1995,7 @@ final class WallModel: ObservableObject {
             throw ConfigurationError.invalid("Feature policy persistence verification failed.")
         }
         featurePreferences = next
-        actaAnalytics?.aiClient.updateConfiguration(Self.makeACTAAIConfiguration(from: vlmPreferences, featurePreferences: next))
+        actaAnalytics?.aiClient.updateConfiguration(expectedACTAAIConfiguration(featurePreferences: next))
         if !next.retainFullFrames { stopMemorySampling() }
     }
 
@@ -1872,8 +2008,15 @@ final class WallModel: ObservableObject {
         try VLMStore.save(preferences, to: vlmPreferencesURL)
         vlmPreferences = preferences
         actaAnalytics?.aiClient.updateConfiguration(
-            Self.makeACTAAIConfiguration(from: preferences, featurePreferences: featurePreferences)
+            expectedACTAAIConfiguration(for: preferences)
         )
+        let maxConcurrent = preferences.actaVLLMMaxConcurrentRequests
+        let vllmManager = localVLLMServerManager
+        let aiClient = actaAnalytics?.aiClient
+        Task {
+            await vllmManager.limiter.updateMaxTotalConcurrency(maxConcurrent)
+            await aiClient?.updateLocalVLLMMaxConcurrency(maxConcurrent)
+        }
         if applicationServicesStarted { prepareModels() }
         vlmSchedule.reset()
         notice = "VLM settings saved"
@@ -1926,7 +2069,7 @@ final class WallModel: ObservableObject {
         if !enabled, featureID == .scheduledMissions { forcedMissionID = nil }
         featurePreferences = preferences
         actaAnalytics?.aiClient.updateConfiguration(
-            Self.makeACTAAIConfiguration(from: vlmPreferences, featurePreferences: preferences)
+            expectedACTAAIConfiguration(featurePreferences: preferences)
         )
         if enabled, featureID == .independentWatcher {
             do {
@@ -2027,7 +2170,7 @@ final class WallModel: ObservableObject {
         try featureCoordinator.savePreferences(preferences)
         featurePreferences = preferences
         actaAnalytics?.aiClient.updateConfiguration(
-            Self.makeACTAAIConfiguration(from: vlmPreferences, featurePreferences: preferences)
+            expectedACTAAIConfiguration(featurePreferences: preferences)
         )
         if enabled {
             reloadCameraMemoryFrames()
@@ -4538,6 +4681,9 @@ final class WallModel: ObservableObject {
             SettingsUpdatePermissionsAction(featureProvider: featureProvider),
             WallAIConfigAction(model: self),
             WallAIBudgetAction(model: self),
+            ACTAGetVLLMStatusAction(model: self),
+            ACTAUpdateVLLMServingAction(model: self),
+            ACTAControlVLLMServerAction(model: self),
             ACTASetAPIKeyAction(),
             ACTAClearAPIKeyAction(),
             ACTAToggleShowcaseAction(model: self),

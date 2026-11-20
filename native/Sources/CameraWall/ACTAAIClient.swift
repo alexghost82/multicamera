@@ -51,6 +51,13 @@ public struct ACTAAIConfiguration: Codable, Sendable, Equatable {
     public var mode: ACTAAIBackendMode
     public var vllmBaseURL: String
     public var vllmModelName: String
+    /// Opt-in flag enabling loopback `vllm-metal` for agent tool-calling steps.
+    /// Defaults to `false` so arbitrary/unverified loopback endpoints remain fail-closed.
+    public var allowLocalVLLMAgent: Bool
+    /// Opt-in flag allowing fallback from failed local `vllm-metal` ONLY to local in-process MLX (never cloud).
+    public var allowVLLMLocalMLXFallback: Bool
+    /// Ephemeral per-launch bearer token for managed local `vllm-metal` (never persisted in JSON).
+    public var vllmAPIKey: String?
     public var openAIBaseURL: String
     public var backupRelayURL: String
     public var privacyBlurFacesInCloud: Bool
@@ -66,6 +73,9 @@ public struct ACTAAIConfiguration: Codable, Sendable, Equatable {
         tierModelNames: [String: String] = [:],
         vllmBaseURL: String = "http://127.0.0.1:8000/v1",
         vllmModelName: String = "Qwen/Qwen2.5-VL-7B-Instruct",
+        allowLocalVLLMAgent: Bool = false,
+        allowVLLMLocalMLXFallback: Bool = false,
+        vllmAPIKey: String? = nil,
         openAIBaseURL: String = "https://api.openai.com/v1/responses",
         backupRelayURL: String = "http://127.0.0.1:8018/api/backup/responses",
         privacyBlurFacesInCloud: Bool = true,
@@ -80,6 +90,9 @@ public struct ACTAAIConfiguration: Codable, Sendable, Equatable {
         self.mode = mode
         self.vllmBaseURL = vllmBaseURL
         self.vllmModelName = vllmModelName
+        self.allowLocalVLLMAgent = allowLocalVLLMAgent
+        self.allowVLLMLocalMLXFallback = allowVLLMLocalMLXFallback
+        self.vllmAPIKey = vllmAPIKey
         self.openAIBaseURL = openAIBaseURL
         self.backupRelayURL = backupRelayURL
         self.privacyBlurFacesInCloud = privacyBlurFacesInCloud
@@ -89,6 +102,32 @@ public struct ACTAAIConfiguration: Codable, Sendable, Equatable {
         self.dailyBudgetLimitUSD = dailyBudgetLimitUSD
         self.monthlyBudgetLimitUSD = monthlyBudgetLimitUSD
         self.preferredLanguage = preferredLanguage
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case tierModelNames, mode, vllmBaseURL, vllmModelName, allowLocalVLLMAgent, allowVLLMLocalMLXFallback
+        case openAIBaseURL, backupRelayURL, privacyBlurFacesInCloud, privacyBlurPlatesInCloud
+        case allowExternalAI, allowPlateRegistryLookup, dailyBudgetLimitUSD, monthlyBudgetLimitUSD, preferredLanguage
+    }
+
+    public init(from decoder: Swift.Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        tierModelNames = try c.decodeIfPresent([String: String].self, forKey: .tierModelNames) ?? [:]
+        mode = try c.decodeIfPresent(ACTAAIBackendMode.self, forKey: .mode) ?? .mlxInProcess
+        vllmBaseURL = try c.decodeIfPresent(String.self, forKey: .vllmBaseURL) ?? "http://127.0.0.1:8000/v1"
+        vllmModelName = try c.decodeIfPresent(String.self, forKey: .vllmModelName) ?? "Qwen/Qwen2.5-VL-7B-Instruct"
+        allowLocalVLLMAgent = try c.decodeIfPresent(Bool.self, forKey: .allowLocalVLLMAgent) ?? false
+        allowVLLMLocalMLXFallback = try c.decodeIfPresent(Bool.self, forKey: .allowVLLMLocalMLXFallback) ?? false
+        vllmAPIKey = nil
+        openAIBaseURL = try c.decodeIfPresent(String.self, forKey: .openAIBaseURL) ?? "https://api.openai.com/v1/responses"
+        backupRelayURL = try c.decodeIfPresent(String.self, forKey: .backupRelayURL) ?? "http://127.0.0.1:8018/api/backup/responses"
+        privacyBlurFacesInCloud = try c.decodeIfPresent(Bool.self, forKey: .privacyBlurFacesInCloud) ?? true
+        privacyBlurPlatesInCloud = try c.decodeIfPresent(Bool.self, forKey: .privacyBlurPlatesInCloud) ?? true
+        allowExternalAI = try c.decodeIfPresent(Bool.self, forKey: .allowExternalAI) ?? false
+        allowPlateRegistryLookup = try c.decodeIfPresent(Bool.self, forKey: .allowPlateRegistryLookup) ?? false
+        dailyBudgetLimitUSD = try c.decodeIfPresent(Double.self, forKey: .dailyBudgetLimitUSD) ?? 80.0
+        monthlyBudgetLimitUSD = try c.decodeIfPresent(Double.self, forKey: .monthlyBudgetLimitUSD) ?? 400.0
+        preferredLanguage = try c.decodeIfPresent(ACTAPromptLanguage.self, forKey: .preferredLanguage) ?? .ru
     }
 }
 
@@ -780,7 +819,7 @@ typealias ACTALocalAgentStreamInference = @Sendable (
     _ onChunk: (@Sendable (String) -> Void)?
 ) async throws -> String
 
-private enum ACTARequestAuthorizationError: Error {
+enum ACTARequestAuthorizationError: Error {
     case revoked
 }
 
@@ -791,6 +830,7 @@ public final class ACTAAIClient: @unchecked Sendable {
     private var config: ACTAAIConfiguration
     private var configRevision: UInt64 = 0
     private let localVLM: LocalVLMClient?
+    private let localVLLMClient: ACTALocalVLLMClient
     private var cacheStore: LocalTrackingStore?
     public let budgetTracker = ACTABudgetTracker()
     public let circuitBreaker = ACTACircuitBreaker()
@@ -812,6 +852,7 @@ public final class ACTAAIClient: @unchecked Sendable {
     init(
         config: ACTAAIConfiguration = ACTAAIConfiguration(),
         localVLM: LocalVLMClient? = nil,
+        localVLLMClient: ACTALocalVLLMClient? = nil,
         cacheStore: LocalTrackingStore? = nil,
         transport: ACTAHTTPTransport? = nil,
         keyProvider: @escaping @Sendable (String) -> String? = { ACTAKeychainStore.loadKey(account: $0) },
@@ -824,6 +865,7 @@ public final class ACTAAIClient: @unchecked Sendable {
         self.localAgentInference = localAgentInference
         self.localAgentStreamInference = localAgentStreamInference
         self.localVLM = localVLM
+        self.localVLLMClient = localVLLMClient ?? ACTALocalVLLMClient()
         self.cacheStore = cacheStore
         self.keyProvider = keyProvider
         if let transport {
@@ -876,6 +918,10 @@ public final class ACTAAIClient: @unchecked Sendable {
         defer { lock.unlock() }
         if config != newConfig { configRevision &+= 1 }
         config = newConfig
+    }
+
+    public func updateLocalVLLMMaxConcurrency(_ maxConcurrent: Int) async {
+        await localVLLMClient.updateMaxConcurrency(maxConcurrent)
     }
 
     private func configurationSnapshot() -> (ACTAAIConfiguration, UInt64) {
@@ -1025,8 +1071,29 @@ public final class ACTAAIClient: @unchecked Sendable {
             try await authorizeDispatch()
             return try await callMLX(prompt: prompt, jpegImages: jpegImages, tier: tier)
         case .localVLLM:
-            return try await callLocalVLLM(config: config, prompt: prompt, jpegImages: jpegImages, tier: tier,
-                                           authorizeDispatch: authorizeDispatch)
+            let priority: ACTALocalVLLMLaneLimiter.Priority = (lane == .chat || lane == .alert) ? .interactive : .background
+            do {
+                return try await localVLLMClient.withLanePermit(priority: priority) {
+                    try await self.callLocalVLLM(
+                        config: config,
+                        prompt: prompt,
+                        jpegImages: jpegImages,
+                        tier: tier,
+                        authorizeDispatch: authorizeDispatch
+                    )
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch is ACTARequestAuthorizationError {
+                throw ACTARequestAuthorizationError.revoked
+            } catch {
+                // Opt-in local-only fallback to in-process MLX (NEVER cloud/OpenAI)
+                guard config.allowVLLMLocalMLXFallback, localVLM != nil else {
+                    throw error
+                }
+                try await authorizeDispatch()
+                return try await callMLX(prompt: prompt, jpegImages: jpegImages, tier: tier)
+            }
         case .openAI:
             return try await callOpenAIWithBackup(
                 config: config,
@@ -1126,6 +1193,9 @@ public final class ACTAAIClient: @unchecked Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let apiKey = config.vllmAPIKey, !apiKey.isEmpty, isLoopback {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
         try await authorizeDispatch?()
@@ -1294,8 +1364,8 @@ public final class ACTAAIClient: @unchecked Sendable {
     // MARK: Agent tool-calling loop step
 
     /// Runs one model step of a tool-calling agent. The caller executes returned `functionCalls` and loops.
-    /// Only the explicitly selected in-process MLX backend may receive agent data.
-    /// A loopback HTTP server is an external process and is not a local inference guarantee.
+    /// Supports explicitly selected local in-process MLX OR explicitly authorized loopback `vllm-metal`
+    /// (`allowLocalVLLMAgent == true` + loopback `127.0.0.1`/localhost URL). Never falls back to cloud/OpenAI.
     public func runAgentStep(
         lane: ACTAAILane = .chat,
         request: ACTAAgentRequest,
@@ -1305,6 +1375,60 @@ public final class ACTAAIClient: @unchecked Sendable {
     ) async throws -> ACTAAgentTurnResult {
         guard authorization?() ?? true else { throw ACTARequestAuthorizationError.revoked }
         let (currentConfig, revision) = configurationSnapshot()
+
+        if currentConfig.mode == .localVLLM {
+            guard currentConfig.allowLocalVLLMAgent,
+                  let parsedURL = URL(string: currentConfig.vllmBaseURL),
+                  Self.isLoopbackURL(parsedURL),
+                  pinnedBackend == nil || pinnedBackend == .vllm else {
+                throw ACTAAgentError.noBackendAvailable
+            }
+            let vllmClient = self.localVLLMClient
+            let priority: ACTALocalVLLMLaneLimiter.Priority = (lane == .chat || lane == .alert) ? .interactive : .background
+            do {
+                try Task.checkCancellation()
+                guard authorization?() ?? true else { throw ACTARequestAuthorizationError.revoked }
+                guard self.isCurrentConfiguration(revision) else { throw ACTAAgentError.noBackendAvailable }
+                agentTrace?("REQUEST backend=vllm")
+                let result = try await vllmClient.runAgentStep(
+                    baseURL: currentConfig.vllmBaseURL,
+                    modelName: currentConfig.vllmModelName,
+                    apiKey: currentConfig.vllmAPIKey,
+                    request: request,
+                    priority: priority,
+                    authorization: authorization,
+                    onAnswerPreview: onAnswerPreview
+                )
+                guard authorization?() ?? true else { throw ACTARequestAuthorizationError.revoked }
+                agentTrace?("RESPONSE backend=vllm calls=\(result.functionCalls.count)")
+                return result
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch is ACTARequestAuthorizationError {
+                throw ACTARequestAuthorizationError.revoked
+            } catch {
+                // Opt-in local-only fallback to in-process MLX (NEVER cloud/OpenAI)
+                let canFallbackLocalMLX = currentConfig.allowVLLMLocalMLXFallback
+                    && pinnedBackend == nil
+                    && (localVLM != nil || localAgentInference != nil || localAgentStreamInference != nil)
+                guard canFallbackLocalMLX else {
+                    throw error
+                }
+                return try await limiter(for: lane).withPermit {
+                    try Task.checkCancellation()
+                    guard authorization?() ?? true else { throw ACTARequestAuthorizationError.revoked }
+                    guard self.isCurrentConfiguration(revision) else { throw ACTAAgentError.noBackendAvailable }
+                    let fallbackResult = try await self.agentStepLocal(
+                        request: request,
+                        authorization: authorization,
+                        onAnswerPreview: onAnswerPreview
+                    )
+                    guard authorization?() ?? true else { throw ACTARequestAuthorizationError.revoked }
+                    return fallbackResult
+                }
+            }
+        }
+
         guard currentConfig.mode == .mlxInProcess,
               pinnedBackend == nil || pinnedBackend == .mlx else {
             throw ACTAAgentError.noBackendAvailable

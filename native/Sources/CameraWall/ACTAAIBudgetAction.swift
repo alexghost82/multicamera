@@ -71,7 +71,7 @@ struct WallAIBudgetAction: ACTAActionProtocol {
             let current = model.vlmPreferences
             let policy = try model.featurePolicySnapshotChecked()
             guard try VLMStore.loadPreferences(from: model.vlmPreferencesURL) == current,
-                  client.configuration() == WallModel.makeACTAAIConfiguration(from: current, featurePreferences: policy) else {
+                  client.configuration() == model.expectedACTAAIConfiguration(for: current, featurePreferences: policy) else {
                 throw ConfigurationError.invalid("AI preferences or runtime configuration changed; reload them before making changes.")
             }
             let next = patch.applying(to: current)
@@ -80,7 +80,7 @@ struct WallAIBudgetAction: ACTAActionProtocol {
             let savedPolicy = try model.featurePolicySnapshotChecked()
             guard try VLMStore.loadPreferences(from: model.vlmPreferencesURL) == next,
                   model.vlmPreferences == next,
-                  client.configuration() == WallModel.makeACTAAIConfiguration(from: next, featurePreferences: savedPolicy) else {
+                  client.configuration() == model.expectedACTAAIConfiguration(for: next, featurePreferences: savedPolicy) else {
                 throw ConfigurationError.invalid("AI preferences persistence or runtime verification failed.")
             }
             let output: [String: Any] = [
@@ -102,7 +102,7 @@ struct WallAIBudgetAction: ACTAActionProtocol {
             let policy = try model.featurePolicySnapshotChecked()
             return patch.applying(to: current) == current
                 && stored == current
-                && client.configuration() == WallModel.makeACTAAIConfiguration(from: current, featurePreferences: policy)
+                && client.configuration() == model.expectedACTAAIConfiguration(for: current, featurePreferences: policy)
         }
     }
 }

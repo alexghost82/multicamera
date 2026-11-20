@@ -20,6 +20,9 @@ struct VLMPreferences: Codable, Equatable {
     var actaBackendMode: ACTAAIBackendMode = .mlxInProcess
     var actaVLLMBaseURL: String = "http://127.0.0.1:8000/v1"
     var actaVLLMModelName: String = "Qwen/Qwen2.5-VL-7B-Instruct"
+    var actaVLLMAllowLocalMLXFallback: Bool = false
+    var actaVLLMMaxConcurrentRequests: Int = 4
+    var actaVLLMGPUMemoryUtilization: Double = 0.65
     var actaOpenAIBaseURL: String = "https://api.openai.com/v1/responses"
     var actaPreferredLanguage: ACTAPromptLanguage = .ru
     var actaSpokenBriefingEnabled: Bool = false
@@ -47,6 +50,11 @@ struct VLMPreferences: Codable, Equatable {
         guard dailyBudgetLimitUSD.isFinite, monthlyBudgetLimitUSD.isFinite, dailyBudgetLimitUSD >= 0, monthlyBudgetLimitUSD >= dailyBudgetLimitUSD else {
             throw ConfigurationError.invalid("Check the daily and monthly AI budget limits.")
         }
+        guard (1...16).contains(actaVLLMMaxConcurrentRequests),
+              actaVLLMGPUMemoryUtilization.isFinite,
+              (0.30...0.90).contains(actaVLLMGPUMemoryUtilization) else {
+            throw ConfigurationError.invalid("Check local vLLM concurrency (1-16) and GPU memory utilization (0.30-0.90).")
+        }
         guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               (15...3600).contains(intervalSeconds), alertRules.count <= 20,
               alertRules.allSatisfy({ !$0.condition.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.condition.count <= 500 }) else {
@@ -63,6 +71,9 @@ struct VLMPreferences: Codable, Equatable {
         case actaBackendMode = "ghostBackendMode"
         case actaVLLMBaseURL = "ghostVLLMBaseURL"
         case actaVLLMModelName = "ghostVLLMModelName"
+        case actaVLLMAllowLocalMLXFallback
+        case actaVLLMMaxConcurrentRequests
+        case actaVLLMGPUMemoryUtilization
         case actaOpenAIBaseURL = "ghostOpenAIBaseURL"
         case actaPreferredLanguage = "ghostPreferredLanguage"
         case actaSpokenBriefingEnabled = "ghostSpokenBriefingEnabled"
@@ -87,6 +98,9 @@ struct VLMPreferences: Codable, Equatable {
         actaBackendMode = try c.decodeIfPresent(ACTAAIBackendMode.self, forKey: .actaBackendMode) ?? .mlxInProcess
         actaVLLMBaseURL = try c.decodeIfPresent(String.self, forKey: .actaVLLMBaseURL) ?? "http://127.0.0.1:8000/v1"
         actaVLLMModelName = try c.decodeIfPresent(String.self, forKey: .actaVLLMModelName) ?? "Qwen/Qwen2.5-VL-7B-Instruct"
+        actaVLLMAllowLocalMLXFallback = try c.decodeIfPresent(Bool.self, forKey: .actaVLLMAllowLocalMLXFallback) ?? false
+        actaVLLMMaxConcurrentRequests = try c.decodeIfPresent(Int.self, forKey: .actaVLLMMaxConcurrentRequests) ?? 4
+        actaVLLMGPUMemoryUtilization = try c.decodeIfPresent(Double.self, forKey: .actaVLLMGPUMemoryUtilization) ?? 0.65
         actaOpenAIBaseURL = try c.decodeIfPresent(String.self, forKey: .actaOpenAIBaseURL) ?? "https://api.openai.com/v1/responses"
         actaPreferredLanguage = try c.decodeIfPresent(ACTAPromptLanguage.self, forKey: .actaPreferredLanguage) ?? .ru
         actaSpokenBriefingEnabled = try c.decodeIfPresent(Bool.self, forKey: .actaSpokenBriefingEnabled) ?? false

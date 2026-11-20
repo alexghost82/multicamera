@@ -2389,3 +2389,46 @@
 "Mission data cannot be rewritten without loss; no changes were saved." = "Данные миссий невозможно пересохранить без потерь; изменения не сохранены.";
 "Mission settings or camera inventory changed; reload before saving." = "Настройки миссий или список камер изменились; перезагрузите перед сохранением.";
 "Mission save requires reconciliation after a concurrent change." = "Сохранение миссии требует сверки после параллельного изменения.";
+
+/* Phase 2 local voice & conversation */
+"Read confirmation prompt aloud" = "Озвучить запрос подтверждения";
+"Interrupt speech and start local dictation" = "Прервать озвучку и начать локальную диктовку";
+"Local voice disabled in permissions" = "Локальный голос отключён в разрешениях";
+"Microphone permission denied" = "Доступ к микрофону запрещён";
+"Speech recognition permission denied" = "Доступ к распознаванию речи запрещён";
+"Listening locally (offline)" = "Слушаю локально (офлайн)";
+"Finalizing local dictation…" = "Завершаю локальную диктовку…";
+"Speaking locally (offline)" = "Озвучиваю локально (офлайн)";
+"On-device voice ready (offline)" = "Локальный голос готов (офлайн)";
+"Voice input was too brief and ignored as an accidental tap." = "Голосовой ввод был слишком коротким и пропущен как случайное нажатие.";
+"Only background noise was heard; repeat your request clearly." = "Распознан только фоновый шум; повторите запрос чётче.";
+
+/* Phase 3 local vLLM Metal serving */
+"Max parallel local vLLM requests: %@" = "Макс. параллельных запросов local vLLM: %@";
+"Allow local MLX fallback if vLLM Metal is unavailable" = "Разрешить локальный резерв MLX при недоступности vLLM Metal";
+"Local vLLM Metal status: %@" = "Статус локального vLLM Metal: %@";
+"Stop local vLLM" = "Остановить локальный vLLM";
+"Start local vLLM" = "Запустить локальный vLLM";
+"Check health" = "Проверить состояние";
+"Last TTFT: %.0f ms · %.1f tok/s" = "Последний TTFT: %.0f мс · %.1f ток/с";
+"VLLM_INVALID_ENDPOINT: Local vLLM Metal requires a loopback 127.0.0.1 or localhost URL." = "VLLM_INVALID_ENDPOINT: Локальный vLLM Metal требует адрес loopback 127.0.0.1 или localhost.";
+"VLLM_NOT_INSTALLED: Local vLLM Metal binary was not found in Homebrew paths." = "VLLM_NOT_INSTALLED: Исполняемый файл vLLM Metal не найден в каталогах Homebrew.";
+"VLLM_UNAVAILABLE: %@" = "VLLM_UNAVAILABLE: %@";
+"VLLM_MODEL_MISMATCH: Expected model '%@', loaded: %@." = "VLLM_MODEL_MISMATCH: Ожидалась модель «%@», загружено: %@.";
+"VLLM_BACKPRESSURE: Local vLLM Metal queue is full; background request was shed to protect interactive latency." = "VLLM_BACKPRESSURE: Очередь локального vLLM Metal переполнена; фоновый запрос отклонён для сохранения отклика.";
+"VLLM_HTTP_ERROR: Local vLLM Metal returned HTTP %@." = "VLLM_HTTP_ERROR: Локальный vLLM Metal вернул HTTP %@.";
+"VLLM_INVALID_RESPONSE: Local vLLM Metal returned an unreadable response." = "VLLM_INVALID_RESPONSE: Локальный vLLM Metal вернул нечитаемый ответ.";
+"Check local vLLM concurrency (1-16) and GPU memory utilization (0.30-0.90)." = "Проверьте параллельность локального vLLM (1–16) и долю памяти GPU (0.30–0.90).";
+"Local vLLM Metal server started" = "Локальный сервер vLLM Metal запущен";
+"Local vLLM Metal server stopped" = "Локальный сервер vLLM Metal остановлен";
+"Get local vLLM Metal status and settings" = "Получить статус и настройки локального vLLM Metal";
+"settings.get_vllm_status accepts no parameters." = "settings.get_vllm_status не принимает параметров.";
+"Update local vLLM Metal serving settings" = "Обновить настройки локального vLLM Metal";
+"Specify at least one supported vLLM serving field: maxConcurrentRequests, allowLocalMLXFallback, or gpuMemoryUtilization." = "Укажите хотя бы один поддерживаемый параметр vLLM: maxConcurrentRequests, allowLocalMLXFallback или gpuMemoryUtilization.";
+"maxConcurrentRequests must be an integer between 1 and 16." = "maxConcurrentRequests должен быть целым числом от 1 до 16.";
+"allowLocalMLXFallback must be a boolean." = "allowLocalMLXFallback должен быть логическим значением.";
+"gpuMemoryUtilization must be a finite number between 0.30 and 0.90." = "gpuMemoryUtilization должен быть конечным числом от 0.30 до 0.90.";
+"Local vLLM serving settings persistence or runtime verification failed." = "Не удалось подтвердить сохранение или применение настроек локального vLLM.";
+"Control managed local vLLM Metal server" = "Управление локальным сервером vLLM Metal";
+"Specify operation as start, stop, or check_health." = "Укажите операцию: start, stop или check_health.";
+"Unsupported vLLM server operation: %@" = "Неподдерживаемая операция сервера vLLM: %@";

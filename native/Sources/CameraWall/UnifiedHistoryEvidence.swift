@@ -108,7 +108,10 @@ struct UnifiedHistoryEvidence {
         }
         if allCameras { return nil }
         let words = question.lowercased().split { !$0.isLetter && !$0.isNumber && $0 != "-" }
-        let markers: Set<String> = ["camera", "камере", "камера", "камеру", "камеры", "камерой", "камер"]
+        let markers: Set<String> = [
+            "camera", "cameras", "камера", "камеру", "камеры", "камерой",
+            "камере", "камер", "камерам", "камерами", "камерах"
+        ]
         let markerIndices = words.indices.filter { markers.contains(String(words[$0])) }
         guard !markerIndices.isEmpty else { return requestedIDs.first ?? matched.first?.key }
         var selected: Set<UUID> = []

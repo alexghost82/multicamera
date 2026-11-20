@@ -96,6 +96,44 @@ final class LocalVoiceInputLifecycleTests: XCTestCase {
         XCTAssertNil(voice.transcriptOwner)
     }
 
+    func testFailedLeaseAcquisitionRevokesPreviousFinalTranscript() async throws {
+        let hardware = Hardware()
+        var rejectLease = false
+        let voice = LocalVoiceInput(speechPermission: { true }, microphonePermission: { true },
+            makeCapture: hardware.make, acquireAudioLease: {
+                if rejectLease { throw CocoaError(.fileLocking) }
+                return nil
+            })
+        let owner = UUID()
+        let first = try XCTUnwrap(voice.start(localeIdentifier: "en", owner: owner))
+        await first.value
+        hardware.captures[0].callback(.transcript("final words", isFinal: true))
+        XCTAssertNotNil(voice.finalTranscript)
+        rejectLease = true
+        XCTAssertNil(voice.start(localeIdentifier: "en", owner: UUID()))
+        XCTAssertNil(voice.finalTranscript)
+        XCTAssertNil(voice.transcriptOwner)
+        XCTAssertNotNil(voice.errorMessage)
+        XCTAssertFalse(voice.isBusy)
+    }
+
+    func testRevocationWhileClearingPreviousFinalDoesNotStartCapture() async throws {
+        let hardware = Hardware()
+        let voice = LocalVoiceInput(speechPermission: { true }, microphonePermission: { true },
+                                    makeCapture: hardware.make)
+        let first = try XCTUnwrap(voice.start(localeIdentifier: "en"))
+        await first.value
+        hardware.captures[0].callback(.transcript("final words", isFinal: true))
+        let subscription = voice.$finalTranscript.dropFirst().sink { final in
+            if final == nil { _ = voice.setInputAllowed(false) }
+        }
+        XCTAssertNil(voice.start(localeIdentifier: "en"))
+        XCTAssertFalse(voice.isBusy)
+        XCTAssertFalse(voice.isAttemptActive)
+        XCTAssertEqual(hardware.captures.count, 1)
+        withExtendedLifetime(subscription) {}
+    }
+
     func testManualStopWaitsForFinalTranscriptAndAllowsCancellation() async throws {
         let hardware = Hardware()
         let voice = LocalVoiceInput(speechPermission: { true },

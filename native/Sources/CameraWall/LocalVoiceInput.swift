@@ -25,11 +25,13 @@ struct LocalVoiceReviewChallenge {
     let code: String
     let phrase: String
     let permissionRevision: UUID
+    let reviewBinding: UUID?
 
-    init(localeIdentifier: String, permissionRevision: UUID) {
+    init(localeIdentifier: String, permissionRevision: UUID, reviewBinding: UUID? = nil) {
         owner = UUID()
         code = String(Int.random(in: 1000...9999))
         self.permissionRevision = permissionRevision
+        self.reviewBinding = reviewBinding
         switch Locale(identifier: localeIdentifier).language.languageCode?.identifier {
         case "ru": phrase = "подтверждаю"
         case "he": phrase = "מאשר"
@@ -118,6 +120,7 @@ final class LocalVoiceInput: ObservableObject {
     private var capture: (any LocalVoiceCapture)?
     private var transitioning = false
     private var pendingTransitions: [() -> Void] = []
+    private var consumedReviewOwner: UUID?
     private var inputAllowed = true
     private(set) var permissionRevision = UUID()
     var isAttemptActive: Bool { attempt != nil }
@@ -160,6 +163,10 @@ final class LocalVoiceInput: ObservableObject {
     }
 
     private func startAttempt(localeIdentifier: String, owner: UUID) -> Task<Void, Never>? {
+        transcriptOwner = nil
+        finalTranscript = nil
+        consumedReviewOwner = nil
+        guard inputAllowed else { return nil }
         do {
             audioLease = try acquireAudioLease()
         } catch {
@@ -170,8 +177,6 @@ final class LocalVoiceInput: ObservableObject {
         attempt = id
         attemptRevision = UUID()
         self.owner = owner
-        transcriptOwner = nil
-        finalTranscript = nil
         isBusy = true
         transcript = ""
         errorMessage = nil
@@ -271,6 +276,15 @@ final class LocalVoiceInput: ObservableObject {
             guard self.attempt == id else { return }
             self.endAttempt(cancelCapture: true)
         }
+    }
+
+    func consumeReviewTranscript(_ transcript: LocalVoiceFinalTranscript,
+                                 challenge: LocalVoiceReviewChallenge) -> Bool {
+        guard !transitioning, inputAllowed, permissionRevision == challenge.permissionRevision,
+              finalTranscript == transcript, challenge.matches(transcript),
+              consumedReviewOwner != transcript.owner else { return false }
+        consumedReviewOwner = transcript.owner
+        return true
     }
 
     private func isCurrent(_ id: UUID) -> Bool {

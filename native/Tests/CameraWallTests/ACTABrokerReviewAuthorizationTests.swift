@@ -54,7 +54,7 @@ final class ACTABrokerReviewAuthorizationTests: XCTestCase {
             return source
         })
 
-        let first = LocalVoiceReviewChallenge(localeIdentifier: "en-US", permissionRevision: voice.permissionRevision)
+        let first = controller.makeVoiceChallenge(localeIdentifier: "en-US", voiceInput: voice)
         let firstTask = try XCTUnwrap(voice.start(localeIdentifier: "en-US", owner: first.owner))
         await firstTask.value
         voice.finishAndWaitForFinal(owner: first.owner)
@@ -64,7 +64,7 @@ final class ACTABrokerReviewAuthorizationTests: XCTestCase {
         let cancelledResult = await controller.resolveVoice(cancelled, challenge: first, voiceInput: voice)
         XCTAssertNil(cancelledResult)
 
-        let second = LocalVoiceReviewChallenge(localeIdentifier: "en-US", permissionRevision: voice.permissionRevision)
+        let second = controller.makeVoiceChallenge(localeIdentifier: "en-US", voiceInput: voice)
         let secondTask = try XCTUnwrap(voice.start(localeIdentifier: "en-US", owner: second.owner))
         await secondTask.value
         voice.finishAndWaitForFinal(owner: second.owner)
@@ -102,7 +102,7 @@ final class ACTABrokerReviewAuthorizationTests: XCTestCase {
             capture = result
             return result
         })
-        let challenge = LocalVoiceReviewChallenge(localeIdentifier: "en-US", permissionRevision: voice.permissionRevision)
+        let challenge = controller.makeVoiceChallenge(localeIdentifier: "en-US", voiceInput: voice)
         let task = try XCTUnwrap(voice.start(localeIdentifier: "en-US", owner: challenge.owner))
         await task.value
         voice.finishAndWaitForFinal(owner: challenge.owner)
@@ -121,7 +121,7 @@ final class ACTABrokerReviewAuthorizationTests: XCTestCase {
         _ = voice.setInputAllowed(true)
         let afterReenable = await controller.resolveVoice(transcript, challenge: challenge, voiceInput: voice)
         XCTAssertNil(afterReenable)
-        let next = LocalVoiceReviewChallenge(localeIdentifier: "en-US", permissionRevision: voice.permissionRevision)
+        let next = controller.makeVoiceChallenge(localeIdentifier: "en-US", voiceInput: voice)
         let nextTask = try XCTUnwrap(voice.start(localeIdentifier: "en-US", owner: next.owner))
         await nextTask.value
         voice.finishAndWaitForFinal(owner: next.owner)
@@ -130,6 +130,50 @@ final class ACTABrokerReviewAuthorizationTests: XCTestCase {
         let approved = await controller.resolveVoice(nextTranscript, challenge: next, voiceInput: voice)
         XCTAssertEqual(approved?.success, true)
         XCTAssertEqual(approved?.verified, true)
+        let initiators = await probe.initiators
+        XCTAssertEqual(initiators, ["voice_asr"])
+        await host.broker.closeSession(session, operatorKey: host.operatorKey)
+    }
+
+    func testVoiceConfirmationIsBoundToOneReviewAndConsumedOnce() async throws {
+        let probe = ReviewAuthorizationProbe()
+        let action = ReviewAuthorizationAction(probe: probe)
+        let created = await ACTALocalActionBroker.make(
+            actions: [action], allowedActionIDs: [action.id], audit: { _ in })
+        let host = try XCTUnwrap(created)
+        let opened = await host.broker.openSession(operatorKey: host.operatorKey,
+            input: .voice, threadID: "fixture", actionIDs: [action.id])
+        let session = try XCTUnwrap(opened)
+        _ = await host.broker.request(session: session, actionID: action.id, argumentsJSON: #"{"value":"first"}"#)
+        _ = await host.broker.request(session: session, actionID: action.id, argumentsJSON: #"{"value":"second"}"#)
+        let reviews = await host.broker.reviews(operatorKey: host.operatorKey, session: session)
+        XCTAssertEqual(reviews.count, 2)
+        guard reviews.count == 2 else { return }
+        let first = ACTABrokerReviewController(broker: host.broker, operatorKey: host.operatorKey,
+                                               session: session, review: reviews[0])
+        let second = ACTABrokerReviewController(broker: host.broker, operatorKey: host.operatorKey,
+                                                session: session, review: reviews[1])
+        first.reviewedAll = true
+        second.reviewedAll = true
+        var capture: VoiceCapture?
+        let voice = LocalVoiceInput(speechPermission: { true }, microphonePermission: { true },
+                                    makeCapture: { _, callback in
+            let source = VoiceCapture(callback)
+            capture = source
+            return source
+        })
+        let challenge = first.makeVoiceChallenge(localeIdentifier: "en-US", voiceInput: voice)
+        let task = try XCTUnwrap(voice.start(localeIdentifier: "en-US", owner: challenge.owner))
+        await task.value
+        voice.finishAndWaitForFinal(owner: challenge.owner)
+        try XCTUnwrap(capture).callback(.transcript("\(challenge.phrase) \(challenge.code)", isFinal: true))
+        let final = try XCTUnwrap(voice.finalTranscript)
+        let wrongReview = await second.resolveVoice(final, challenge: challenge, voiceInput: voice)
+        XCTAssertNil(wrongReview)
+        let result = await first.resolveVoice(final, challenge: challenge, voiceInput: voice)
+        XCTAssertEqual(result?.success, true)
+        let replay = await first.resolveVoice(final, challenge: challenge, voiceInput: voice)
+        XCTAssertNil(replay)
         let initiators = await probe.initiators
         XCTAssertEqual(initiators, ["voice_asr"])
         await host.broker.closeSession(session, operatorKey: host.operatorKey)

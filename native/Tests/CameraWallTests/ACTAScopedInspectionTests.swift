@@ -212,7 +212,10 @@ final class ACTAScopedInspectionTests: XCTestCase {
         }
         XCTAssertEqual(try scope("Что было на камере North вчера?"), north)
         XCTAssertEqual(try scope("What happened at camera South?"), south)
+        XCTAssertEqual(try scope("What happened at cameras South?"), south)
+        XCTAssertEqual(try scope("Что было на камерах North?"), north)
         for question in ["Что было на камере Front?", "What happened at camera unknown?",
+                         "What happened at cameras unknown?", "Что было на камерах unknown?",
                          "Что было на камере?", "What happened at camera \(UUID().uuidString)?",
                          "What happened at camera unknown near Front South?",
                          "What happened at camera out?",

@@ -31,7 +31,23 @@ final class ACTANavigationBridge: ObservableObject {
 
     @Published var selectedMainSection: String = "cameras"
     @Published var selectedSettingsSection: ACTASettingsSection = .general
-    @Published var voiceDictationLanguage: LocalVoiceLanguage = .interface
+    @Published var voiceDictationLanguage: LocalVoiceLanguage {
+        didSet {
+            voiceLanguageStorage?.writeRawLanguage(voiceDictationLanguage.rawValue)
+        }
+    }
+
+    private let voiceLanguageStorage: (any LocalVoiceLanguageStorage)?
+
+    init(voiceLanguageStorage: (any LocalVoiceLanguageStorage)? = nil) {
+        self.voiceLanguageStorage = voiceLanguageStorage
+        if let raw = voiceLanguageStorage?.readRawLanguage(),
+           let saved = LocalVoiceLanguage(rawValue: raw) {
+            self.voiceDictationLanguage = saved
+        } else {
+            self.voiceDictationLanguage = .interface
+        }
+    }
 
     nonisolated static func settingsSection(for slug: String) -> ACTASettingsSection? {
         let normalized = slug.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()

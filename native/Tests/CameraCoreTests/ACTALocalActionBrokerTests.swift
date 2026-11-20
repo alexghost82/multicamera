@@ -3,6 +3,57 @@ import Testing
 @testable import CameraCore
 
 struct ACTALocalActionBrokerTests {
+    @Test func cameraHistoryGrantsAreExplicitAndSessionBound() async throws {
+        let host = try #require(await ACTALocalActionBroker.make(
+            actions: [], allowedActionIDs: [], allowedInspectionIDs: ["history", "other"], audit: { _ in }))
+        let foreignHost = try #require(await ACTALocalActionBroker.make(
+            actions: [], allowedActionIDs: [], allowedInspectionIDs: ["history"], audit: { _ in }))
+        let a = UUID(), b = UUID(), c = UUID()
+        var chosen: Set<UUID> = [a, b]
+        let session = try #require(await host.broker.openSession(operatorKey: host.operatorKey, input: .chat,
+            threadID: "one", actionIDs: [], inspectionIDs: ["history"], historyCameraIDs: chosen))
+        chosen.insert(c)
+        let empty = try #require(await host.broker.openSession(operatorKey: host.operatorKey, input: .chat,
+            threadID: "one", actionIDs: [], inspectionIDs: ["history"]))
+        let other = try #require(await host.broker.openSession(operatorKey: host.operatorKey, input: .voice,
+            threadID: "one", actionIDs: [], inspectionIDs: ["history", "other"], historyCameraIDs: [c]))
+
+        #expect(session.permitsCameraHistoryInspection(operatorKey: host.operatorKey,
+            inspectionID: "history", threadID: "one", cameraIDs: [a, b]))
+        for cameras: Set<UUID> in [[], [c], [a, c]] {
+            #expect(!session.permitsCameraHistoryInspection(operatorKey: host.operatorKey,
+                inspectionID: "history", threadID: "one", cameraIDs: cameras))
+        }
+        #expect(!session.permitsCameraHistoryInspection(operatorKey: foreignHost.operatorKey,
+            inspectionID: "history", threadID: "one", cameraIDs: [a]))
+        #expect(!session.permitsCameraHistoryInspection(operatorKey: host.operatorKey,
+            inspectionID: "history", threadID: "two", cameraIDs: [a]))
+        #expect(!session.permitsCameraHistoryInspection(operatorKey: host.operatorKey,
+            inspectionID: "other", threadID: "one", cameraIDs: [a]))
+        #expect(!empty.permitsCameraHistoryInspection(operatorKey: host.operatorKey,
+            inspectionID: "history", threadID: "one", cameraIDs: [a]))
+        #expect(!other.permitsCameraHistoryInspection(operatorKey: host.operatorKey,
+            inspectionID: "history", threadID: "one", cameraIDs: [a]))
+        #expect(other.permitsCameraHistoryInspection(operatorKey: host.operatorKey,
+            inspectionID: "history", threadID: "one", cameraIDs: [c]))
+        #expect(other.permitsCameraHistoryInspection(operatorKey: host.operatorKey,
+            inspectionID: "other", threadID: "one", cameraIDs: [c]))
+
+        #expect(!session.invalidate(operatorKey: foreignHost.operatorKey))
+        #expect(session.permitsCameraHistoryInspection(operatorKey: host.operatorKey,
+            inspectionID: "history", threadID: "one", cameraIDs: [a]))
+        #expect(session.invalidate(operatorKey: host.operatorKey))
+        #expect(!session.permitsCameraHistoryInspection(operatorKey: host.operatorKey,
+            inspectionID: "history", threadID: "one", cameraIDs: [a]))
+        #expect(other.permitsCameraHistoryInspection(operatorKey: host.operatorKey,
+            inspectionID: "other", threadID: "one", cameraIDs: [c]))
+        await host.broker.closeSession(other, operatorKey: host.operatorKey)
+        #expect(!other.permitsCameraHistoryInspection(operatorKey: host.operatorKey,
+            inspectionID: "other", threadID: "one", cameraIDs: [c]))
+        await host.broker.closeSession(session, operatorKey: host.operatorKey)
+        await host.broker.closeSession(empty, operatorKey: host.operatorKey)
+    }
+
     actor Counter {
         private(set) var value = 0
         func increment() { value += 1 }
@@ -23,6 +74,30 @@ struct ACTALocalActionBrokerTests {
         struct AuditError: Error {}
     }
 
+    final class AuditRevoker: @unchecked Sendable {
+        private let lock = NSLock()
+        private var session: ACTABrokerSession?
+        private var key: ACTABrokerOperator?
+        private let onReview: Bool
+
+        init(onReview: Bool) { self.onReview = onReview }
+        func configure(session: ACTABrokerSession, key: ACTABrokerOperator) {
+            lock.withLock { self.session = session; self.key = key }
+        }
+        func record(_ event: ACTABrokerAuditEvent) {
+            let shouldRevoke: Bool
+            switch event.phase {
+            case .review: shouldRevoke = onReview
+            case .result: shouldRevoke = !onReview && event.outcome == "confirmation_required"
+            default: shouldRevoke = false
+            }
+            if shouldRevoke {
+                let pair = lock.withLock { (session, key) }
+                if let session = pair.0, let key = pair.1 { session.invalidate(operatorKey: key) }
+            }
+        }
+    }
+
     struct ProbeAction: ACTAActionProtocol {
         let id: String
         let title = "Probe"
@@ -36,6 +111,71 @@ struct ACTALocalActionBrokerTests {
             return ACTAActionResult(actionID: id, success: true, summary: "done")
         }
         func verify(parameters: [String: String], context: ACTAActionContext) async throws -> Bool { true }
+    }
+
+    struct CancelledMutation: ACTAActionProtocol {
+        let id = "test.cancelled"
+        let title = "Cancelled mutation"
+        let description = "Synthetic cancellation after a side effect"
+        let classification = ACTAActionClassification.reversible
+        let parameters: [ACTAActionParameterSchema] = []
+        let counter: Counter
+        func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
+            await counter.increment()
+            throw CancellationError()
+        }
+    }
+
+    struct CancelledInspection: ACTAActionProtocol {
+        let id = "test.cancelled_inspection"
+        let title = "Cancelled inspection"
+        let description = "Synthetic cancellation in execution or verification"
+        let classification = ACTAActionClassification.inspect
+        let parameters: [ACTAActionParameterSchema] = []
+        let duringVerification: Bool
+        func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
+            if !duringVerification { withUnsafeCurrentTask { $0?.cancel() } }
+            return ACTAActionResult(actionID: id, success: true, summary: "done", outputJSON: #"{"secret":"value"}"#)
+        }
+        func verify(parameters: [String: String], context: ACTAActionContext) async throws -> Bool {
+            if duringVerification { withUnsafeCurrentTask { $0?.cancel() } }
+            return true
+        }
+    }
+
+    @Test func cancelledInspectionDoesNotReleaseOutput() async throws {
+        for duringVerification in [false, true] {
+            let action = CancelledInspection(duringVerification: duringVerification)
+            let host = try #require(await ACTALocalActionBroker.make(
+                actions: [action], allowedActionIDs: [action.id], audit: { _ in }))
+            let session = try #require(await host.broker.openSession(operatorKey: host.operatorKey, input: .chat,
+                threadID: "test", actionIDs: [action.id]))
+            let result = await Task {
+                await host.broker.request(session: session, actionID: action.id, argumentsJSON: "{}")
+            }.value
+            #expect(result.error?.hasPrefix("ACTION_CANCELLED:") == true)
+            #expect(!result.outputJSON.contains("secret"))
+            await host.broker.closeSession(session, operatorKey: host.operatorKey)
+        }
+    }
+
+    @Test func cancelledMutationReportsPossibleSideEffect() async throws {
+        let counter = Counter()
+        let action = CancelledMutation(counter: counter)
+        let log = AuditLog()
+        let host = try #require(await ACTALocalActionBroker.make(
+            actions: [action], allowedActionIDs: [action.id], audit: { try log.record($0) }))
+        let session = try #require(await host.broker.openSession(operatorKey: host.operatorKey, input: .chat,
+            threadID: "test", actionIDs: [action.id]))
+        let pending = await host.broker.request(session: session, actionID: action.id, argumentsJSON: "{}")
+        #expect(pending.requiresOperatorConfirmation)
+        let review = try #require(await host.broker.reviews(operatorKey: host.operatorKey, session: session).first)
+        let result = await host.broker.resolve(operatorKey: host.operatorKey, session: session, reviewed: review, approved: true)
+        #expect(result.error?.hasPrefix("ACTION_CANCELLED:") == true)
+        #expect(result.error?.contains("may have executed") == true)
+        #expect(await counter.value == 1)
+        #expect(log.events().last?.outcome == "failed")
+        await host.broker.closeSession(session, operatorKey: host.operatorKey)
     }
 
     actor PreparationLatch {
@@ -125,10 +265,49 @@ struct ACTALocalActionBrokerTests {
         #expect(hidden.error?.hasPrefix("AUTHORIZATION_DENIED:") == true)
         #expect(await counter.value == 2)
         let events = log.events()
+        let operationEvents = events.filter { $0.operationID == review.operationID }
+        #expect(operationEvents.map { String(describing: $0.phase) } == ["request", "validated", "result", "review", "result"])
+        try #require(operationEvents.count == 5)
+        #expect(operationEvents[2].outcome == "confirmation_required")
+        #expect(operationEvents[4].outcome == "success")
+        #expect(!mutation.outputJSON.contains(review.operationID.uuidString))
+        #expect(Set(events.compactMap(\.operationID)).count >= 3)
         #expect(events.contains { String(describing: $0.phase) == "review" && $0.approved == true
                                   && $0.threadID == "local-thread" })
         #expect(events.contains { String(describing: $0.phase) == "result" && $0.outcome == "failed"
                                   && $0.actionID == "[unrecognized]" })
+    }
+
+    @Test func reviewedOperationIDSurvivesAuditStoreReopenWithoutParameters() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("acta-broker-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("audit.sqlite")
+        let store = try LocalTrackingStore(url: url)
+        let counter = Counter()
+        let action = ProbeAction(id: "test.mutate", classification: .reversible, counter: counter)
+        let host = try #require(await ACTALocalActionBroker.make(
+            actions: [action], allowedActionIDs: [action.id], audit: { event in
+                try store.recordDurableACTAToolCallAudit(ACTAToolCallAuditRecord(
+                    threadID: event.threadID, toolName: event.actionID, argsJSON: event.auditMetadataJSON,
+                    resultRows: 0, durationMs: 0, ok: event.outcome == "success",
+                    error: "BROKER_\(String(describing: event.phase))"))
+            }))
+        let session = try #require(await host.broker.openSession(operatorKey: host.operatorKey, input: .voice,
+            threadID: "audit-test", actionIDs: [action.id]))
+        let requested = await host.broker.request(session: session, actionID: action.id,
+                                                   argumentsJSON: #"{"value":"private review value"}"#)
+        #expect(requested.requiresOperatorConfirmation)
+        let review = try #require(await host.broker.reviews(operatorKey: host.operatorKey, session: session).first)
+        let result = await host.broker.resolve(operatorKey: host.operatorKey, session: session,
+                                               reviewed: review, approved: true)
+        #expect(result.success)
+        let reopened = try LocalTrackingStore(url: url)
+        let rows = try reopened.executeReadOnlyACTASQL(
+            "SELECT args_json FROM ghost_chat_tool_calls WHERE thread_id = 'audit-test'")
+        #expect(rows.count == 5)
+        #expect(rows.allSatisfy { $0["args_json"] == "{\"operation_id\":\"\(review.operationID.uuidString)\"}" })
+        #expect(rows.allSatisfy { !($0["args_json"] ?? "").contains("private review value") })
     }
 
     @Test func unsafeReviewParametersAreRejectedWithoutLeakingToAudit() async throws {
@@ -235,7 +414,13 @@ struct ACTALocalActionBrokerTests {
         #expect(proposed.requiresOperatorConfirmation)
         #expect(await first.broker.reviews(operatorKey: second.operatorKey, session: session).isEmpty)
         let review = try #require(await first.broker.reviews(operatorKey: first.operatorKey, session: session).first)
-        let tampered = ACTABrokerReview(handle: review.handle, actionID: review.actionID,
+        let tamperedID = ACTABrokerReview(handle: review.handle, operationID: UUID(), actionID: review.actionID,
+                                          threadID: review.threadID, parameters: review.parameters, title: review.title)
+        let rejectedID = await first.broker.resolve(operatorKey: first.operatorKey, session: session,
+                                                    reviewed: tamperedID, approved: true)
+        #expect(!rejectedID.success)
+        #expect(await counter.value == 0)
+        let tampered = ACTABrokerReview(handle: review.handle, operationID: review.operationID, actionID: review.actionID,
                                         threadID: review.threadID, parameters: ["value": "two"], title: review.title)
         let rejected = await first.broker.resolve(operatorKey: first.operatorKey, session: session,
                                                    reviewed: tampered, approved: true)
@@ -290,6 +475,33 @@ struct ACTALocalActionBrokerTests {
                                                     reviewed: rejectedReview, approved: false)
         #expect(!rejected.success)
         #expect(await counter.value == 1)
+    }
+
+    @Test func revocationDuringReviewAuditsPreventsApproval() async throws {
+        for onReview in [false, true] {
+            let counter = Counter()
+            let revoker = AuditRevoker(onReview: onReview)
+            let action = ProbeAction(id: "test.mutate", classification: .serviceAffecting, counter: counter)
+            let created = try #require(await ACTALocalActionBroker.make(
+                actions: [action], allowedActionIDs: [action.id], audit: { revoker.record($0) }))
+            let session = try #require(await created.broker.openSession(operatorKey: created.operatorKey,
+                input: .chat, threadID: "x", actionIDs: [action.id]))
+            revoker.configure(session: session, key: created.operatorKey)
+            let request = await created.broker.request(session: session, actionID: action.id,
+                argumentsJSON: #"{"value":"one"}"#)
+            if onReview {
+                #expect(request.requiresOperatorConfirmation)
+                let review = try #require(await created.broker.reviews(operatorKey: created.operatorKey, session: session).first)
+                let result = await created.broker.resolve(operatorKey: created.operatorKey, session: session,
+                    reviewed: review, approved: true)
+                #expect(result.error?.hasPrefix("AUTHORIZATION_DENIED:") == true)
+            } else {
+                #expect(request.error?.hasPrefix("AUTHORIZATION_DENIED:") == true)
+                #expect(!request.requiresOperatorConfirmation)
+            }
+            #expect(await created.broker.reviews(operatorKey: created.operatorKey, session: session).isEmpty)
+            #expect(await counter.value == 0)
+        }
     }
 
     @Test func closedSessionCannotReceiveLatePreparedReview() async throws {

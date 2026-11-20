@@ -4,6 +4,8 @@ import Foundation
 struct ACTAAnalysisSetSectionAction: ACTAPreparedConfirmationAction {
     struct ConfirmationSnapshot: Sendable {
         let lifecycleRevision: UUID
+        let stateRevision: UUID
+        let voiceRevision: UUID
         let previousSection: String
         let refreshOnAppear: Bool
     }
@@ -48,6 +50,8 @@ struct ACTAAnalysisSetSectionAction: ACTAPreparedConfirmationAction {
                 ? " Schedule refresh on appearance will be disabled." : ""
             return ACTAPreparedConfirmation(
                 snapshot: ConfirmationSnapshot(lifecycleRevision: bridge.lifecycleRevision,
+                    stateRevision: state.reviewRevision,
+                    voiceRevision: state.analysisVoiceInput.attemptRevision,
                     previousSection: state.analysisSection.rawValue,
                     refreshOnAppear: state.analysisScheduleRefreshOnAppear),
                 reviewSummary: "Unique active security center: change analysis tab from \(state.analysisSection.rawValue) to \(value.rawValue).\(refreshEffect) The panel is not opened.")
@@ -59,24 +63,7 @@ struct ACTAAnalysisSetSectionAction: ACTAPreparedConfirmationAction {
         let value = try section(parameters)
         return try await MainActor.run {
             try Task.checkCancellation()
-            guard bridge.lifecycleRevision == snapshot.lifecycleRevision, let state = bridge.activeState,
-                  state.analysisSection.rawValue == snapshot.previousSection,
-                  state.analysisScheduleRefreshOnAppear == snapshot.refreshOnAppear else {
-                return .failed(actionID: id, error: "STALE_REVIEW: Analysis tab or window changed.")
-            }
-            guard state.analysisSection == value || state.analysisSection != .ask || !state.analysisVoiceBusy else {
-                return .failed(actionID: id, error: "UNAVAILABLE: Dictation is starting or recording.")
-            }
-            if state.analysisSection != value {
-                if value == .schedule { state.analysisScheduleRefreshOnAppear = false }
-                state.analysisSection = value
-            }
-            bridge.recordAnalysisWrite(to: state, section: value)
-            guard state.analysisSection == value else {
-                return .failed(actionID: id, error: "Analysis tab state readback failed.")
-            }
-            return ACTAActionResult(actionID: id, success: true,
-                summary: "Analysis tab state updated in this window; rendering was not verified.")
+            return try apply(value, snapshot: snapshot)
         }
     }
 
@@ -84,23 +71,53 @@ struct ACTAAnalysisSetSectionAction: ACTAPreparedConfirmationAction {
         let value = try section(parameters)
         return try await MainActor.run {
             try Task.checkCancellation()
+            bridge.clearAnalysisWrite()
             guard let state = bridge.activeState else {
                 return .failed(actionID: id, error: "UNAVAILABLE: No unique active security center.")
             }
-            guard state.analysisSection == value || state.analysisSection != .ask || !state.analysisVoiceBusy else {
-                return .failed(actionID: id, error: "UNAVAILABLE: Dictation is starting or recording.")
-            }
-            if state.analysisSection != value {
-                if value == .schedule { state.analysisScheduleRefreshOnAppear = false }
-                state.analysisSection = value
-            }
-            bridge.recordAnalysisWrite(to: state, section: value)
-            guard state.analysisSection == value else {
-                return .failed(actionID: id, error: "Analysis tab state readback failed.")
-            }
-            return ACTAActionResult(actionID: id, success: true,
-                summary: "Analysis tab state updated in this window; rendering was not verified.")
+            return try apply(value, snapshot: ConfirmationSnapshot(
+                lifecycleRevision: bridge.lifecycleRevision, stateRevision: state.reviewRevision,
+                voiceRevision: state.analysisVoiceInput.attemptRevision,
+                previousSection: state.analysisSection.rawValue,
+                refreshOnAppear: state.analysisScheduleRefreshOnAppear))
         }
+    }
+
+    @MainActor
+    private func apply(_ value: VLMPanelSection, snapshot: ConfirmationSnapshot) throws -> ACTAActionResult {
+        bridge.clearAnalysisWrite()
+        guard bridge.lifecycleRevision == snapshot.lifecycleRevision, let state = bridge.activeState,
+              state.reviewRevision == snapshot.stateRevision,
+              state.analysisVoiceInput.attemptRevision == snapshot.voiceRevision,
+              state.analysisSection.rawValue == snapshot.previousSection,
+              state.analysisScheduleRefreshOnAppear == snapshot.refreshOnAppear else {
+            return .failed(actionID: id, error: "STALE_REVIEW: Analysis tab or window changed.")
+        }
+        func voiceAllowsChange() -> Bool {
+            state.analysisSection == value || state.analysisSection != .ask || !state.analysisVoiceBusy
+        }
+        guard voiceAllowsChange() else {
+            return .failed(actionID: id, error: "UNAVAILABLE: Dictation is starting or recording.")
+        }
+        let refresh = state.analysisSection != value && value == .schedule ? false : snapshot.refreshOnAppear
+        guard let revision = state.commitReviewed(expectedRevision: snapshot.stateRevision, isValid: {
+            !Task.isCancelled && self.bridge.lifecycleRevision == snapshot.lifecycleRevision
+                && self.bridge.activeState === state
+                && state.analysisVoiceInput.attemptRevision == snapshot.voiceRevision && voiceAllowsChange()
+        }, update: {
+            $0.analysisSection = value
+            $0.analysisScheduleRefreshOnAppear = refresh
+        }) else {
+            try Task.checkCancellation()
+            return .failed(actionID: id, error: "STALE_REVIEW: Analysis tab, window, or dictation changed.")
+        }
+        bridge.recordAnalysisWrite(to: state, section: value, revision: revision)
+        guard bridge.verifiesAnalysisSection(value), state.analysisScheduleRefreshOnAppear == refresh else {
+            bridge.clearAnalysisWrite()
+            return .failed(actionID: id, error: "Analysis tab state readback failed.")
+        }
+        return ACTAActionResult(actionID: id, success: true,
+            summary: "Analysis tab state updated in this window; rendering was not verified.")
     }
 
     func verify(parameters: [String: String], context: ACTAActionContext) async throws -> Bool {

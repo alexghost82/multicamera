@@ -25,10 +25,11 @@ struct WallView: View {
             addVideoFile: { showVideoFileImporter = true },
             importSources: { model.importSources() },
             showCameraManager: { showCameras = true },
-            exportDiagnostics: { model.exportDiagnostics() },
+            exportDiagnostics: { ACTAOperationalExportUI.start(ACTAOperationalExports.diagnostics(model: model)) },
             resetLayout: { model.resetLayout() },
             editCamera: { editor = $0 },
-            removeCamera: { removeCamera = $0 }
+            removeCamera: { removeCamera = $0 },
+            identityFollowUpDomain: model.identityFollowUpDomain
         )
         .sheet(item: $editor) { camera in
             if camera.fileURL != nil { VideoFileCameraEditor(model: model, camera: camera) }

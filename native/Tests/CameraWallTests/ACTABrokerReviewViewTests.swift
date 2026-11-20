@@ -35,8 +35,9 @@ private struct BrokerReviewProbeAction: ACTAActionProtocol {
 
 @MainActor
 private final class BrokerFilterInventory {
-    var groups: Set<String> = ["Entrance"]
-    var cameraIDs: [UUID] = []
+    private(set) var revision = UUID()
+    var groups: Set<String> = ["Entrance"] { willSet { revision = UUID() } }
+    var cameraIDs: [UUID] = [] { willSet { revision = UUID() } }
 }
 
 @MainActor
@@ -49,7 +50,9 @@ final class ACTABrokerReviewViewTests: XCTestCase {
         let state = ACTACanvasFilterState()
         let bridge = ACTACanvasFilterBridge()
         bridge.attach(state)
-        let action = ACTACanvasSetFilterAction(bridge: bridge, locationGroups: { [] })
+        let revision = UUID()
+        let action = ACTACanvasSetFilterAction(bridge: bridge, locationGroups: { [] },
+                                               inventoryRevision: { revision })
         let scopes = ACTAAnalyticsCoordinator.localInspectionIDs
         let creation = await ACTALocalActionBroker.make(
             actions: [action], allowedActionIDs: [action.id], allowedInspectionIDs: scopes, audit: { _ in })
@@ -130,7 +133,8 @@ final class ACTABrokerReviewViewTests: XCTestCase {
         let inventory = BrokerFilterInventory()
         let cameraID = UUID()
         inventory.cameraIDs = [cameraID]
-        let action = ACTACanvasSelectCamerasAction(bridge: bridge, enabledCameraIDs: { inventory.cameraIDs })
+        let action = ACTACanvasSelectCamerasAction(bridge: bridge, enabledCameraIDs: { inventory.cameraIDs },
+                                                   inventoryRevision: { inventory.revision })
         let creation = await ACTALocalActionBroker.make(
             actions: [action], allowedActionIDs: [action.id], audit: { _ in })
         let host = try XCTUnwrap(creation)
@@ -151,6 +155,7 @@ final class ACTABrokerReviewViewTests: XCTestCase {
         let review = try XCTUnwrap(reviews.first)
         XCTAssertTrue(review.title.contains(cameraID.uuidString))
         inventory.cameraIDs.append(UUID())
+        inventory.cameraIDs.removeLast()
         let stale = await host.broker.resolve(operatorKey: host.operatorKey, session: session,
                                               reviewed: review, approved: true)
         XCTAssertFalse(stale.success)
@@ -166,7 +171,7 @@ final class ACTABrokerReviewViewTests: XCTestCase {
         XCTAssertEqual(state.selectedCameraIDs, Set(inventory.cameraIDs))
     }
 
-    func testArrangeModelReviewRejectsChangedWindowAndApprovesFreshRequest() async throws {
+    func testArrangeModelReviewRejectsChangedWindowAndFreshRequest() async throws {
         let state = ACTACanvasFilterState()
         let bridge = ACTACanvasFilterBridge()
         bridge.attach(state)
@@ -213,7 +218,8 @@ final class ACTABrokerReviewViewTests: XCTestCase {
         let bridge = ACTACanvasFilterBridge()
         bridge.attach(state)
         let inventory = BrokerFilterInventory()
-        let action = ACTACanvasSetFilterAction(bridge: bridge, locationGroups: { inventory.groups })
+        let action = ACTACanvasSetFilterAction(bridge: bridge, locationGroups: { inventory.groups },
+                                               inventoryRevision: { inventory.revision })
         let creation = await ACTALocalActionBroker.make(
             actions: [action], allowedActionIDs: [action.id], audit: { _ in })
         let host = try XCTUnwrap(creation)
@@ -237,6 +243,7 @@ final class ACTABrokerReviewViewTests: XCTestCase {
         let review = try XCTUnwrap(reviews.first)
         XCTAssertTrue(review.title.contains("previous"))
         inventory.groups.insert("Other")
+        inventory.groups.remove("Other")
         let stale = await host.broker.resolve(operatorKey: host.operatorKey, session: session,
                                               reviewed: review, approved: true)
         XCTAssertFalse(stale.success)
@@ -305,6 +312,7 @@ final class ACTABrokerReviewViewTests: XCTestCase {
         controller.reviewedAll = true
         let approved = await controller.resolve(true)
         XCTAssertEqual(approved?.success, true)
+        XCTAssertEqual(approved?.verified, true)
         XCTAssertEqual(state.presentation, .list)
         let replay = await controller.resolve(true)
         XCTAssertEqual(replay?.success, false)

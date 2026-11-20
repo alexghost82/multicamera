@@ -7,6 +7,8 @@ CWDecoder *cw_create(void);
 int cw_open(CWDecoder *decoder, const char *url, int timeout_ms);
 int cw_open_file(CWDecoder *decoder, const char *path, int timeout_ms);
 int cw_is_eof(int error);
+// The decoder's AVFrame lease remains held until the next cw_next or cw_destroy.
+// Callers needing a stable independent image must copy before either operation.
 CVPixelBufferRef cw_next(CWDecoder *decoder, int *error);
 void cw_stop(CWDecoder *decoder);
 void cw_destroy(CWDecoder *decoder);

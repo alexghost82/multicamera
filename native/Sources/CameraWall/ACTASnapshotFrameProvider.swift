@@ -2,13 +2,20 @@ import CameraCore
 import CoreVideo
 import Foundation
 
-/// This source is not registered as an action: publication is not atomic and
-/// the source's external producers are not synchronized against pixel copying.
+/// Captures the next frame inside the producer's delivery window, before a
+/// callback returns or the FFmpeg AVFrame lease is released on the next read.
 @MainActor
 final class ACTAWallSnapshotFrameProvider: ACTASnapshotFrameProvider {
     struct Source {
         let camera: Camera
         let session: CameraSession
+        let inventoryRevision: UUID?
+
+        init(camera: Camera, session: CameraSession, inventoryRevision: UUID? = nil) {
+            self.camera = camera
+            self.session = session
+            self.inventoryRevision = inventoryRevision
+        }
     }
 
     private struct Captured {
@@ -27,8 +34,9 @@ final class ACTAWallSnapshotFrameProvider: ACTASnapshotFrameProvider {
             guard let model, model.running, !model.connecting else { return nil }
             let config = try model.cameraConfigurationChecked()
             guard let camera = config.cameras.first(where: { $0.id == id && $0.enabled }),
-                  let tile = model.tiles[id], !tile.stale, let session = tile.session else { return nil }
-            return Source(camera: camera, session: session)
+                  let tile = model.tiles[id], !tile.stale, let session = tile.session,
+                  !session.isStopped else { return nil }
+            return Source(camera: camera, session: session, inventoryRevision: model.cameraInventoryRevision)
         }
         encode = {
             let dimension = max(CVPixelBufferGetWidth($0), CVPixelBufferGetHeight($0))
@@ -55,15 +63,14 @@ final class ACTAWallSnapshotFrameProvider: ACTASnapshotFrameProvider {
         }
         capturesInFlight += 1
         defer { capturesInFlight -= 1 }
-        let sample = current.session.snapshot()
+        let sample = try await current.session.captureNextOwnedFrame()
         let selectedAt = now()
-        guard let pixel = sample.pixel, sample.serial > 0, sample.receivedAt.isFinite,
+        guard sample.serial > 0, sample.receivedAt.isFinite,
               selectedAt.isFinite, selectedAt >= sample.receivedAt, selectedAt - sample.receivedAt <= 2 else {
             throw ACTASnapshotActionError.staleFrame
         }
-        let ownedPixel = try ACTASnapshotPixelCopy.copy(pixel)
         try Task.checkCancellation()
-        let jpeg = Data([UInt8](try await encode(ownedPixel)))
+        let jpeg = Data([UInt8](try await encode(sample.pixel)))
         try Task.checkCancellation()
         guard jpeg.count >= 4, jpeg.count <= 8 * 1024 * 1024,
               jpeg.starts(with: [0xff, 0xd8]), jpeg.suffix(2).elementsEqual([0xff, 0xd9]) else {
@@ -95,7 +102,8 @@ final class ACTAWallSnapshotFrameProvider: ACTASnapshotFrameProvider {
               let current = try source(captured.frame.cameraID),
               current.camera.id == captured.frame.cameraID, current.camera.enabled,
               current.camera == captured.source.camera,
-              current.session === captured.source.session else { return false }
+              current.session === captured.source.session,
+              current.inventoryRevision == captured.source.inventoryRevision else { return false }
         return true
     }
 }

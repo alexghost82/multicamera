@@ -459,6 +459,12 @@ enum CameraMissionReport {
         }
 
         static func renderPDF(runs: [CameraMissionRun], to url: URL, generatedAt: Date = Date()) throws {
+            let data = try renderPDFData(runs: runs, generatedAt: generatedAt)
+            try data.write(to: url, options: [.atomic])
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        }
+
+        static func renderPDFData(runs: [CameraMissionRun], generatedAt: Date = Date()) throws -> Data {
             let rows = runs.reversed().map { run in
                 "\(run.occurredAt.formatted(date: .abbreviated, time: .shortened)) · \(run.missionName) · \(run.status.rawValue.capitalized)\n\(run.summary)"
             }.joined(separator: "\n\n")
@@ -497,8 +503,7 @@ enum CameraMissionReport {
                 offset += visibleRange.length
             }
             context.closePDF()
-            try (pdfData as Data).write(to: url, options: [.atomic])
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            return pdfData as Data
         }
 }
     let missionID: UUID
@@ -558,16 +563,12 @@ enum CameraMissionStore {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let document = try decoder.decode(CameraMissionStoreDocument.self, from: Data(contentsOf: url))
-          guard (1...schemaVersion).contains(document.schemaVersion),
+        guard (1...schemaVersion).contains(document.schemaVersion),
               document.missions.count <= maximumMissions, document.runs.count <= maximumRuns,
-                            document.consults.count <= maximumConsultMessages,
-              Set(document.consults.map(\.missionID)).isSubset(of: Set(document.missions.map(\.id))),
-              document.runs.allSatisfy({
-                  $0.summary.count <= 4000
-                      && ($0.sceneChangeScore.map { $0.isFinite && (0...1).contains($0) } ?? true)
-                            }),
-                            document.consults.allSatisfy({ $0.text.count <= CameraMissionConsultMessage.maximumCharacters }),
-                            Dictionary(grouping: document.consults, by: \.missionID).values.allSatisfy({ $0.count <= maximumConsultsPerMission }) else {
+              document.consults.count <= maximumConsultMessages,
+              hasValidReferences(missions: document.missions, runs: document.runs, consults: document.consults),
+              hasValidHistory(runs: document.runs, consults: document.consults),
+              Dictionary(grouping: document.consults, by: \.missionID).values.allSatisfy({ $0.count <= maximumConsultsPerMission }) else {
             throw ConfigurationError.invalid("Unsupported or oversized mission data.")
         }
         try document.missions.forEach { try $0.validate() }
@@ -590,10 +591,6 @@ enum CameraMissionStore {
         guard runs.count <= maximumRuns else {
             throw ConfigurationError.invalid("At most 500 mission runs can be stored.")
         }
-        guard (consults ?? []).count <= maximumConsultMessages,
-              Dictionary(grouping: consults ?? [], by: \.missionID).values.allSatisfy({ $0.count <= maximumConsultsPerMission }) else {
-            throw ConfigurationError.invalid("Mission consult history exceeds its limit.")
-        }
         try missions.forEach { try $0.validate() }
         let preservedConsults: [CameraMissionConsultMessage]
         if let consults {
@@ -602,6 +599,12 @@ enum CameraMissionStore {
             preservedConsults = try loadDocument(from: url).consults
         } else {
             preservedConsults = []
+        }
+        guard preservedConsults.count <= maximumConsultMessages,
+              Dictionary(grouping: preservedConsults, by: \.missionID).values.allSatisfy({ $0.count <= maximumConsultsPerMission }),
+              hasValidReferences(missions: missions, runs: runs, consults: preservedConsults),
+              hasValidHistory(runs: runs, consults: preservedConsults) else {
+            throw ConfigurationError.invalid("Mission data contains duplicate IDs, invalid history or consultation references, or exceeds its limits.")
         }
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(),
@@ -619,6 +622,25 @@ enum CameraMissionStore {
         }
         try data.write(to: url, options: [.atomic])
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    private static func hasValidReferences(
+        missions: [CameraMission], runs: [CameraMissionRun], consults: [CameraMissionConsultMessage]
+    ) -> Bool {
+        let missionIDs = Set(missions.map(\.id))
+        return missionIDs.count == missions.count
+            && Set(runs.map(\.id)).count == runs.count
+            && Set(consults.map(\.id)).count == consults.count
+            && Set(consults.map(\.missionID)).isSubset(of: missionIDs)
+    }
+
+    private static func hasValidHistory(
+        runs: [CameraMissionRun], consults: [CameraMissionConsultMessage]
+    ) -> Bool {
+        runs.allSatisfy {
+            $0.summary.count <= 4000
+                && ($0.sceneChangeScore.map { $0.isFinite && (0...1).contains($0) } ?? true)
+        } && consults.allSatisfy { $0.text.count <= CameraMissionConsultMessage.maximumCharacters }
     }
 
     static func appendRun(

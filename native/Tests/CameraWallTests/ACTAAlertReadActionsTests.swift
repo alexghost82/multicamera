@@ -4,6 +4,17 @@ import SQLite3
 import XCTest
 @testable import CameraWall
 
+private actor ScopedAlertScript {
+    private(set) var prompts: [String] = []
+    func reply(_ prompt: String) -> String {
+        prompts.append(prompt)
+        if prompts.count == 1 {
+            return #"{"tool_calls":[{"name":"acta__alert__vlm_list","arguments":{"unacknowledged_only":true,"limit":1}}]}"#
+        }
+        return #"{"answerMarkdown":"Reviewed alerts.","confidence":0.5}"#
+    }
+}
+
 @MainActor
 final class ACTAAlertReadActionsTests: XCTestCase {
     private final class Provider: ACTAAlertReadProvider {
@@ -29,6 +40,77 @@ final class ACTAAlertReadActionsTests: XCTestCase {
     private func rows(_ result: ACTAActionResult) throws -> [[String: Any]] {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.outputJSON.utf8)) as? [String: Any])
         return try XCTUnwrap(object["alerts"] as? [[String: Any]])
+    }
+
+    func testScopedAlertChatReleasesOnlyAuditedMetadata() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("acta-alert-chat-\(UUID().uuidString)", isDirectory: true)
+        let store = try LocalTrackingStore(url: root.appendingPathComponent("tracking.sqlite"))
+        defer { try? FileManager.default.removeItem(at: root) }
+        let camera = UUID()
+        let open = alert(camera, 100, priority: .critical)
+        let closed = alert(UUID(), 200)
+        let provider = Provider(ACTAAlertReadSnapshot(alerts: [open, closed], reviews: [:],
+                                                       acknowledgements: [closed.id: Date()]))
+        let action = ACTAScopedAlertListAction(provider: provider)
+        let scopes = ACTAAnalyticsCoordinator.localInspectionIDs
+        let made = await ACTALocalActionBroker.make(actions: [action], allowedActionIDs: [action.id],
+                                                     allowedInspectionIDs: scopes, audit: { _ in })
+        let host = try XCTUnwrap(made)
+        let issued = await host.broker.openSession(operatorKey: host.operatorKey, input: .chat,
+            threadID: "fixture", actionIDs: [action.id], inspectionIDs: scopes)
+        let session = try XCTUnwrap(issued)
+        let direct = await host.broker.request(session: session, actionID: action.id,
+            argumentsJSON: #"{"unacknowledged_only":true,"limit":1}"#)
+        XCTAssertTrue(direct.success)
+        let metadata = try rows(direct)
+        XCTAssertEqual(metadata.count, 1)
+        XCTAssertEqual(Set(metadata[0].keys), ["id", "created_at", "status", "priority"])
+        XCTAssertEqual(metadata[0]["id"] as? String, open.id.uuidString)
+        XCTAssertEqual(metadata[0]["status"] as? String, "open")
+        XCTAssertEqual(metadata[0]["priority"] as? String, "critical")
+        let script = ScopedAlertScript()
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .mlxInProcess), transport: { _ in
+            XCTFail("Unexpected network request")
+            throw URLError(.notConnectedToInternet)
+        }, keyProvider: { _ in XCTFail("Unexpected Keychain access"); return nil },
+            localAgentInference: { prompt, _ in await script.reply(prompt) })
+        let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store)
+        _ = await coordinator.askACTAChatAgent(question: "List alerts", threadID: "fixture",
+                                              broker: host.broker, brokerSession: session)
+        let prompts = await script.prompts
+        XCTAssertTrue(prompts.first?.contains("acta__alert__vlm_list") == true)
+        XCTAssertTrue(prompts.dropFirst().contains { $0.contains("action_output") && $0.contains(open.id.uuidString) })
+        XCTAssertTrue(prompts.allSatisfy {
+            !$0.contains("synthetic private") && !$0.contains(camera.uuidString) && !$0.contains(closed.id.uuidString)
+        })
+        await host.broker.closeSession(session, operatorKey: host.operatorKey)
+    }
+
+    func testScopedAlertRejectsInvalidInputAndAuditFailure() async throws {
+        let item = alert(UUID(), 100)
+        let provider = Provider(ACTAAlertReadSnapshot(alerts: [item], reviews: [:], acknowledgements: [:]))
+        let action = ACTAScopedAlertListAction(provider: provider)
+        let made = await ACTALocalActionBroker.make(actions: [action], allowedActionIDs: [action.id], audit: { event in
+            if event.phase == .result && event.outcome == "success" { throw CocoaError(.fileWriteUnknown) }
+        })
+        let host = try XCTUnwrap(made)
+        let issued = await host.broker.openSession(operatorKey: host.operatorKey, input: .chat,
+                                                   threadID: "fixture", actionIDs: [action.id])
+        let session = try XCTUnwrap(issued)
+        for arguments in [#"{"limit":0}"#, #"{"limit":51}"#, #"{"camera_id":"secret"}"#,
+                          #"{"unacknowledged_only":"yes"}"#] {
+            let result = await host.broker.request(session: session, actionID: action.id, argumentsJSON: arguments)
+            XCTAssertFalse(result.success)
+        }
+        XCTAssertEqual(provider.calls, 0)
+        let result = await host.broker.request(session: session, actionID: action.id, argumentsJSON: "{}")
+        XCTAssertTrue(result.error?.hasPrefix("AUDIT_FAILED:") == true)
+        XCTAssertFalse(result.outputJSON.contains(item.id.uuidString))
+        provider.unavailable = true
+        let unavailable = try await action.execute(parameters: [:], context: ACTAActionContext())
+        XCTAssertTrue(unavailable.error?.hasPrefix("UNAVAILABLE:") == true)
+        await host.broker.closeSession(session, operatorKey: host.operatorKey)
     }
 
     func testListFiltersLimitsOrderingAndMinimalFields() async throws {

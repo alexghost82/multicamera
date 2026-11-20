@@ -8,6 +8,9 @@ import XCTest
 @MainActor
 final class SafetyIncidentCenterTests: XCTestCase {
     func testRussianIncidentCenterRendersSavedIncident() async throws {
+        guard ProcessInfo.processInfo.environment["CAMERAWALL_RUN_INCIDENT_WINDOW_INTEGRATION"] == "1" else {
+            throw XCTSkip("Set CAMERAWALL_RUN_INCIDENT_WINDOW_INTEGRATION=1 to run the interactive window test.")
+        }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let engine = LocalVideoAnalyticsEngine(settingsURL: root.appendingPathComponent("settings.json"),
@@ -42,7 +45,7 @@ final class SafetyIncidentCenterTests: XCTestCase {
         if let directory = ProcessInfo.processInfo.environment["CAMERAWALL_TEST_ARTIFACTS"] {
             let output = URL(fileURLWithPath: directory)
             try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-            try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: output.appendingPathComponent("incident-center-ru.png"))
+            try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: output.appendingPathComponent("incident-center-ru.png"), options: .withoutOverwriting)
         }
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate

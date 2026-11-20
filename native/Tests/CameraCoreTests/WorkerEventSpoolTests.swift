@@ -3,9 +3,9 @@ import XCTest
 
 final class WorkerEventSpoolTests: XCTestCase {
     func testSpoolPersistsEventsAndAcknowledgements() async throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let url = directory.appendingPathComponent("events.json")
+        let directory = try IsolatedStoreTestDirectory()
+        defer { try? directory.remove() }
+        let url = directory.url.appendingPathComponent("events.json")
         let event = try makeEvent(at: Date(timeIntervalSince1970: 100))
         let secondEvent = try makeEvent(at: Date(timeIntervalSince1970: 200))
 
@@ -27,8 +27,9 @@ final class WorkerEventSpoolTests: XCTestCase {
     }
 
     func testCapacityFailureDoesNotDropAlreadySpooledEvents() async throws {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: url) }
+        let directory = try IsolatedStoreTestDirectory()
+        defer { try? directory.remove() }
+        let url = directory.url.appendingPathComponent("events.json")
         let event = try makeEvent()
         let spool = try WorkerEventSpool(url: url, maximumEvents: 1, maximumBytes: 16_384)
         try await spool.append(event)
@@ -44,8 +45,9 @@ final class WorkerEventSpoolTests: XCTestCase {
     }
 
     func testSpoolRefusesExistingFileWithLoosePermissions() async throws {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: url) }
+        let directory = try IsolatedStoreTestDirectory()
+        defer { try? directory.remove() }
+        let url = directory.url.appendingPathComponent("events.json")
         let spool = try WorkerEventSpool(url: url, maximumEvents: 1, maximumBytes: 16_384)
         try await spool.append(makeEvent())
         try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)

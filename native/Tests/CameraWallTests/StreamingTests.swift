@@ -15,19 +15,16 @@ final class StreamingTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(".streaming-fixture-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
-        let previousModels = ModelSelectionPreferences(
-            enabled: Set(LocalModelService.allCases.filter { ModelSelectionRegistry.isEnabled($0) }),
-            paths: Dictionary(uniqueKeysWithValues: LocalModelService.allCases.compactMap { service in
-                ModelSelectionRegistry.path(service).map { (service, $0.path) }
-            }))
+        let previousModels = ModelSelectionRegistry.snapshot().preferences
         defer {
             try? FileManager.default.removeItem(at: directory)
             ModelSelectionRegistry.update(previousModels)
         }
-        let first = Camera(name: "Front", substream: "rtsp://front.local/live", enabled: false)
-        let second = Camera(name: "Back", substream: "rtsp://back.local/live", enabled: false)
+        let first = Camera(name: "Front", substream: "rtsp://front.invalid/live", enabled: false)
+        let second = Camera(name: "Back", substream: "rtsp://back.invalid/live", enabled: false)
         var config = WallConfiguration()
         config.cameras = [first, second]
+        config.go2rtcPath = directory.appendingPathComponent("no-go2rtc").path
         let file = directory.appendingPathComponent("cameras.json")
         try ConfigurationStore.save(config, to: file)
         var models = ModelSelectionPreferences(); models.enabled = []
@@ -47,6 +44,15 @@ final class StreamingTests: XCTestCase {
         })
         let model = WallModel(configURL: file, workerMode: false,
             poseModelURL: directory.appendingPathComponent("fake-pose.mlmodel"),
+            relayFactory: {
+                Go2RTC(transport: { _ in
+                    XCTFail("Unexpected relay request")
+                    throw URLError(.notConnectedToInternet)
+                }, configurationDirectory: directory, childFactory: { _, _, _ in
+                    XCTFail("Unexpected relay process")
+                    throw URLError(.notConnectedToInternet)
+                })
+            },
             trackingStoreURL: directory.appendingPathComponent("tracking.sqlite3"),
             featureCoordinator: features, analyticsDirectoryURL: directory.appendingPathComponent("analytics"),
             agentClient: client,
@@ -54,6 +60,8 @@ final class StreamingTests: XCTestCase {
             operationsWatchURL: directory.appendingPathComponent("watches.json"),
             missionStoreURL: directory.appendingPathComponent("missions.json"),
             cameraCredentialStore: StreamingTestCredentials(),
+            reconnectDecoderStart: { _, _ in XCTFail("Unexpected network decoder") },
+            fileDecoderStart: { _, _, _ in XCTFail("Unexpected file decoder") },
             operationsPreferencesURL: directory.appendingPathComponent("operations.json"),
             alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")),
             languageSettings: LanguageSettings(storage: InMemoryLanguageStorage()),
@@ -77,17 +85,57 @@ final class StreamingTests: XCTestCase {
 
     private struct StreamingTestCredentials: CameraCredentialStore {
         private struct UnexpectedAccess: Error {}
-        func read(_ id: UUID) throws -> Credentials? { XCTFail("Unexpected credential read"); throw UnexpectedAccess() }
+        var allowReads = false
+        func read(_ id: UUID) throws -> Credentials? {
+            if allowReads { return nil }
+            XCTFail("Unexpected credential read")
+            throw UnexpectedAccess()
+        }
         func save(_ credentials: Credentials, for id: UUID) throws { XCTFail("Unexpected credential save"); throw UnexpectedAccess() }
         func remove(_ id: UUID) throws { XCTFail("Unexpected credential removal"); throw UnexpectedAccess() }
     }
 
     @MainActor
     func testRelayAndHardwareDecoding() async throws {
+        guard ProcessInfo.processInfo.environment["CAMERAWALL_RUN_STREAMING_INTEGRATION"] == "1" else {
+            throw XCTSkip("Set CAMERAWALL_RUN_STREAMING_INTEGRATION=1 to run loopback streaming and hardware decoding.")
+        }
+        try await runRelayAndHardwareDecoding(includeWall: false)
+    }
+
+    @MainActor
+    func testWallStreamingRecoveryAndLayout() async throws {
+        guard ProcessInfo.processInfo.environment["CAMERAWALL_RUN_STREAMING_INTEGRATION"] == "1" else {
+            throw XCTSkip("Set CAMERAWALL_RUN_STREAMING_INTEGRATION=1 to run loopback streaming and hardware decoding.")
+        }
+        // WallModel's initial relay registration currently reads CameraKeychain directly.
+        guard ProcessInfo.processInfo.environment["CAMERAWALL_RUN_STREAMING_KEYCHAIN_INTEGRATION"] == "1" else {
+            throw XCTSkip("Set CAMERAWALL_RUN_STREAMING_KEYCHAIN_INTEGRATION=1 to allow Keychain reads for synthetic camera IDs.")
+        }
+        try await runRelayAndHardwareDecoding(includeWall: true)
+    }
+
+    @MainActor
+    private func runRelayAndHardwareDecoding(includeWall: Bool) async throws {
         guard FileManager.default.isExecutableFile(atPath: go2rtc),
               FileManager.default.isExecutableFile(atPath: "/opt/homebrew/bin/ffmpeg") else {
             throw XCTSkip("Set CAMERAWALL_GO2RTC and install FFmpeg for streaming integration tests.")
         }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".streaming-integration-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        let previousModels = ModelSelectionRegistry.snapshot().preferences
+        defer {
+            if includeWall { ModelSelectionRegistry.update(previousModels) }
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let runYOLO = includeWall && ProcessInfo.processInfo.environment["CAMERAWALL_RUN_STREAMING_YOLO"] == "1"
+        try ModelSelectionPreferences(enabled: runYOLO ? [.yolo] : [])
+            .save(to: directory.appendingPathComponent("model-preferences.json"))
+        var aiPreferences = VLMPreferences()
+        aiPreferences.actaBackendMode = .dryRun
+        try VLMStore.save(aiPreferences, to: directory.appendingPathComponent("vlm.json"))
         let sourcePort = Int.random(in: 30000...39000)
         let sourceAPIPort = Int.random(in: 20000...29000)
         let relayPort = Int.random(in: 40000...49000)
@@ -114,7 +162,7 @@ final class StreamingTests: XCTestCase {
         defer { if publisher.isRunning { publisher.terminate(); publisher.waitUntilExit() } }
         try await Task.sleep(nanoseconds: 600_000_000)
         XCTAssertTrue(publisher.isRunning)
-        let relay = Go2RTC()
+        let relay = Go2RTC(configurationDirectory: directory)
         defer { relay.stop() }
         var config = WallConfiguration()
         config.go2rtcPath = go2rtc
@@ -129,7 +177,8 @@ final class StreamingTests: XCTestCase {
         XCTAssertFalse(detected.substream.contains("fixture-user"))
         let camera = Camera(name: "Fixture", substream: detected.substream, mainstream: detected.mainstream)
         let secondCamera = Camera(name: "Fixture 2", substream: detected.substream, mainstream: detected.mainstream)
-        let address = try await relay.register(camera: camera, expanded: false)
+        let address = try await relay.register(source: camera.source(expanded: false),
+                                               name: camera.streamName(expanded: false), credentials: nil)
 
         let unauthorized = URL(string: "http://127.0.0.1:\(apiPort)/api/streams")!
         let (_, response) = try await URLSession.shared.data(from: unauthorized)
@@ -155,8 +204,7 @@ final class StreamingTests: XCTestCase {
         XCTAssertNil(cw_next(decoder, &error))
         XCTAssertLessThan(error, 0)
 
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        guard includeWall else { return }
         var wallConfig = config
         wallConfig.apiPort = Int.random(in: 50000...59000)
         wallConfig.rtspPort = Int.random(in: 40000...49000)
@@ -166,12 +214,24 @@ final class StreamingTests: XCTestCase {
         var helpers: [Go2RTC] = []
         let features = CameraFeatureCoordinator(preferencesURL: directory.appendingPathComponent("features.json"),
             databaseURL: directory.appendingPathComponent("features.sqlite3"))
-        let model = WallModel(configURL: file, relayFactory: {
-            let helper = Go2RTC()
+        try features.savePreferences(CameraFeaturePreferences(enabledFeatures: []))
+        let model = WallModel(configURL: file,
+           poseModelURL: directory.appendingPathComponent("fake-pose.mlmodel"), relayFactory: {
+            let helper = Go2RTC(configurationDirectory: directory)
             helpers.append(helper)
             return helper
         }, trackingStoreURL: directory.appendingPathComponent("tracking.sqlite3"),
-           featureCoordinator: features, analyticsDirectoryURL: directory)
+           featureCoordinator: features, analyticsDirectoryURL: directory,
+           agentClient: IsolatedWallFixtureSupport.client(),
+           cameraMemoryStore: CameraMemoryStore(url: directory.appendingPathComponent("frames")),
+           operationsWatchURL: directory.appendingPathComponent("watches.json"),
+           missionStoreURL: directory.appendingPathComponent("missions.json"),
+           cameraCredentialStore: StreamingTestCredentials(allowReads: true),
+           operationsPreferencesURL: directory.appendingPathComponent("operations.json"),
+           alertClipStore: CriticalAlertClipStore(url: directory.appendingPathComponent("clips")),
+           languageSettings: LanguageSettings(storage: InMemoryLanguageStorage()),
+           monitorHistoryURL: directory.appendingPathComponent("monitor.json"),
+           analyticsModelDiscovery: IsolatedWallFixtureSupport.modelDiscovery)
         defer { model.shutdown() }
         model.start()
         try await waitForFrames(model: model, camera: camera)
@@ -198,7 +258,8 @@ final class StreamingTests: XCTestCase {
         let secondSessionBeforeLayout = try XCTUnwrap(model.tiles[secondCamera.id]?.session)
         let framesBeforeLayout = sessionBeforeLayout.snapshot().frames
         let secondFramesBeforeLayout = secondSessionBeforeLayout.snapshot().frames
-        if YOLO26Detector.defaultModelURL != nil {
+        if runYOLO {
+            _ = try XCTUnwrap(YOLO26Detector.defaultModelURL, "Streaming YOLO integration requires a local YOLO model.")
             model.setYOLOEnabled(for: camera.id, enabled: true)
             let detectionDeadline = ProcessInfo.processInfo.systemUptime + 8
             while ProcessInfo.processInfo.systemUptime < detectionDeadline && model.tiles[camera.id]?.inferenceCount == 0 {
@@ -306,6 +367,9 @@ final class StreamingTests: XCTestCase {
     }
 
     func testUnreachableSourceAndCancellation() throws {
+        guard ProcessInfo.processInfo.environment["CAMERAWALL_RUN_STREAMING_INTEGRATION"] == "1" else {
+            throw XCTSkip("Set CAMERAWALL_RUN_STREAMING_INTEGRATION=1 to test a real loopback decoder connection.")
+        }
         let decoder = try XCTUnwrap(cw_create())
         defer { cw_destroy(decoder) }
         let started = Date()

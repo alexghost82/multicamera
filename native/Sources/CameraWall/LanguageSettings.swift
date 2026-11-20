@@ -54,16 +54,17 @@ private struct UserDefaultsLanguageStorage: LanguageSettingsStorage {
 }
 
 @MainActor
-final class LanguageSettings: ObservableObject {
+final class LanguageSettings: @preconcurrency ObservableObject {
     private static let storageKey = "ACTA.interfaceLanguage"
     private let storage: any LanguageSettingsStorage
 
-    @Published private(set) var language: AppLanguage {
-        didSet {
-            storage.set(language.rawValue, forKey: Self.storageKey)
-            onChange?()
-        }
-    }
+    let objectWillChange = ObservableObjectPublisher()
+    private(set) var language: AppLanguage
+    private(set) var reviewRevision = UUID()
+    private var guiWriteDepth = 0
+    private var reviewedCommitInProgress = false
+    private var storageWriteInProgress = false
+    private var deferredLanguages: [AppLanguage] = []
 
     var onChange: (() -> Void)?
     var locale: Locale { language.locale }
@@ -78,10 +79,57 @@ final class LanguageSettings: ObservableObject {
         language = AppLanguage(rawValue: storage.string(forKey: Self.storageKey) ?? "") ?? .english
     }
 
-    func setLanguage(_ value: AppLanguage) { language = value }
+    func setLanguage(_ value: AppLanguage) {
+        if storageWriteInProgress {
+            reviewRevision = UUID()
+            deferredLanguages.append(value)
+            return
+        }
+        guiWriteDepth += 1
+        reviewRevision = UUID()
+        objectWillChange.send()
+        language = value
+        reviewRevision = UUID()
+        persistLanguage(value)
+        guiWriteDepth -= 1
+        drainDeferredLanguages()
+    }
+
+    func commitReviewedLanguage(_ value: AppLanguage, expectedRevision: UUID,
+                                expectedStoredLanguage: String?) -> UUID? {
+        guard !reviewedCommitInProgress, guiWriteDepth == 0,
+              reviewRevision == expectedRevision else { return nil }
+        reviewedCommitInProgress = true
+        defer { reviewedCommitInProgress = false }
+        objectWillChange.send()
+        guard !Task.isCancelled, guiWriteDepth == 0, reviewRevision == expectedRevision,
+              storedLanguage == expectedStoredLanguage,
+              !Task.isCancelled, guiWriteDepth == 0, reviewRevision == expectedRevision else { return nil }
+        language = value
+        reviewRevision = UUID()
+        let committedRevision = reviewRevision
+        persistLanguage(value)
+        drainDeferredLanguages()
+        return reviewRevision == committedRevision && storedLanguage == value.rawValue
+            ? committedRevision : nil
+    }
+
+    private func persistLanguage(_ value: AppLanguage) {
+        storageWriteInProgress = true
+        storage.set(value.rawValue, forKey: Self.storageKey)
+        storageWriteInProgress = false
+        onChange?()
+    }
+
+    private func drainDeferredLanguages() {
+        guard !storageWriteInProgress, guiWriteDepth == 0 else { return }
+        while !deferredLanguages.isEmpty {
+            setLanguage(deferredLanguages.removeFirst())
+        }
+    }
 
     func toggle() {
-        language = language.next
+        setLanguage(language.next)
     }
 
     func localized(_ key: String) -> String {

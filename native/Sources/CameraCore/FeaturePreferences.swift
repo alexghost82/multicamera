@@ -53,10 +53,13 @@ public struct CameraFeaturePreferences: Codable, Equatable, Sendable {
 }
 
 public enum CameraFeaturePreferencesStoreError: LocalizedError, Equatable {
-    case busy
+    case busy, unsafeLock
 
     public var errorDescription: String? {
-        "Feature preferences are busy. Please try again."
+        switch self {
+        case .busy: return "Feature preferences are busy. Please try again."
+        case .unsafeLock: return "Feature preferences lock is unsafe or was replaced; the operation may require reconciliation."
+        }
     }
 }
 
@@ -146,11 +149,30 @@ public enum CameraFeaturePreferencesStore {
         defer { close(fd) }
         guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
             let failure = errno
-            if failure == EWOULDBLOCK { throw CameraFeaturePreferencesStoreError.busy }
+            if failure == EWOULDBLOCK || failure == EAGAIN { throw CameraFeaturePreferencesStoreError.busy }
             throw POSIXError(POSIXErrorCode(rawValue: failure) ?? .EIO)
         }
         defer { flock(fd, LOCK_UN) }
-        return try body()
+        func validateLock() throws {
+            var opened = stat()
+            var current = stat()
+            guard fstat(fd, &opened) == 0, lstat(lockURL.path, &current) == 0,
+                  opened.st_mode & S_IFMT == S_IFREG, opened.st_nlink == 1,
+                  opened.st_uid == geteuid(), opened.st_mode & 0o077 == 0,
+                  current.st_mode & S_IFMT == S_IFREG,
+                  current.st_dev == opened.st_dev, current.st_ino == opened.st_ino else {
+                throw CameraFeaturePreferencesStoreError.unsafeLock
+            }
+        }
+        try validateLock()
+        do {
+            let result = try body()
+            try validateLock()
+            return result
+        } catch {
+            try validateLock()
+            throw error
+        }
     }
 
     private static func saveLocked(_ preferences: CameraFeaturePreferences, to url: URL) throws {

@@ -67,19 +67,27 @@ public struct ACTAActionContext: Sendable {
     public let now: Date
     public let trackingStore: (any Sendable)?
     public let isConfirmed: Bool
+    /// Optional caller-supplied idempotency key for deduplicating verified mutations.
+    public let idempotencyKey: String?
+    /// Optional execution deadline in seconds; nil disables the per-action timeout.
+    public let timeoutSeconds: TimeInterval?
 
     public init(
         threadID: String = "default",
         initiator: String = "text_chat",
         now: Date = Date(),
         trackingStore: (any Sendable)? = nil,
-        isConfirmed: Bool = false
+        isConfirmed: Bool = false,
+        idempotencyKey: String? = nil,
+        timeoutSeconds: TimeInterval? = nil
     ) {
         self.threadID = threadID
         self.initiator = initiator
         self.now = now
         self.trackingStore = trackingStore
         self.isConfirmed = isConfirmed
+        self.idempotencyKey = idempotencyKey
+        self.timeoutSeconds = timeoutSeconds
     }
 }
 

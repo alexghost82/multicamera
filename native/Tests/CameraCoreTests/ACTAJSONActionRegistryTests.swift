@@ -61,6 +61,24 @@ struct ACTAJSONActionRegistryTests {
         ACTAActionParameterSchema(name: "value", type: type, description: "Test", isRequired: true)
     }
 
+    @Test func duplicateSchemaNamesFailWithoutExecutingOrRequestingConfirmation() async throws {
+        let registry = ACTAActionRegistry()
+        let probe = JSONActionProbe()
+        let audit = JSONAuditProbe()
+        await registry.register(JSONProbeAction(classification: .securitySensitive,
+                                                 parameters: [field("string"), field("string")],
+                                                 marker: "duplicate", probe: probe))
+        let direct = try await registry.execute(actionID: "test.json", parameters: ["value": "test"])
+        let json = try await registry.executeJSON(actionID: "test.json",
+                                                  argumentsJSON: #"{"value":"test"}"#,
+                                                  beforeExecution: { _ in audit.record() })
+        #expect(direct.error == "INVALID_SCHEMA: Duplicate parameter name.")
+        #expect(json.error == "INVALID_SCHEMA: Duplicate parameter name.")
+        #expect(!direct.requiresOperatorConfirmation && !json.requiresOperatorConfirmation)
+        #expect(audit.value() == 0)
+        #expect(await probe.executions.isEmpty)
+    }
+
     @Test func rejectsInvalidJSONAndTypesBeforeAuditOrConfirmation() async throws {
         let registry = ACTAActionRegistry()
         let probe = JSONActionProbe()

@@ -6,7 +6,7 @@ import XCTest
 @MainActor
 final class ACTAMissionActionAdapterTests: XCTestCase {
     private func fixture(responder: (@Sendable (String) async throws -> String)? = nil) throws -> (URL, WallModel, UUID) {
-        let root = FileManager.default.temporaryDirectory
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
             .appendingPathComponent(".mission-fixture-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         var config = WallConfiguration()
@@ -39,6 +39,87 @@ final class ACTAMissionActionAdapterTests: XCTestCase {
         XCTAssertTrue(LocalModelService.allCases.allSatisfy { !ModelSelectionRegistry.isEnabled($0) })
         XCTAssertFalse(model.featurePreferences.enabledFeatures.contains(.independentWatcher))
         return (root, model, camera.id)
+    }
+
+    func testTypedArgumentsRejectInvalidDirectAndBrokerRequestsWithoutWrites() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
+        let (root, model, camera) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let mission = try CameraMission(cameraID: camera, name: "Fixture", brief: "Observe",
+                                        intervalSeconds: 600, enabled: false)
+        try model.saveCameraMission(mission)
+        let before = try Data(contentsOf: model.missionStoreURL)
+        let create = WallMissionAction(kind: .create, model: model)
+        let edit = WallMissionAction(kind: .edit, model: model)
+        let history = WallMissionAction(kind: .history, model: model)
+        let scopedHistory = ACTAScopedMissionHistoryAction(model: model)
+        let base = ["camera_id": camera.uuidString, "name": "New", "brief": "Observe"]
+        let invalid = [
+            ["interval_seconds": "abc"], ["interval_seconds": ""],
+            ["interval_seconds": "999999999999999999999999999999"],
+            ["enabled": "yes"], ["enabled": ""], ["schedule_kind": "typo"], ["schedule_kind": ""]
+        ]
+        let context = ACTAActionContext()
+        for action in [create, edit] {
+            let args = action.kind == .create ? base : ["mission_id": mission.id.uuidString]
+            for patch in invalid {
+                do {
+                    _ = try await action.execute(parameters: args.merging(patch) { _, rhs in rhs }, context: context)
+                    XCTFail("Accepted invalid \(patch)")
+                } catch {}
+                XCTAssertEqual(try Data(contentsOf: model.missionStoreURL), before)
+            }
+        }
+        for value in ["abc", "", "999999999999999999999999999999", "0", "101"] {
+            do {
+                _ = try await history.execute(parameters: ["mission_id": mission.id.uuidString, "limit": value], context: context)
+                XCTFail("Accepted invalid limit \(value)")
+            } catch {}
+            let scoped = try await scopedHistory.execute(parameters: ["mission_id": mission.id.uuidString, "limit": value], context: context)
+            XCTAssertFalse(scoped.success)
+        }
+        let directDefault = try await history.execute(parameters: ["mission_id": mission.id.uuidString], context: context)
+        XCTAssertTrue(directDefault.success)
+        let actions: [any ACTAActionProtocol] = [create, edit, scopedHistory]
+        let ids = Set(actions.map(\.id))
+        let made = await ACTALocalActionBroker.make(actions: actions, allowedActionIDs: ids, audit: { _ in })
+        let host = try XCTUnwrap(made)
+        let opened = await host.broker.openSession(operatorKey: host.operatorKey,
+            input: .chat, threadID: "test", actionIDs: ids)
+        let session = try XCTUnwrap(opened)
+        for (id, object) in [
+            ("mission.create", base.merging(["interval_seconds": "bad"]) { _, rhs in rhs }),
+            ("mission.edit", ["mission_id": mission.id.uuidString, "enabled": "yes"]),
+            ("mission.edit", ["mission_id": mission.id.uuidString, "schedule_kind": "unknown"]),
+            ("mission.history", ["mission_id": mission.id.uuidString, "limit": "bad"])
+        ] {
+            let data = try JSONSerialization.data(withJSONObject: object)
+            let result = await host.broker.request(session: session, actionID: id, argumentsJSON: String(decoding: data, as: UTF8.self))
+            XCTAssertFalse(result.success)
+            XCTAssertFalse(result.requiresOperatorConfirmation)
+            XCTAssertEqual(try Data(contentsOf: model.missionStoreURL), before)
+        }
+        let validHistory = await host.broker.request(session: session, actionID: "mission.history",
+            argumentsJSON: #"{"mission_id":"\#(mission.id.uuidString)","limit":1}"#)
+        XCTAssertTrue(validHistory.success, validHistory.summary)
+        let invalidRange = await host.broker.request(session: session, actionID: "mission.history",
+            argumentsJSON: #"{"mission_id":"\#(mission.id.uuidString)","limit":51}"#)
+        XCTAssertFalse(invalidRange.success)
+        let invalidBoolean = await host.broker.request(session: session, actionID: "mission.edit",
+            argumentsJSON: #"{"mission_id":"\#(mission.id.uuidString)","enabled":1}"#)
+        XCTAssertFalse(invalidBoolean.success)
+        let directEdit = try await edit.execute(parameters: ["mission_id": mission.id.uuidString,
+            "enabled": "1", "interval_seconds": "1200", "schedule_kind": "interval"], context: context)
+        XCTAssertTrue(directEdit.success)
+        let updated = try XCTUnwrap(model.missionDocumentChecked().missions.first)
+        XCTAssertTrue(updated.enabled)
+        XCTAssertEqual(updated.intervalSeconds, 1200)
+        let defaultCreate = try await create.execute(parameters: base, context: context)
+        XCTAssertTrue(defaultCreate.success)
+        let created = try XCTUnwrap(model.missionDocumentChecked().missions.first(where: { $0.name == "New" }))
+        XCTAssertEqual(created.intervalSeconds, 3600)
+        XCTAssertFalse(created.enabled)
     }
 
     func testConsultationReceiptAndSavedReplyUseLocalDomainWorkflow() async throws {
@@ -148,6 +229,69 @@ final class ACTAMissionActionAdapterTests: XCTestCase {
         XCTAssertTrue(archived.outputJSON.contains("Saved observation"))
     }
 
+    func testClockWeekdayMetadataMatchesScheduledDays() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
+        let (root, model, camera) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let create = WallMissionAction(kind: .create, model: model)
+        let edit = WallMissionAction(kind: .edit, model: model)
+        XCTAssertTrue(create.description.contains("0=Monday...6=Sunday"))
+        XCTAssertTrue(edit.description.contains("0=Monday...6=Sunday"))
+        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-03-01T08:00:00Z"))
+        for (day, expected) in [("0", "2026-03-02T09:00:00Z"), ("6", "2026-03-01T09:00:00Z")] {
+            let result = try await create.execute(parameters: [
+                "camera_id": camera.uuidString, "name": "Synthetic \(day)", "brief": "Inspect",
+                "schedule_kind": "clock", "clock_times": "09:00", "weekdays": day, "time_zone": "UTC"
+            ], context: ACTAActionContext(now: now))
+            XCTAssertTrue(result.success, result.summary)
+            let saved = try XCTUnwrap(model.cameraMissions.first(where: { $0.name == "Synthetic \(day)" }))
+            XCTAssertEqual(saved.nextRunAt, ISO8601DateFormatter().date(from: expected))
+        }
+    }
+
+    func testCreateAndEditRejectStaleFeaturePolicyAndCameraInventory() async throws {
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
+        let (root, model, camera) = try fixture()
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let mission = try CameraMission(cameraID: camera, name: "Original", brief: "Inspect", intervalSeconds: 600)
+        try model.saveCameraMission(mission)
+        let before = try Data(contentsOf: model.missionStoreURL)
+        let actions = [
+            (WallMissionAction(kind: .create, model: model),
+             ["camera_id": camera.uuidString, "name": "Synthetic", "brief": "Inspect", "enabled": "true"]),
+            (WallMissionAction(kind: .edit, model: model),
+             ["mission_id": mission.id.uuidString, "name": "Edited"])
+        ]
+        let featuresURL = root.appendingPathComponent("features.json")
+        try CameraFeaturePreferencesStore.save(CameraFeaturePreferences(enabledFeatures: []), to: featuresURL)
+        for (action, args) in actions {
+            do {
+                _ = try await action.execute(parameters: args, context: ACTAActionContext())
+                XCTFail("Stale feature policy must prevent mission changes")
+            } catch {}
+            XCTAssertEqual(try Data(contentsOf: model.missionStoreURL), before)
+        }
+        try CameraFeaturePreferencesStore.save(model.featurePreferences, to: featuresURL)
+
+        var changed = model.config
+        changed.cameras = []
+        try ConfigurationStore.save(changed, to: root.appendingPathComponent("cameras.json"))
+        for (action, args) in actions {
+            do {
+                _ = try await action.execute(parameters: args, context: ACTAActionContext())
+                XCTFail("Stale camera inventory must prevent mission changes")
+            } catch {}
+            XCTAssertEqual(try Data(contentsOf: model.missionStoreURL), before)
+        }
+        try ConfigurationStore.save(model.config, to: root.appendingPathComponent("cameras.json"))
+        for (action, args) in actions {
+            let result = try await action.execute(parameters: args, context: ACTAActionContext())
+            XCTAssertTrue(result.success, result.summary)
+        }
+    }
+
     func testClockScheduleValidationAndScheduleRecalculation() async throws {
         let previous = IsolatedWallFixtureSupport.modelPreferences()
         defer { ModelSelectionRegistry.update(previous) }
@@ -209,7 +353,7 @@ final class ACTAMissionActionAdapterTests: XCTestCase {
         XCTAssertFalse(disabled.success)
     }
 
-    func testManualRunIsAnIdempotentQueueReceiptNotACompletedAnalysis() async throws {
+    func testLegacyRunActionFailsClosedWithoutChangingMissionState() async throws {
         let previous = IsolatedWallFixtureSupport.modelPreferences()
         defer { ModelSelectionRegistry.update(previous) }
         let (root, model, camera) = try fixture()
@@ -221,24 +365,19 @@ final class ACTAMissionActionAdapterTests: XCTestCase {
         XCTAssertTrue(created.success)
         let mission = try XCTUnwrap(model.cameraMissions.first)
         XCTAssertFalse(model.running)
+        let before = try Data(contentsOf: model.missionStoreURL)
         for _ in 0..<2 {
             let run = try await registry.execute(actionID: "mission.run_now", parameters: ["mission_id": mission.id.uuidString])
-            XCTAssertTrue(run.success, run.summary)
-            let output = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(run.outputJSON.utf8)) as? [String: Any])
-            XCTAssertEqual(output["status"] as? String, "queued")
-            XCTAssertEqual(output["completed"] as? Bool, false)
+            XCTAssertFalse(run.success)
+            XCTAssertTrue(run.error?.hasPrefix("UNAVAILABLE:") == true)
+            XCTAssertEqual(model.missionExecutionStatus(mission.id), "idle")
             XCTAssertTrue(model.cameraMissionRuns.isEmpty)
+            XCTAssertEqual(try Data(contentsOf: model.missionStoreURL), before)
         }
-        let second = try CameraMission(cameraID: camera, name: "Other", brief: "Describe activity", intervalSeconds: 600, enabled: true)
-        try model.saveCameraMission(second)
-        let busy = try await registry.execute(actionID: "mission.run_now", parameters: ["mission_id": second.id.uuidString])
-        XCTAssertFalse(busy.success)
-        model.stop()
-        XCTAssertEqual(model.missionExecutionStatus(mission.id), "idle")
-        let disabled = try await registry.execute(actionID: "mission.edit", parameters: ["mission_id": mission.id.uuidString, "enabled": "false"])
-        XCTAssertTrue(disabled.success)
+        XCTAssertEqual(try model.requestMissionRunChecked(mission.id), "queued")
         let failed = try await registry.execute(actionID: "mission.run_now", parameters: ["mission_id": mission.id.uuidString])
         XCTAssertFalse(failed.success)
+        XCTAssertEqual(model.missionExecutionStatus(mission.id), "queued")
     }
 }
 

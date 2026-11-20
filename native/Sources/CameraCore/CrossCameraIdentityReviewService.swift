@@ -28,6 +28,24 @@ public struct CrossCameraIdentityPolicyPreparedReview: Identifiable, Sendable {
     fileprivate let policyRevision: String?
 }
 
+/// Frozen input for an undo; preparing it is not operator approval.
+/// This value is not an authorization token or an outcome-verification receipt.
+public struct CrossCameraIdentityPreparedUndo: Identifiable, Sendable {
+    public let id = UUID()
+    public let proposal: CrossCameraIdentityProposal
+    /// Undo rebuilds the entire graph, not just the proposal's component.
+    public let graphTrackIDs: [UUID]
+    fileprivate let snapshot: CrossCameraIdentityReviewSnapshot
+    fileprivate let preferences: CameraFeaturePreferences
+    fileprivate let records: [UUID: TrackedObjectRecord]
+}
+
+public struct CrossCameraIdentityPolicyPreparedUndo: Identifiable, Sendable {
+    public var id: UUID { undo.id }
+    public let undo: CrossCameraIdentityPreparedUndo
+    fileprivate let policyRevision: String?
+}
+
 /// Serializes policy changes and identity writes for cooperating preferences-store writers.
 public struct CrossCameraIdentityPolicyReviewService: Sendable {
     private let service: CrossCameraIdentityReviewService
@@ -81,6 +99,20 @@ public struct CrossCameraIdentityPolicyReviewService: Sendable {
     public func undo(proposal: CrossCameraIdentityProposal, snapshot: CrossCameraIdentityReviewSnapshot) throws {
         try CameraFeaturePreferencesStore.withLockedSnapshot(from: preferencesURL) {
             try service.undo(proposal: proposal, snapshot: snapshot, preferences: $0.preferences)
+        }
+    }
+
+    public func prepareUndo(proposalID: UUID) throws -> CrossCameraIdentityPolicyPreparedUndo {
+        try CameraFeaturePreferencesStore.withLockedSnapshot(from: preferencesURL) { policy in
+            let prepared = try service.prepareUndo(proposalID: proposalID, preferences: policy.preferences)
+            return CrossCameraIdentityPolicyPreparedUndo(undo: prepared, policyRevision: policy.revision)
+        }
+    }
+
+    public func undo(_ prepared: CrossCameraIdentityPolicyPreparedUndo) throws {
+        try CameraFeaturePreferencesStore.withLockedSnapshot(from: preferencesURL) { policy in
+            guard policy.revision == prepared.policyRevision else { throw CameraFeatureStoreError.identityReviewStale }
+            try service.undo(prepared.undo, preferences: policy.preferences)
         }
     }
 }
@@ -270,6 +302,50 @@ public struct CrossCameraIdentityReviewService: Sendable {
             try features.undoIdentityProposal(
                 id: proposal.id, preferences: preferences,
                 expectedProposal: proposal, expectedGraph: snapshot.graph, expectedStore: snapshot.store
+            )
+        }
+    }
+
+    /// Freezes every tracking record involved in the sidecar's whole-graph rebuild.
+    public func prepareUndo(proposalID: UUID, preferences: CameraFeaturePreferences) throws
+        -> CrossCameraIdentityPreparedUndo {
+        try preferences.validate()
+        guard preferences.enabledFeatures.contains(.crossCameraIdentity) else {
+            throw CameraFeatureStoreError.featureDisabled(.crossCameraIdentity)
+        }
+        return try tracking.withIdentityReadReservation {
+            let current = try snapshot()
+            guard let proposal = current.accepted.first(where: { $0.id == proposalID }) else {
+                throw CameraFeatureStoreError.identityReviewStale
+            }
+            let ids = current.graphTrackIDs.union(current.assignments.keys)
+                .sorted { $0.uuidString < $1.uuidString }
+            var records: [UUID: TrackedObjectRecord] = [:]
+            for id in ids {
+                guard let record = try tracking.track(trackID: id) else {
+                    throw CameraFeatureStoreError.identityReviewStale
+                }
+                records[id] = record
+            }
+            return CrossCameraIdentityPreparedUndo(proposal: proposal, graphTrackIDs: ids,
+                snapshot: current, preferences: preferences, records: records)
+        }
+    }
+
+    /// A thrown error is not proof of rollback after an uncertain storage failure.
+    public func undo(_ prepared: CrossCameraIdentityPreparedUndo,
+                     preferences: CameraFeaturePreferences) throws {
+        guard preferences == prepared.preferences else { throw CameraFeatureStoreError.identityReviewStale }
+        try tracking.withIdentityReadReservation {
+            for id in prepared.graphTrackIDs {
+                guard try tracking.track(trackID: id) == prepared.records[id] else {
+                    throw CameraFeatureStoreError.identityReviewStale
+                }
+            }
+            try features.undoIdentityProposal(
+                id: prepared.proposal.id, preferences: preferences,
+                expectedProposal: prepared.proposal, expectedGraph: prepared.snapshot.graph,
+                expectedStore: prepared.snapshot.store
             )
         }
     }

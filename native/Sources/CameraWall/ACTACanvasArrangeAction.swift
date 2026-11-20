@@ -4,7 +4,10 @@ import Foundation
 struct ACTACanvasSetArrangeModeAction: ACTAPreparedConfirmationAction {
     struct ConfirmationSnapshot: Sendable {
         let lifecycleRevision: UUID
+        let stateRevision: UUID
         let previous: Bool
+        let parameters: [String: String]
+        let threadID: String
     }
     let id = "canvas.set_arrange_mode"
     let title = "Set camera arrange mode"
@@ -39,7 +42,9 @@ struct ACTACanvasSetArrangeModeAction: ACTAPreparedConfirmationAction {
                 throw ConfigurationError.invalid("UNAVAILABLE: No unique active security center.")
             }
             return ACTAPreparedConfirmation(
-                snapshot: ConfirmationSnapshot(lifecycleRevision: bridge.lifecycleRevision, previous: state.arrangeCameras),
+                snapshot: ConfirmationSnapshot(lifecycleRevision: bridge.lifecycleRevision,
+                                               stateRevision: state.reviewRevision, previous: state.arrangeCameras,
+                                               parameters: parameters, threadID: context.threadID),
                 reviewSummary: "Unique active security center: change arrange mode from \(state.arrangeCameras) to \(requested). Saved tile frames are not changed.")
         }
     }
@@ -49,15 +54,21 @@ struct ACTACanvasSetArrangeModeAction: ACTAPreparedConfirmationAction {
         let value = try enabled(parameters)
         return try await MainActor.run {
             try Task.checkCancellation()
+            bridge.clearArrangeWrite()
+            guard context.isConfirmed, parameters == snapshot.parameters, context.threadID == snapshot.threadID else {
+                return .failed(actionID: id, error: "CONFIRMATION_MISMATCH: Request or thread changed.")
+            }
             guard bridge.lifecycleRevision == snapshot.lifecycleRevision, let state = bridge.activeState,
-                  state.arrangeCameras == snapshot.previous else {
+                  state.reviewRevision == snapshot.stateRevision, state.arrangeCameras == snapshot.previous,
+                  let revision = state.commitReviewed(expectedRevision: snapshot.stateRevision, isValid: {
+                      !Task.isCancelled && bridge.lifecycleRevision == snapshot.lifecycleRevision && bridge.activeState === state
+                  }, update: { $0.arrangeCameras = value }),
+                  state.reviewRevision == revision, state.arrangeCameras == value,
+                  bridge.lifecycleRevision == snapshot.lifecycleRevision, bridge.activeState === state else {
+                try Task.checkCancellation()
                 return .failed(actionID: id, error: "STALE_REVIEW: Arrange mode or window changed.")
             }
-            state.arrangeCameras = value
             bridge.recordArrangeWrite(to: state)
-            guard state.arrangeCameras == value else {
-                return .failed(actionID: id, error: "Arrange mode state readback failed.")
-            }
             return ACTAActionResult(actionID: id, success: true,
                 summary: "Arrange toggle updated in this window; rendering and saved frames were not verified.")
         }
@@ -67,10 +78,18 @@ struct ACTACanvasSetArrangeModeAction: ACTAPreparedConfirmationAction {
         let value = try enabled(parameters)
         return try await MainActor.run {
             try Task.checkCancellation()
+            bridge.clearArrangeWrite()
             guard let state = bridge.activeState else {
                 return .failed(actionID: id, error: "UNAVAILABLE: No unique active security center.")
             }
-            state.arrangeCameras = value
+            let lifecycle = bridge.lifecycleRevision
+            guard state.commitReviewed(expectedRevision: state.reviewRevision, isValid: {
+                !Task.isCancelled && bridge.lifecycleRevision == lifecycle && bridge.activeState === state
+            }, update: { $0.arrangeCameras = value }) != nil else {
+                bridge.clearArrangeWrite()
+                try Task.checkCancellation()
+                return .failed(actionID: id, error: "STALE_REVIEW: Arrange mode or window changed.")
+            }
             bridge.recordArrangeWrite(to: state)
             guard state.arrangeCameras == value else {
                 return .failed(actionID: id, error: "Arrange mode state readback failed.")

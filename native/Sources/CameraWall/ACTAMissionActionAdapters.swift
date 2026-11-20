@@ -15,12 +15,12 @@ struct WallMissionAction: ACTAActionProtocol {
         switch kind {
         case .consult: return "Submit a local question (max 2000 characters) about saved mission run summaries. Persists the question; acceptance does not verify an answer. Read mission.history for the reply."
         case .list: return "Read saved local missions and execution state (idle/queued/running)."
-        case .create: return "Create a local camera mission, disabled by default. clock_times is comma-separated HH:mm; weekdays is comma-separated 0=Sunday...6=Saturday, empty means every day. Clock schedules require an explicit IANA time_zone."
-        case .edit: return "Edit one saved local mission by UUID; preserves history and recomputes next_run only when schedule changes. Can set enabled."
+        case .create: return "Create a local camera mission, disabled by default. clock_times is comma-separated HH:mm; weekdays is comma-separated 0=Monday...6=Sunday, empty means every day. Clock schedules require an explicit IANA time_zone."
+        case .edit: return "Edit one saved local mission by UUID; preserves history and recomputes next_run only when schedule changes. weekdays uses 0=Monday...6=Sunday, empty means every day. Can set enabled."
         case .delete: return "Delete a mission and its consultation, preserving recorded run summaries. Requires operator confirmation."
         case .history: return "Read saved mission runs and consultation only. Does not inspect fresh frames or run inference."
         case .clearConsult: return "Permanently clear one mission's consultation while preserving runs; requires confirmation."
-        case .run: return "Request a local mission run. A verified queued/running receipt is NOT a completed analysis; inspect mission.history for results. Queue is in memory and cleared by disconnect/restart."
+        case .run: return "Unavailable until mission execution is coordinated across application instances."
         }
     }
     var classification: ACTAActionClassification {
@@ -48,11 +48,37 @@ struct WallMissionAction: ACTAActionProtocol {
                 field("weekdays", "string"), field("time_zone", "string"), field("enabled", "boolean")]
         }
     }
+    func validate(parameters: [String: String]) throws {
+        switch kind {
+        case .history:
+            if let raw = parameters["limit"], Int(raw) == nil {
+                throw ConfigurationError.invalid("Limit must be an integer from 1 to 100.")
+            }
+        case .create, .edit:
+            if let raw = parameters["interval_seconds"], Int(raw) == nil {
+                throw ConfigurationError.invalid("Mission interval must be an integer.")
+            }
+            if let raw = parameters["schedule_kind"], CameraMissionScheduleKind(rawValue: raw) == nil {
+                throw ConfigurationError.invalid("Mission schedule must be interval or clock.")
+            }
+            if let raw = parameters["enabled"], !["true", "false", "1", "0"].contains(raw) {
+                throw ConfigurationError.invalid("Mission enabled must be a boolean.")
+            }
+        default: break
+        }
+    }
     func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
-        try await MainActor.run {
+        guard kind != .run else {
+            return .failed(actionID: id, error: "UNAVAILABLE: Mission execution is not coordinated across application instances.")
+        }
+        try validate(parameters: parameters)
+        return try await MainActor.run {
             try Task.checkCancellation()
             guard model.featurePreferences.enabledFeatures.contains(.scheduledMissions) else {
                 throw CameraFeatureStoreError.featureDisabled(.scheduledMissions)
+            }
+            if kind == .create || kind == .edit {
+                _ = try model.featurePolicySnapshotChecked()
             }
             let before = try model.missionDocumentChecked()
             func json<T: Encodable>(_ value: T) throws -> String {
@@ -124,12 +150,6 @@ struct WallMissionAction: ACTAActionProtocol {
                         throw ConfigurationError.invalid("Mission consultation request verification failed.")
                     }
                     return success("Local consultation request accepted; no answer has been verified.", "{\"question_id\":\(try json(questionID.uuidString)),\"accepted\":true,\"completion_verified\":false}")
-                case .run:
-                    let state = try model.requestMissionRunChecked(existing.id)
-                    guard ["queued", "running"].contains(state), model.missionExecutionStatus(existing.id) == state else {
-                        throw ConfigurationError.invalid("Mission run request verification failed.")
-                    }
-                    return success("Mission request accepted; analysis is not reported complete.", "{\"mission_id\":\(try json(existing.id.uuidString)),\"status\":\(try json(state)),\"completed\":false}")
                 case .delete, .clearConsult:
                     if kind == .delete { try model.deleteCameraMissionChecked(existing.id) }
                     else { try model.clearMissionConsult(missionID: existing.id) }
@@ -146,7 +166,8 @@ struct WallMissionAction: ACTAActionProtocol {
             guard kind == .create || kind == .edit else { return .unsupported(actionID: id) }
             guard kind != .edit || parameters.count > 1 else { throw ConfigurationError.invalid("Specify at least one mission change.") }
             let camera = parameters["camera_id"].flatMap(UUID.init(uuidString:)) ?? existing?.cameraID
-            guard let camera, model.config.cameras.contains(where: { $0.id == camera }),
+            let checkedConfiguration = try model.cameraConfigurationChecked()
+            guard let camera, checkedConfiguration.cameras.contains(where: { $0.id == camera }),
                   parameters["camera_id"] == nil || UUID(uuidString: parameters["camera_id"] ?? "") != nil else {
                 throw ConfigurationError.invalid("Camera UUID does not identify a configured camera.")
             }
@@ -182,7 +203,7 @@ struct WallMissionAction: ACTAActionProtocol {
             let mission = try CameraMission(id: existing?.id ?? UUID(), cameraID: camera,
                 name: parameters["name"] ?? existing?.name ?? "", brief: parameters["brief"] ?? existing?.brief ?? "",
                 intervalSeconds: interval, scheduleKind: schedule, clockTimes: clockTimes, weekdays: days,
-                timeZoneIdentifier: zone, enabled: parameters["enabled"].map { $0 == "true" } ?? existing?.enabled ?? false,
+                timeZoneIdentifier: zone, enabled: parameters["enabled"].map { $0 == "true" || $0 == "1" } ?? existing?.enabled ?? false,
                 createdAt: existing?.createdAt ?? context.now, scheduleReferenceDate: context.now,
                 nextRunAt: changed ? nil : existing?.nextRunAt, lastRunAt: existing?.lastRunAt, lastResult: existing?.lastResult)
             try model.saveCameraMission(mission)

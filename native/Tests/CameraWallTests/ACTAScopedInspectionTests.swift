@@ -68,6 +68,15 @@ private actor InspectionInferenceGate {
     }
 }
 
+private actor InspectionInferenceProbe {
+    private(set) var prompts: [String] = []
+    private(set) var images: [[Data]] = []
+    func record(prompt: String, images: [Data]) {
+        prompts.append(prompt)
+        self.images.append(images)
+    }
+}
+
 final class ACTAScopedInspectionTests: XCTestCase {
     func testInspectionOutputRejectsMalformedAndInvalidErrors() throws {
         for output in ["not json", "[]", #"{"error":42}"#,
@@ -97,6 +106,239 @@ final class ACTAScopedInspectionTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(".acta-scoped-inspection-\(UUID().uuidString)", isDirectory: true)
         return (root, try LocalTrackingStore(url: root.appendingPathComponent("tracking.sqlite")))
+    }
+
+    func testAmbiguousAndUnknownCamerasNeverBroadenLiveInspection() async throws {
+        let (root, store) = try store()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), transport: { _ in
+            XCTFail("Unexpected network request")
+            throw URLError(.notConnectedToInternet)
+        }, keyProvider: { _ in XCTFail("Unexpected Keychain access"); return nil })
+        let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store)
+        let audit = InspectionAuditProbe()
+        let (broker, key, scoped) = try await session(threadID: "test", input: .voice,
+                                                       scopes: ["live_look"], audit: audit)
+        let north = UUID(), south = UUID(), duplicate = UUID()
+        let directory = [north: "Front North", south: "Front South", duplicate: "Front North"]
+        let frames = [
+            ACTALiveCameraFrame(cameraID: north, cameraName: "Front North", jpegData: Data("north".utf8)),
+            ACTALiveCameraFrame(cameraID: south, cameraName: "Front South", jpegData: Data("south".utf8)),
+            ACTALiveCameraFrame(cameraID: duplicate, cameraName: "Front North", jpegData: Data("duplicate".utf8))
+        ]
+        for name in ["Front", "Front North"] {
+            let result = await coordinator.executeAgentTool(toolName: "live_look", arguments: ["camera": name],
+                threadID: "test", liveFrames: frames, cameraNames: directory, broker: broker, brokerSession: scoped)
+            XCTAssertTrue(result.outputJSON.contains("AMBIGUOUS_CAMERA:"))
+            XCTAssertTrue(result.attachedImages.isEmpty)
+            XCTAssertNil(result.savedClipID)
+        }
+        let unknown = await coordinator.executeAgentTool(toolName: "live_look", arguments: ["camera": "unknown"],
+            threadID: "test", liveFrames: frames, cameraNames: directory, broker: broker, brokerSession: scoped)
+        XCTAssertTrue(unknown.outputJSON.contains("CAMERA_NOT_FOUND:"))
+        XCTAssertTrue(unknown.attachedImages.isEmpty)
+        XCTAssertTrue(try store.loadACTAChatClips(threadID: "test").isEmpty)
+
+        let exact = await coordinator.executeAgentTool(toolName: "live_look",
+            arguments: ["camera": "Front South"], threadID: "test", liveFrames: frames,
+            cameraNames: directory, broker: broker, brokerSession: scoped)
+        XCTAssertEqual(exact.attachedImages, [Data("south".utf8)])
+        XCTAssertNotNil(exact.savedClipID)
+
+        let missing = UUID()
+        let misleading = ACTALiveCameraFrame(cameraID: north, cameraName: missing.uuidString,
+                                             jpegData: Data("wrong camera".utf8))
+        let byID = await coordinator.executeAgentTool(toolName: "live_look",
+            arguments: ["camera": missing.uuidString], threadID: "test", liveFrames: [misleading],
+            cameraNames: directory, broker: broker, brokerSession: scoped)
+        XCTAssertTrue(byID.attachedImages.isEmpty)
+        XCTAssertNil(byID.savedClipID)
+        XCTAssertEqual(try store.loadACTAChatClips(threadID: "test").count, 1)
+        XCTAssertEqual(audit.snapshot().filter { $0.phase == .result && $0.outcome == "failed" }.count, 3)
+        await broker.closeSession(scoped, operatorKey: key)
+    }
+
+    func testAmbiguousCameraRejectionRequiresResultAudit() async throws {
+        let (root, store) = try store()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let coordinator = ACTAAnalyticsCoordinator(
+            aiClient: ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun)), trackingStore: store)
+        let audit = FailingInspectionAudit(failureAt: 2)
+        let created = await ACTALocalActionBroker.make(actions: [], allowedActionIDs: [],
+            allowedInspectionIDs: ["live_look"], audit: { try audit.record($0) })
+        let host = try XCTUnwrap(created)
+        let issued = await host.broker.openSession(operatorKey: host.operatorKey, input: .chat,
+            threadID: "test", actionIDs: [], inspectionIDs: ["live_look"])
+        let scoped = try XCTUnwrap(issued)
+        let result = await coordinator.executeAgentTool(toolName: "live_look",
+            arguments: ["camera": "Front"], threadID: "test",
+            cameraNames: [UUID(): "Front North", UUID(): "Front South"],
+            broker: host.broker, brokerSession: scoped)
+        XCTAssertTrue(result.outputJSON.contains("AUDIT"))
+        XCTAssertFalse(result.outputJSON.contains("AMBIGUOUS_CAMERA"))
+        XCTAssertTrue(result.attachedImages.isEmpty)
+        XCTAssertNil(result.savedClipID)
+        await host.broker.closeSession(scoped, operatorKey: host.operatorKey)
+    }
+
+    func testHistoryRejectsAmbiguousNamesButAllowsExplicitAllCameras() throws {
+        let (root, store) = try store()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let first = UUID(), second = UUID()
+        let cameras = [first: "Front", second: "Front"]
+        XCTAssertThrowsError(try UnifiedHistoryEvidence.load(store: store,
+            question: "What happened at Front?", prior: [], cameras: cameras, now: Date())) {
+            XCTAssertTrue($0.localizedDescription.contains("AMBIGUOUS_CAMERA"))
+        }
+        let all = try UnifiedHistoryEvidence.load(store: store,
+            question: "What happened at Front across all cameras?", prior: [], cameras: cameras, now: Date())
+        XCTAssertNil(all.cameraID)
+        let unique = try UnifiedHistoryEvidence.load(store: store,
+            question: "What happened at Front?", prior: [], cameras: [first: "Front"], now: Date())
+        XCTAssertEqual(unique.cameraID, first)
+        let byID = try UnifiedHistoryEvidence.load(store: store,
+            question: "What happened at Front (\(first.uuidString))?", prior: [], cameras: cameras, now: Date())
+        XCTAssertEqual(byID.cameraID, first)
+    }
+
+    func testHistoryResolvesExplicitPartialCameraNamesWithoutBroadening() throws {
+        let (root, store) = try store()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let north = UUID(), south = UUID()
+        let cameras = [north: "Front North", south: "Front South"]
+        func scope(_ question: String) throws -> UUID? {
+            try UnifiedHistoryEvidence.load(store: store, question: question,
+                                            prior: [], cameras: cameras, now: Date()).cameraID
+        }
+        XCTAssertEqual(try scope("Что было на камере North вчера?"), north)
+        XCTAssertEqual(try scope("What happened at camera South?"), south)
+        for question in ["Что было на камере Front?", "What happened at camera unknown?",
+                         "Что было на камере?", "What happened at camera \(UUID().uuidString)?",
+                         "What happened at camera unknown near Front South?",
+                         "What happened at camera out?",
+                         "Compare camera North and camera South.",
+                         "Show not all cameras.",
+                         "Do not show all cameras.",
+                         "Show all cameras except Front South.",
+                         "Show all cameras apart from Front South.",
+                         "Show no cameras.",
+                         "Покажи не все камеры.",
+                         "Не показывай все камеры.",
+                         "Покажи все камеры кроме Front South."] {
+            XCTAssertThrowsError(try scope(question), question)
+        }
+        XCTAssertNil(try scope("What happened across all cameras?"))
+        XCTAssertNil(try scope("Покажи все камеры"))
+        XCTAssertNil(try scope("Show all the cameras"))
+        XCTAssertFalse(UnifiedHistoryEvidence.requestsAllCameras("Show small cameras"))
+        XCTAssertNil(try scope("What happened yesterday?"))
+    }
+
+    func testAmbiguousLivePrefetchDoesNotAttachImages() async throws {
+        let (root, store) = try store()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let probe = InspectionInferenceProbe()
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .mlxInProcess), transport: { _ in
+            XCTFail("Unexpected network request")
+            throw URLError(.notConnectedToInternet)
+        }, keyProvider: { _ in XCTFail("Unexpected Keychain access"); return nil },
+            localAgentInference: { prompt, images in
+                await probe.record(prompt: prompt, images: images)
+                return #"{"answerMarkdown":"Please clarify the camera.","confidence":0.5}"#
+            })
+        let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store)
+        let audit = InspectionAuditProbe()
+        let scopes: Set<String> = [ACTAAnalyticsCoordinator.historyBootstrapInspection,
+            ACTAAnalyticsCoordinator.historyOverviewInspection, "live_look"]
+        let (broker, key, scoped) = try await session(threadID: "test", input: .chat,
+                                                       scopes: scopes, audit: audit)
+        let frames = [
+            ACTALiveCameraFrame(cameraID: UUID(), cameraName: "Front", jpegData: Data("first".utf8)),
+            ACTALiveCameraFrame(cameraID: UUID(), cameraName: "Front", jpegData: Data("second".utf8))
+        ]
+        let answer = await coordinator.askACTAChatAgent(question: "What is live at Front?", threadID: "test",
+            liveFrames: frames, maxSteps: 1, broker: broker, brokerSession: scoped)
+        let prompts = await probe.prompts
+        let images = await probe.images
+        XCTAssertTrue(answer.answerMarkdown.contains("AMBIGUOUS_CAMERA"))
+        XCTAssertTrue(prompts.isEmpty)
+        XCTAssertTrue(images.allSatisfy(\.isEmpty))
+        XCTAssertTrue(try store.loadACTAChatClips(threadID: "test").isEmpty)
+
+        let first = try XCTUnwrap(frames[0].cameraID)
+        let second = try XCTUnwrap(frames[1].cameraID)
+        let directory = [first: "Front", second: "Front"]
+        _ = await coordinator.askACTAChatAgent(question: "What is live at Front (\(first.uuidString))?",
+            threadID: "test", liveFrames: frames, cameraNames: directory,
+            maxSteps: 1, broker: broker, brokerSession: scoped)
+        let idImages = await probe.images
+        XCTAssertEqual(idImages.last, [frames[0].jpegData])
+
+        _ = await coordinator.askACTAChatAgent(question: "What is live at Front across all cameras?",
+            threadID: "test", liveFrames: frames, cameraNames: directory,
+            maxSteps: 1, broker: broker, brokerSession: scoped)
+        let allImages = await probe.images
+        XCTAssertEqual(allImages.last, frames.map(\.jpegData))
+        await broker.closeSession(scoped, operatorKey: key)
+    }
+
+    func testAmbiguousHistoryReportsAuditedErrorBeforeInference() async throws {
+        let (root, store) = try store()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .mlxInProcess), transport: { _ in
+            XCTFail("Unexpected network request")
+            throw URLError(.notConnectedToInternet)
+        }, keyProvider: { _ in XCTFail("Unexpected Keychain access"); return nil },
+            localAgentInference: { _, _ in
+                XCTFail("Ambiguous history must not reach inference")
+                throw URLError(.cancelled)
+            })
+        let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store)
+        let audit = InspectionAuditProbe()
+        let scopes: Set<String> = [ACTAAnalyticsCoordinator.historyBootstrapInspection,
+                                   ACTAAnalyticsCoordinator.historyOverviewInspection]
+        let (broker, key, scoped) = try await session(threadID: "test", input: .chat,
+                                                       scopes: scopes, audit: audit)
+        let answer = await coordinator.askACTAChatAgent(question: "What happened at Front?", threadID: "test",
+            cameraNames: [UUID(): "Front", UUID(): "Front"], broker: broker, brokerSession: scoped)
+        XCTAssertTrue(answer.answerMarkdown.contains("AMBIGUOUS_CAMERA"))
+        let restricted = await coordinator.askACTAChatAgent(
+            question: "Show all cameras except Front", threadID: "test",
+            cameraNames: [UUID(): "Front"], broker: broker, brokerSession: scoped)
+        XCTAssertTrue(restricted.answerMarkdown.contains("CAMERA_NOT_FOUND"))
+        let events = audit.snapshot().filter { $0.actionID == "inspection.history.overview" }
+        XCTAssertEqual(events.filter { $0.phase == .request }.count, 2)
+        XCTAssertEqual(events.filter { $0.phase == .result && $0.outcome == "failed" }.count, 2)
+        await broker.closeSession(scoped, operatorKey: key)
+    }
+
+    func testLivePrefetchUsesPartialNameFromFrameDirectory() async throws {
+        let (root, store) = try store()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let probe = InspectionInferenceProbe()
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .mlxInProcess), transport: { _ in
+            XCTFail("Unexpected network request")
+            throw URLError(.notConnectedToInternet)
+        }, keyProvider: { _ in XCTFail("Unexpected Keychain access"); return nil },
+            localAgentInference: { prompt, images in
+                await probe.record(prompt: prompt, images: images)
+                return #"{"answerMarkdown":"Synthetic answer","confidence":0.5}"#
+            })
+        let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store)
+        let audit = InspectionAuditProbe()
+        let scopes: Set<String> = [ACTAAnalyticsCoordinator.historyBootstrapInspection,
+                                   ACTAAnalyticsCoordinator.historyOverviewInspection, "live_look"]
+        let (broker, key, scoped) = try await session(threadID: "test", input: .chat,
+                                                       scopes: scopes, audit: audit)
+        let frames = [
+            ACTALiveCameraFrame(cameraID: UUID(), cameraName: "Front North", jpegData: Data("north".utf8)),
+            ACTALiveCameraFrame(cameraID: UUID(), cameraName: "Front South", jpegData: Data("south".utf8))
+        ]
+        _ = await coordinator.askACTAChatAgent(question: "What is live on camera North?", threadID: "test",
+            liveFrames: frames, maxSteps: 1, broker: broker, brokerSession: scoped)
+        let images = await probe.images
+        XCTAssertEqual(images.last, [frames[0].jpegData])
+        await broker.closeSession(scoped, operatorKey: key)
     }
 
     func testDirectModelAndVoiceInspectionsAreScopedAndAuditNoArguments() async throws {

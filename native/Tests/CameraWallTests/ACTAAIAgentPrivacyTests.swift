@@ -20,6 +20,22 @@ private struct PrivacyStructuredResponse: Codable, Sendable {
     let value: String
 }
 
+private actor SuspendedLocalInference {
+    private var continuation: CheckedContinuation<String, Never>?
+
+    func run(started: XCTestExpectation) async -> String {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            started.fulfill()
+        }
+    }
+
+    func finish() {
+        continuation?.resume(returning: #"{"answerMarkdown":"late result"}"#)
+        continuation = nil
+    }
+}
+
 private final class AgentTraceProbe: @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [String] = []
@@ -35,6 +51,29 @@ final class ACTAAIAgentPrivacyTests: XCTestCase {
         ], previousResponseID: "old-cloud-chain", tools: [
             ACTAAgentToolSpec(name: "inspect", description: "Inspect", parametersSchemaJSON: "{}")
         ])
+    }
+
+    func testCancelledLocalInferenceCannotReturnLateSuccess() async throws {
+        let inference = SuspendedLocalInference()
+        let started = expectation(description: "inference started")
+        let client = ACTAAIClient(
+            config: ACTAAIConfiguration(mode: .mlxInProcess),
+            transport: { _ in XCTFail("Unexpected network request"); throw URLError(.notConnectedToInternet) },
+            keyProvider: { _ in XCTFail("Unexpected Keychain access"); return nil },
+            localAgentInference: { _, _ in await inference.run(started: started) }
+        )
+        let request = request()
+        let task = Task { try await client.runAgentStep(request: request) }
+        await fulfillment(of: [started], timeout: 1)
+        task.cancel()
+        await inference.finish()
+        do {
+            _ = try await task.value
+            XCTFail("Cancelled inference returned a result")
+        } catch is CancellationError {
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
     }
 
     func testOnlyExplicitInProcessModeRunsAndReceivesFullContext() async throws {
@@ -168,5 +207,54 @@ final class ACTAAIAgentPrivacyTests: XCTestCase {
         XCTAssertFalse(entries.contains { $0.contains(secret) })
         XCTAssertFalse(entries.contains { $0.contains("private question") })
         XCTAssertFalse(entries.contains { $0.contains("private tool result") })
+    }
+
+    func testCancelledOrRevokedStreamingInferenceDropsLatePreviewChunks() async throws {
+        final class PreviewCollector: @unchecked Sendable {
+            private let lock = NSLock()
+            private var items: [(String, Int)] = []
+            private var authorized = true
+            func append(_ text: String, _ rev: Int) {
+                lock.lock(); defer { lock.unlock() }; items.append((text, rev))
+            }
+            func snapshot() -> [(String, Int)] {
+                lock.lock(); defer { lock.unlock() }; return items
+            }
+            func isAuthorized() -> Bool {
+                lock.lock(); defer { lock.unlock() }; return authorized
+            }
+            func revoke() {
+                lock.lock(); defer { lock.unlock() }; authorized = false
+            }
+        }
+
+        let collector = PreviewCollector()
+        let trace = AgentTraceProbe()
+        let client = ACTAAIClient(
+            config: ACTAAIConfiguration(mode: .mlxInProcess),
+            transport: { _ in XCTFail("Unexpected network request"); throw URLError(.notConnectedToInternet) },
+            keyProvider: { _ in XCTFail("Unexpected Keychain access"); return nil },
+            agentTrace: { trace.record($0) },
+            localAgentStreamInference: { _, _, onChunk in
+                onChunk?(#"{"answerMarkdown":"Visible draft"#)
+                collector.revoke()
+                onChunk?(#" should not leak after revocation"}"#)
+                return #"{"answerMarkdown":"Visible draft should not leak after revocation"}"#
+            }
+        )
+        do {
+            _ = try await client.runAgentStep(
+                request: request(),
+                authorization: { collector.isAuthorized() },
+                onAnswerPreview: { text, revision in collector.append(text, revision) }
+            )
+            XCTFail("Revoked streaming inference must throw")
+        } catch {
+            XCTAssertFalse(error is ACTAAgentError)
+        }
+        let recordedPreviews = collector.snapshot()
+        XCTAssertEqual(recordedPreviews.map(\.0), ["Visible draft"])
+        XCTAssertFalse(recordedPreviews.contains { $0.0.contains("should not leak") })
+        XCTAssertFalse(trace.read().contains { $0.hasPrefix("RESPONSE chars=") })
     }
 }

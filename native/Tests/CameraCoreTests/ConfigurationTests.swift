@@ -41,9 +41,9 @@ final class ConfigurationTests: XCTestCase {
         config.detectionThreshold = 0.7
         config.detectionFPS = 4
         config.cameras = [Camera(name: "Saved camera", substream: "rtsp://192.0.2.1/live", yoloEnabled: true)]
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let url = directory.appendingPathComponent("cameras.json")
+        let directory = try IsolatedStoreTestDirectory()
+        defer { try? directory.remove() }
+        let url = directory.url.appendingPathComponent("cameras.json")
         try ConfigurationStore.save(config, to: url)
         XCTAssertEqual(try ConfigurationStore.load(from: url), config)
         let permissions = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber
@@ -170,8 +170,9 @@ final class ConfigurationTests: XCTestCase {
                    substream: "rtsp://camera\($0).local/live",
                    yoloEnabled: $0.isMultiple(of: 2), aiChatEnabled: !$0.isMultiple(of: 3))
         }
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("cameras.json")
-        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let directory = try IsolatedStoreTestDirectory()
+        defer { try? directory.remove() }
+        let url = directory.url.appendingPathComponent("cameras.json")
         try ConfigurationStore.save(config, to: url)
         XCTAssertEqual(try ConfigurationStore.load(from: url), config)
         config.cameras.append(config.cameras[0])

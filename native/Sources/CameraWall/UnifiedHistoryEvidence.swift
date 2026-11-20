@@ -1,6 +1,20 @@
 import Foundation
 import CameraCore
 
+enum ACTACameraSelectionError: LocalizedError {
+    case ambiguous
+    case unresolved
+
+    var errorDescription: String? {
+        switch self {
+        case .ambiguous:
+            return "AMBIGUOUS_CAMERA: Multiple cameras match; specify a unique camera ID or ask for all cameras."
+        case .unresolved:
+            return "CAMERA_NOT_FOUND: Specify a unique camera name or ID, or ask for all cameras."
+        }
+    }
+}
+
 /// Bounded evidence chosen across cameras, with aggregate coverage computed from the full store.
 struct UnifiedHistoryEvidence {
     let json: String
@@ -25,9 +39,7 @@ struct UnifiedHistoryEvidence {
                 if let id = row["camera_id"].flatMap(UUID.init(uuidString:)), let name = row["camera_name"] { directory[id] = name }
             }
         }
-        let matched = directory.filter { question.localizedCaseInsensitiveContains($0.value) && !$0.value.isEmpty }
-        let allCameras = question.localizedCaseInsensitiveContains("всех камер") || question.localizedCaseInsensitiveContains("all cameras")
-        let cameraID = !allCameras && matched.count == 1 ? matched.first?.key : nil
+        let cameraID = try resolveCamera(question: question, directory: directory)
         let cameraFilter = cameraID.map { " AND camera_id = '\($0.uuidString)'" } ?? ""
         var coverage: [[String: String]] = []
         for (table, time, kind) in [("tracked_objects", "last_seen", "track"), ("automatic_camera_scans", "observed_at", "scan")] {
@@ -81,6 +93,77 @@ struct UnifiedHistoryEvidence {
             "limitations": "Counts cover the requested window; detail records are a bounded sample. A scan is a saved text observation, not a video recording. No claim of continuous video coverage."]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
         return Self(json: String(decoding: data, as: UTF8.self), since: scope?.start, until: scope?.end, cameraID: cameraID)
+    }
+
+    static func resolveCamera(question: String, directory: [UUID: String]) throws -> UUID? {
+        let matched = directory.filter { question.localizedCaseInsensitiveContains($0.value) && !$0.value.isEmpty }
+        let allCameras = requestsAllCameras(question)
+        if excludesCameras(question) || (allCameras && restrictsAllCameras(question)) {
+            throw ACTACameraSelectionError.unresolved
+        }
+        let requestedIDs = Set(question.split { !$0.isHexDigit && $0 != "-" }
+            .compactMap { UUID(uuidString: String($0)) }.filter { directory[$0] != nil })
+        if !allCameras && (requestedIDs.count > 1 || (requestedIDs.isEmpty && matched.count > 1)) {
+            throw ACTACameraSelectionError.ambiguous
+        }
+        if allCameras { return nil }
+        let words = question.lowercased().split { !$0.isLetter && !$0.isNumber && $0 != "-" }
+        let markers: Set<String> = ["camera", "камере", "камера", "камеру", "камеры", "камерой", "камер"]
+        let markerIndices = words.indices.filter { markers.contains(String(words[$0])) }
+        guard !markerIndices.isEmpty else { return requestedIDs.first ?? matched.first?.key }
+        var selected: Set<UUID> = []
+        for marker in markerIndices {
+            let nameIndex = words.index(after: marker)
+            guard nameIndex < words.endIndex else { throw ACTACameraSelectionError.unresolved }
+            let name = String(words[nameIndex])
+            if let uuid = UUID(uuidString: name) {
+                guard directory[uuid] != nil else { throw ACTACameraSelectionError.unresolved }
+                selected.insert(uuid)
+                continue
+            }
+            let candidates = directory.filter { _, value in
+                value.lowercased().split { !$0.isLetter && !$0.isNumber }
+                    .contains { $0 == name || (name.count >= 3 && $0.hasPrefix(name)) }
+            }
+            let exact = candidates.filter { matched[$0.key] != nil }
+            if let id = requestedIDs.first, candidates[id] != nil {
+                selected.insert(id)
+            } else if exact.count == 1, let id = exact.first?.key {
+                selected.insert(id)
+            } else {
+                guard name.count >= 3 else { throw ACTACameraSelectionError.unresolved }
+                if candidates.count > 1 { throw ACTACameraSelectionError.ambiguous }
+                guard let id = candidates.first?.key else { throw ACTACameraSelectionError.unresolved }
+                selected.insert(id)
+            }
+        }
+        if let requested = requestedIDs.first { selected.insert(requested) }
+        if selected.count > 1 { throw ACTACameraSelectionError.ambiguous }
+        return selected.first
+    }
+
+    static func requestsAllCameras(_ question: String) -> Bool {
+        let text = cameraWords(question)
+        return ["всех камер", "все камеры", "всем камерам", "all cameras", "all the cameras"]
+            .contains { text.contains(" \($0) ") }
+    }
+
+    private static func restrictsAllCameras(_ question: String) -> Bool {
+        let text = cameraWords(question)
+        return ["not", "не", "except", "excluding", "without", "кроме", "исключая", "без"]
+                .contains { text.contains(" \($0) ") }
+            || ["apart from", "other than"].contains { text.contains(" \($0) ") }
+    }
+
+    private static func excludesCameras(_ question: String) -> Bool {
+        let text = cameraWords(question)
+        return ["no camera", "no cameras", "никакие камеры", "ни одной камеры"]
+            .contains { text.contains(" \($0) ") }
+    }
+
+    private static func cameraWords(_ question: String) -> String {
+        " " + question.lowercased().split { !$0.isLetter && !$0.isNumber }
+            .joined(separator: " ") + " "
     }
 
     private static func balanced<T>(_ rows: [T], camera: (T) -> UUID, limit: Int) -> [T] {

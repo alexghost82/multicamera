@@ -4,6 +4,9 @@ import XCTest
 final class LocalShowcaseServerTests: XCTestCase {
     @MainActor
     func testLoopbackServerRequiresTokenAndServesOnlyLocalReadOnlyRoutes() async throws {
+        guard ProcessInfo.processInfo.environment["CAMERAWALL_RUN_SHOWCASE_NETWORK_INTEGRATION"] == "1" else {
+            throw XCTSkip("Set CAMERAWALL_RUN_SHOWCASE_NETWORK_INTEGRATION=1 to run the loopback server integration test.")
+        }
         let cameraID = UUID()
         let expectedSnapshot = Data("local frame".utf8)
         let server = LocalShowcaseServer(

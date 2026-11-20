@@ -1,10 +1,43 @@
 import CameraCore
+import Combine
 import Foundation
 import XCTest
 @testable import CameraWall
 
 @MainActor
 final class ACTAAnalysisSectionActionTests: XCTestCase {
+    func testGUISectionPublicationRetainsWillSet() {
+        let state = ACTACanvasFilterState()
+        var observed: [String] = []
+        let changes = state.objectWillChange.sink { observed.append("will:\(state.analysisSection.rawValue)") }
+        state.analysisSection = .alerts
+        XCTAssertEqual(observed, ["will:\(VLMPanelSection.ask.rawValue)"])
+        XCTAssertEqual(state.analysisSection, .alerts)
+        withExtendedLifetime(changes) {}
+    }
+
+    func testReviewedChangeRejectsDictationStartedAfterReview() async throws {
+        let bridge = ACTACanvasFilterBridge(voiceInputAllowed: true)
+        var permission: CheckedContinuation<Bool, Never>?
+        let voice = LocalVoiceInput(speechPermission: { await withCheckedContinuation { permission = $0 } },
+                                    microphonePermission: { false },
+                                    makeCapture: { _, _ in XCTFail("Unexpected capture"); throw CancellationError() })
+        let state = ACTACanvasFilterState(analysisVoiceInput: voice)
+        bridge.attach(state)
+        let action = ACTAAnalysisSetSectionAction(bridge: bridge)
+        let context = ACTAActionContext(isConfirmed: true)
+        let parameters = ["section": "schedule"]
+        let review = try await action.prepareConfirmation(parameters: parameters, context: context)
+        let pending = try XCTUnwrap(voice.start(localeIdentifier: "en"))
+        let result = try await action.executeConfirmed(parameters: parameters, context: context, snapshot: review.snapshot)
+        XCTAssertFalse(result.success)
+        XCTAssertEqual(state.analysisSection, .ask)
+        XCTAssertTrue(state.analysisScheduleRefreshOnAppear)
+        voice.stop()
+        permission?.resume(returning: false)
+        await pending.value
+    }
+
     func testTypedActionSharesWindowStateWithoutChangingOtherState() async throws {
         let bridge = ACTACanvasFilterBridge()
         let state = ACTACanvasFilterState()
@@ -100,7 +133,7 @@ final class ACTAAnalysisSectionActionTests: XCTestCase {
     }
 
     func testDictationGuardAndScheduleRefreshPolicy() async throws {
-        let bridge = ACTACanvasFilterBridge()
+        let bridge = ACTACanvasFilterBridge(voiceInputAllowed: true)
         var permission: CheckedContinuation<Bool, Never>?
         let voice = LocalVoiceInput(speechPermission: { await withCheckedContinuation { permission = $0 } }, microphonePermission: { false },
                                     makeCapture: { _, _ in XCTFail("Unexpected capture"); throw CancellationError() })
@@ -140,5 +173,94 @@ final class ACTAAnalysisSectionActionTests: XCTestCase {
         }
         XCTAssertEqual(state.analysisSection, .ask)
         XCTAssertTrue(state.analysisScheduleRefreshOnAppear)
+    }
+
+    func testReentrantGUIEditRejectsReviewedChangeWithoutPartialScheduleWrite() async throws {
+        let bridge = ACTACanvasFilterBridge(), state = ACTACanvasFilterState()
+        bridge.attach(state)
+        let action = ACTAAnalysisSetSectionAction(bridge: bridge), context = ACTAActionContext(isConfirmed: true)
+        let parameters = ["section": "schedule"]
+        let review = try await action.prepareConfirmation(parameters: parameters, context: context)
+        var handled = false
+        let changes = state.objectWillChange.sink {
+            guard !handled else { return }
+            handled = true
+            state.selectAnalysisSectionFromGUI(.alerts)
+        }
+        let result = try await action.executeConfirmed(parameters: parameters, context: context, snapshot: review.snapshot)
+        XCTAssertFalse(result.success)
+        XCTAssertEqual(state.analysisSection, .alerts)
+        XCTAssertTrue(state.analysisScheduleRefreshOnAppear)
+        let verified = try await action.verify(parameters: parameters, context: context)
+        XCTAssertFalse(verified)
+        withExtendedLifetime(changes) {}
+    }
+
+    func testConfirmedScheduleChangeVerifiesBothWindowFields() async throws {
+        let bridge = ACTACanvasFilterBridge(), state = ACTACanvasFilterState()
+        bridge.attach(state)
+        let action = ACTAAnalysisSetSectionAction(bridge: bridge), context = ACTAActionContext(isConfirmed: true)
+        let parameters = ["section": "schedule"]
+        let review = try await action.prepareConfirmation(parameters: parameters, context: context)
+        let result = try await action.executeConfirmed(parameters: parameters, context: context, snapshot: review.snapshot)
+        XCTAssertTrue(result.success)
+        XCTAssertEqual(state.analysisSection, .schedule)
+        XCTAssertFalse(state.analysisScheduleRefreshOnAppear)
+        let verified = try await action.verify(parameters: parameters, context: context)
+        XCTAssertTrue(verified)
+        state.analysisScheduleRefreshOnAppear = true
+        let changed = try await action.verify(parameters: parameters, context: context)
+        XCTAssertFalse(changed)
+    }
+
+    func testReentrantDetachAndVoiceAttemptABARejectReviewedChange() async throws {
+        let voice = LocalVoiceInput(speechPermission: { false }, microphonePermission: { false },
+                                    makeCapture: { _, _ in XCTFail("Unexpected capture"); throw CancellationError() })
+        let bridge = ACTACanvasFilterBridge(voiceInputAllowed: true), state = ACTACanvasFilterState(analysisVoiceInput: voice)
+        bridge.attach(state)
+        let action = ACTAAnalysisSetSectionAction(bridge: bridge), context = ACTAActionContext(isConfirmed: true)
+        let parameters = ["section": "schedule"]
+
+        let first = try await action.prepareConfirmation(parameters: parameters, context: context)
+        var detached = false
+        let changes = state.objectWillChange.sink {
+            guard !detached else { return }
+            detached = true
+            bridge.detach(state)
+            bridge.attach(state)
+        }
+        let detachedResult = try await action.executeConfirmed(parameters: parameters, context: context, snapshot: first.snapshot)
+        XCTAssertFalse(detachedResult.success)
+        XCTAssertEqual(state.analysisSection, .ask)
+        XCTAssertTrue(state.analysisScheduleRefreshOnAppear)
+        changes.cancel()
+
+        let second = try await action.prepareConfirmation(parameters: parameters, context: context)
+        var task: Task<Void, Never>?
+        var started = false
+        let voiceChange = state.objectWillChange.sink {
+            guard !started else { return }
+            started = true
+            task = voice.start(localeIdentifier: "en")
+            voice.stop()
+        }
+        let voiceResult = try await action.executeConfirmed(parameters: parameters, context: context, snapshot: second.snapshot)
+        XCTAssertFalse(voiceResult.success)
+        XCTAssertEqual(state.analysisSection, .ask)
+        XCTAssertTrue(state.analysisScheduleRefreshOnAppear)
+        await task?.value
+        withExtendedLifetime(voiceChange) {}
+    }
+
+    func testVerificationRejectsSectionABAAfterSuccessfulCommit() async throws {
+        let bridge = ACTACanvasFilterBridge(), state = ACTACanvasFilterState()
+        bridge.attach(state)
+        let action = ACTAAnalysisSetSectionAction(bridge: bridge), context = ACTAActionContext()
+        let result = try await action.execute(parameters: ["section": "alerts"], context: context)
+        XCTAssertTrue(result.success)
+        state.selectAnalysisSectionFromGUI(.schedule)
+        state.selectAnalysisSectionFromGUI(.alerts)
+        let verified = try await action.verify(parameters: ["section": "alerts"], context: context)
+        XCTAssertFalse(verified)
     }
 }

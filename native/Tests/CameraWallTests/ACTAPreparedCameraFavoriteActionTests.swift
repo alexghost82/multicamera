@@ -13,6 +13,7 @@ private final class FavoriteReviewFake: ACTAFavoriteReviewDomain {
     var afterWrite: (() -> Void)?
     var failCapture = false
     var failCommit = false
+    var failAfterWrite = false
     struct Failure: Error {}
 
     init(_ cameras: [(UUID, String)], preference: String? = nil) {
@@ -42,6 +43,7 @@ private final class FavoriteReviewFake: ACTAFavoriteReviewDomain {
         preference = replacement
         writes += 1
         changed()
+        if failAfterWrite { throw Failure() }
         let committed = try capture(request: request)
         afterWrite?()
         return committed
@@ -124,6 +126,41 @@ final class ACTAPreparedCameraFavoriteActionTests: XCTestCase {
             XCTAssertFalse(result.success)
             XCTAssertEqual(domain.writes, 0)
         }
+    }
+
+    func testConcurrentBrokerApprovalsOfSameObservationNeverLoseAnotherFavorite() async throws {
+        let first = UUID(), second = UUID()
+        let domain = FavoriteReviewFake([(first, "First"), (second, "Second")])
+        let action = ACTAPreparedCameraFavoriteAction(domain: domain)
+        let created = await ACTALocalActionBroker.make(
+            actions: [action], allowedActionIDs: [action.id], audit: { _ in })
+        let host = try XCTUnwrap(created)
+        let firstOpened = await host.broker.openSession(operatorKey: host.operatorKey, input: .chat,
+            threadID: "first", actionIDs: [action.id])
+        let secondOpened = await host.broker.openSession(operatorKey: host.operatorKey, input: .chat,
+            threadID: "second", actionIDs: [action.id])
+        let firstSession = try XCTUnwrap(firstOpened)
+        let secondSession = try XCTUnwrap(secondOpened)
+        for (session, name) in [(firstSession, "First"), (secondSession, "Second")] {
+            let pending = await host.broker.request(session: session, actionID: action.id,
+                argumentsJSON: #"{"camera_id":"\#(name)","favorite":true}"#)
+            XCTAssertTrue(pending.requiresOperatorConfirmation)
+        }
+        let firstReviews = await host.broker.reviews(operatorKey: host.operatorKey, session: firstSession)
+        let secondReviews = await host.broker.reviews(operatorKey: host.operatorKey, session: secondSession)
+        let firstReview = try XCTUnwrap(firstReviews.first)
+        let secondReview = try XCTUnwrap(secondReviews.first)
+        async let firstResult = host.broker.resolve(operatorKey: host.operatorKey, session: firstSession,
+                                                     reviewed: firstReview, approved: true)
+        async let secondResult = host.broker.resolve(operatorKey: host.operatorKey, session: secondSession,
+                                                      reviewed: secondReview, approved: true)
+        let results = await [firstResult, secondResult]
+        XCTAssertEqual(results.filter(\.success).count, 1)
+        XCTAssertEqual(domain.writes, 1)
+        XCTAssertTrue([ACTACameraFavorites.encode([first]), ACTACameraFavorites.encode([second])]
+            .contains(domain.preference ?? ""))
+        await host.broker.closeSession(firstSession, operatorKey: host.operatorKey)
+        await host.broker.closeSession(secondSession, operatorKey: host.operatorKey)
     }
 
     func testMismatchMalformedInputAndMissingOrAmbiguousCameraNeverWrite() async throws {
@@ -238,5 +275,22 @@ final class ACTAPreparedCameraFavoriteActionTests: XCTestCase {
         XCTAssertTrue(verified)
         let replay = try await action.verify(parameters: params, context: context)
         XCTAssertFalse(replay)
+    }
+
+    func testCommitErrorAfterWriteReportsUnknownOutcomeAndCannotVerify() async throws {
+        let camera = UUID()
+        let domain = FavoriteReviewFake([(camera, "Entrance")])
+        let action = ACTAPreparedCameraFavoriteAction(domain: domain)
+        let context = ACTAActionContext(threadID: "test")
+        let params = ["camera_id": "Entrance", "favorite": "true"]
+        let prepared = try await action.prepareConfirmation(parameters: params, context: context)
+        domain.failAfterWrite = true
+        let result = try await action.executeConfirmed(parameters: params, context: context, snapshot: prepared.snapshot)
+        XCTAssertFalse(result.success)
+        XCTAssertTrue(result.error?.contains("outcome may be unknown") == true)
+        XCTAssertEqual(domain.preference, ACTACameraFavorites.encode([camera]))
+        XCTAssertEqual(domain.writes, 1)
+        let verified = try await action.verify(parameters: params, context: context)
+        XCTAssertFalse(verified)
     }
 }

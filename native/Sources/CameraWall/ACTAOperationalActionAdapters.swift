@@ -254,16 +254,12 @@ struct WallNarrativeAction: ACTAActionProtocol {
         }
     }
     func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
-        try await MainActor.run {
+        guard !pin else { return .unsupported(actionID: id) }
+        return try await MainActor.run {
             try Task.checkCancellation()
             let chapterID = parameters["chapter_id"] ?? ""
-            let saved: ACTANarrativeChapterRecord
-            if pin {
-                saved = try model.setACTANarrativePinChecked(chapterID: chapterID, pinned: parameters["pinned"] == "true")
-            } else {
-                try validate(parameters: parameters)
-                saved = try model.setACTANarrativeTextChecked(chapterID: chapterID, text: parameters["text"])
-            }
+            try validate(parameters: parameters)
+            let saved = try model.setACTANarrativeTextChecked(chapterID: chapterID, text: parameters["text"])
             return ACTAActionResult(actionID: id, success: true, summary: "Reviewed narrative change saved and verified.",
                 outputJSON: String(decoding: try JSONEncoder().encode(saved), as: UTF8.self))
         }

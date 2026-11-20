@@ -3,6 +3,24 @@ import Foundation
 import XCTest
 @testable import CameraWall
 
+private actor ScopedAlertScript {
+    private(set) var prompts: [String] = []
+    func reply(_ prompt: String) -> String {
+        prompts.append(prompt)
+        if prompts.count == 1 {
+            return #"{"tool_calls":[{"name":"acta__alert__vlm_list","arguments":{"unacknowledged_only":true,"limit":1}}]}"#
+        }
+        return #"{"answerMarkdown":"Reviewed alerts.","confidence":0.5}"#
+    }
+}
+
+private final class ScopedAlertAudit: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [ACTABrokerAuditEvent] = []
+    func record(_ event: ACTABrokerAuditEvent) { lock.lock(); defer { lock.unlock() }; events.append(event) }
+    func snapshot() -> [ACTABrokerAuditEvent] { lock.lock(); defer { lock.unlock() }; return events }
+}
+
 @MainActor
 final class ACTAOperationalAdapterTests: XCTestCase {
     private func isolatedReadModel(root: URL, preferencesURL: URL) throws -> WallModel {
@@ -44,6 +62,119 @@ final class ACTAOperationalAdapterTests: XCTestCase {
             paths: Dictionary(uniqueKeysWithValues: LocalModelService.allCases.compactMap { service in
                 ModelSelectionRegistry.path(service).map { (service, $0.path) }
             }))
+    }
+
+    func testScopedAlertChatAuditsAndRedactsLiveState() async throws {
+        let previous = currentModelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent(".scoped-alert-fixture-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        let prefs = root.appendingPathComponent("features.json")
+        try CameraFeaturePreferencesStore.save(CameraFeaturePreferences(enabledFeatures: [.operationalAlerts]), to: prefs)
+        var alert = VLMAlert(cameraID: UUID(), cameraName: "synthetic-secret-camera",
+                             condition: "synthetic-secret-condition", evidence: "synthetic-secret-evidence")
+        alert.priority = .critical
+        alert.clipID = UUID()
+        try VLMStore.save([alert, VLMAlert(cameraID: UUID(), cameraName: "synthetic-secret-other",
+                                           condition: "synthetic-secret", evidence: "synthetic-secret")],
+                          to: root.appendingPathComponent("vlm-alerts.json"))
+        let model = try isolatedReadModel(root: root, preferencesURL: prefs)
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let before = try Data(contentsOf: model.vlmAlertsURL)
+        let action = ACTAScopedAlertListAction(provider: ACTAWallAlertReadProvider(model: model))
+        let scopes = ACTAAnalyticsCoordinator.localInspectionIDs
+        let audit = ScopedAlertAudit()
+        let made = await ACTALocalActionBroker.make(actions: [action], allowedActionIDs: [action.id],
+            allowedInspectionIDs: scopes, audit: { audit.record($0) })
+        let host = try XCTUnwrap(made)
+        let issued = await host.broker.openSession(operatorKey: host.operatorKey, input: .chat,
+            threadID: "fixture", actionIDs: [action.id], inspectionIDs: scopes)
+        let session = try XCTUnwrap(issued)
+        let result = await host.broker.request(session: session, actionID: action.id,
+                                               argumentsJSON: #"{"unacknowledged_only":true,"limit":1}"#)
+        XCTAssertTrue(result.success)
+        let output = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.outputJSON.utf8)) as? [String: Any])
+        let rows = try XCTUnwrap(output["alerts"] as? [[String: Any]])
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(Set(rows[0].keys), ["id", "created_at", "status", "priority"])
+        XCTAssertEqual(rows[0]["id"] as? String, alert.id.uuidString)
+        XCTAssertEqual(rows[0]["priority"] as? String, "critical")
+        let script = ScopedAlertScript()
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .mlxInProcess), transport: { _ in
+            XCTFail("Unexpected network request"); throw URLError(.notConnectedToInternet)
+        }, keyProvider: { _ in XCTFail("Unexpected Keychain access"); return nil },
+            localAgentInference: { prompt, _ in await script.reply(prompt) })
+        let store = try LocalTrackingStore(url: root.appendingPathComponent("chat.sqlite"))
+        let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store)
+        _ = await coordinator.askACTAChatAgent(question: "List alerts", threadID: "fixture",
+                                              broker: host.broker, brokerSession: session)
+        let prompts = await script.prompts
+        XCTAssertTrue(prompts.first?.contains("acta__alert__vlm_list") == true)
+        XCTAssertTrue(prompts.dropFirst().contains { $0.contains("action_output") && $0.contains(alert.id.uuidString) })
+        XCTAssertTrue(prompts.allSatisfy {
+            !$0.contains("synthetic-secret") && !$0.contains(alert.cameraID.uuidString)
+                && !$0.contains(alert.clipID!.uuidString)
+        })
+        XCTAssertTrue(audit.snapshot().contains { $0.actionID == action.id && $0.phase == .result && $0.outcome == "success" })
+        XCTAssertEqual(try Data(contentsOf: model.vlmAlertsURL), before)
+        await host.broker.closeSession(session, operatorKey: host.operatorKey)
+    }
+
+    func testScopedAlertAuthorizationAuditAndBadStorageFailClosed() async throws {
+        let previous = currentModelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent(".scoped-alert-fixture-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        let prefs = root.appendingPathComponent("features.json")
+        try CameraFeaturePreferencesStore.save(CameraFeaturePreferences(enabledFeatures: [.operationalAlerts]), to: prefs)
+        let alert = VLMAlert(cameraID: UUID(), cameraName: "synthetic-secret", condition: "synthetic-secret", evidence: "synthetic-secret")
+        try VLMStore.save([alert], to: root.appendingPathComponent("vlm-alerts.json"))
+        let model = try isolatedReadModel(root: root, preferencesURL: prefs)
+        defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let action = ACTAScopedAlertListAction(provider: ACTAWallAlertReadProvider(model: model))
+        let made = await ACTALocalActionBroker.make(actions: [action], allowedActionIDs: [action.id],
+            allowedInspectionIDs: ["fixture"], audit: { event in
+                if event.phase == .result && event.outcome == "success" { throw CocoaError(.fileWriteUnknown) }
+            })
+        let host = try XCTUnwrap(made)
+        let deniedIssued = await host.broker.openSession(operatorKey: host.operatorKey, input: .chat,
+            threadID: "fixture", actionIDs: [], inspectionIDs: ["fixture"])
+        let deniedSession = try XCTUnwrap(deniedIssued)
+        let catalogue = await host.broker.catalogue(session: deniedSession)
+        XCTAssertTrue(catalogue.isEmpty)
+        let unauthorized = await host.broker.request(session: deniedSession, actionID: action.id, argumentsJSON: "{}")
+        XCTAssertFalse(unauthorized.success)
+        XCTAssertFalse(unauthorized.outputJSON.contains(alert.id.uuidString))
+        let issued = await host.broker.openSession(operatorKey: host.operatorKey, input: .chat,
+            threadID: "fixture", actionIDs: [action.id])
+        let session = try XCTUnwrap(issued)
+        for args in [#"{"camera_id":"00000000-0000-0000-0000-000000000000"}"#, #"{"limit":0}"#,
+                     #"{"limit":51}"#, #"{"unacknowledged_only":"yes"}"#] {
+            let result = await host.broker.request(session: session, actionID: action.id, argumentsJSON: args)
+            XCTAssertFalse(result.success)
+            XCTAssertFalse(result.outputJSON.contains(alert.id.uuidString))
+        }
+        let failedAudit = await host.broker.request(session: session, actionID: action.id, argumentsJSON: "{}")
+        XCTAssertTrue(failedAudit.error?.hasPrefix("AUDIT_FAILED:") == true)
+        XCTAssertFalse(failedAudit.outputJSON.contains(alert.id.uuidString))
+        model.vlmAlerts = []
+        var result = try await action.execute(parameters: [:], context: ACTAActionContext())
+        XCTAssertFalse(result.success)
+        model.vlmAlerts = [alert]
+        try Data("{broken".utf8).write(to: model.vlmAlertsURL)
+        result = try await action.execute(parameters: [:], context: ACTAActionContext())
+        XCTAssertFalse(result.success)
+        try FileManager.default.removeItem(at: model.vlmAlertsURL)
+        result = try await action.execute(parameters: [:], context: ACTAActionContext())
+        XCTAssertFalse(result.success)
+        model.featurePreferences.enabledFeatures.remove(.operationalAlerts)
+        result = try await action.execute(parameters: [:], context: ACTAActionContext())
+        XCTAssertFalse(result.success)
+        XCTAssertFalse(result.outputJSON.contains(alert.id.uuidString))
+        await host.broker.closeSession(session, operatorKey: host.operatorKey)
+        await host.broker.closeSession(deniedSession, operatorKey: host.operatorKey)
     }
 
     private func isolatedReviewFixture() throws -> (URL, WallModel, LocalTrackingStore) {
@@ -110,7 +241,17 @@ final class ACTAOperationalAdapterTests: XCTestCase {
             narrative: ACTATemporalNarrativeResult(chapterTitle: "Fixture", summary: "Original AI observation"))
         try store.saveACTANarrativeChapterRecord(record)
         let registry = ACTAActionRegistry()
+        await registry.register(WallNarrativeAction(pin: true, model: model))
+        let legacyReview = try await registry.execute(actionID: "memory.toggle_pin",
+            parameters: ["chapter_id": record.chapterID, "pinned": "true"])
+        XCTAssertTrue(legacyReview.requiresOperatorConfirmation)
         await registerAllWallActions(registry: registry, model: model)
+        let revoked = try await registry.confirmAndExecute(token: XCTUnwrap(legacyReview.confirmationToken), confirmed: true)
+        XCTAssertFalse(revoked.success)
+        let legacyDirect = try await WallNarrativeAction(pin: true, model: model).execute(
+            parameters: ["chapter_id": record.chapterID, "pinned": "true"],
+            context: ACTAActionContext(isConfirmed: true))
+        XCTAssertFalse(legacyDirect.success)
         let oversized = try await registry.execute(actionID: "memory.set_chapter_text", parameters: ["chapter_id": record.chapterID, "text": String(repeating: "x", count: 16001)])
         XCTAssertFalse(oversized.success)
         XCTAssertFalse(oversized.requiresOperatorConfirmation, "Invalid content must not be persisted as a proposal")
@@ -128,21 +269,18 @@ final class ACTAOperationalAdapterTests: XCTestCase {
         XCTAssertEqual(saved.aiSummary, record.aiSummary)
         XCTAssertTrue(saved.operatorMarked)
         XCTAssertEqual(model.actaNarrativeChapters.first?.operatorText, saved.operatorText)
-        // The action sets a desired state; repeated operator-approved requests never invert it.
-        for _ in 0..<2 {
-            let pin = try await registry.execute(actionID: "memory.toggle_pin", parameters: ["chapter_id": record.chapterID, "pinned": "true"])
-            XCTAssertTrue(pin.requiresOperatorConfirmation)
-            let applied = try await registry.confirmAndExecute(token: XCTUnwrap(pin.confirmationToken), confirmed: true)
-            XCTAssertTrue(applied.success)
-            XCTAssertTrue(try XCTUnwrap(store.loadACTANarrativeChapterRecord(chapterID: record.chapterID)?.pinned))
-        }
+        let pin = try await registry.execute(actionID: "memory.toggle_pin",
+            parameters: ["chapter_id": record.chapterID, "pinned": "true"])
+        XCTAssertFalse(pin.success)
+        XCTAssertFalse(pin.requiresOperatorConfirmation)
+        XCTAssertTrue(pin.error?.contains("UNSUPPORTED") == true)
         let clear = try await registry.execute(actionID: "memory.set_chapter_text", parameters: ["chapter_id": record.chapterID, "clear": "true"])
         let cleared = try await registry.confirmAndExecute(token: XCTUnwrap(clear.confirmationToken), confirmed: true)
         XCTAssertTrue(cleared.success)
         let after = try XCTUnwrap(store.loadACTANarrativeChapterRecord(chapterID: record.chapterID))
         XCTAssertNil(after.operatorText)
         XCTAssertEqual(after.aiSummary, record.aiSummary)
-        XCTAssertTrue(after.pinned)
+        XCTAssertFalse(after.pinned)
         for arguments in [["chapter_id": record.chapterID],
                           ["chapter_id": record.chapterID, "text": "Bad", "clear": "true"],
                           ["chapter_id": "missing", "text": "Not saved"]] {
@@ -290,6 +428,15 @@ final class ACTAOperationalAdapterTests: XCTestCase {
         XCTAssertTrue(events.outputJSON.contains(event.id.uuidString))
         XCTAssertFalse(alerts.outputJSON.contains("private"))
         XCTAssertFalse(events.outputJSON.contains("private"))
+        let scopedISAPI = ACTAScopedISAPIReadAction(provider: ACTAWallISAPIReadProvider(model: model))
+        let scopedEvents = try await scopedISAPI.execute(parameters: [:], context: ACTAActionContext())
+        XCTAssertTrue(scopedEvents.success)
+        let scopedOutput = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(scopedEvents.outputJSON.utf8)) as? [String: Any])
+        let scopedRows = try XCTUnwrap(scopedOutput["events"] as? [[String: Any]])
+        XCTAssertEqual(scopedRows.count, 1)
+        XCTAssertEqual(Set(scopedRows[0].keys), ["id", "received_at"])
+        XCTAssertEqual(scopedRows[0]["id"] as? String, event.id.uuidString)
+        XCTAssertFalse(scopedEvents.outputJSON.contains(cameraID.uuidString))
 
         let expired = try await registry.execute(actionID: "monitor.get_isapi_events", parameters: [:],
             context: ACTAActionContext(now: Date().addingTimeInterval(31 * 86_400)))
@@ -307,8 +454,10 @@ final class ACTAOperationalAdapterTests: XCTestCase {
         model.isapiEvents = []
         let staleAlerts = try await registry.execute(actionID: "alert.vlm_list", parameters: [:])
         let staleEvents = try await registry.execute(actionID: "monitor.get_isapi_events", parameters: [:])
+        let staleScopedEvents = try await scopedISAPI.execute(parameters: [:], context: ACTAActionContext())
         XCTAssertFalse(staleAlerts.success)
         XCTAssertFalse(staleEvents.success)
+        XCTAssertFalse(staleScopedEvents.success)
         model.vlmAlerts = [alert]
         model.isapiEvents = [event]
         try Data("{broken".utf8).write(to: alertsURL)

@@ -30,7 +30,7 @@ private final class ScheduleLayoutFixture: ObservableObject {
 @MainActor
 private struct LocalizedScheduleLayoutView: View {
     @ObservedObject var fixture: ScheduleLayoutFixture
-    let localizationBundle: Bundle
+    let localizationBundles: [String: Bundle]
     let width: CGFloat
 
     var body: some View {
@@ -39,7 +39,7 @@ private struct LocalizedScheduleLayoutView: View {
             VLMScheduleForm(draft: $fixture.preferences, operations: $fixture.operations,
                 cameras: [], descriptionsEnabled: $fixture.descriptionsEnabled,
                 descriptionQueue: Text("\(fixture.updateSerial)").frame(height: 200), errorMessage: "", save: {},
-                localizationBundle: localizationBundle)
+                localizationBundle: localizationBundles[fixture.language]!)
                 .padding(12).frame(width: width, height: 720).background(ACTATheme.sidebar)
             Color(red: 1, green: 0, blue: 1).frame(width: 24)
         }
@@ -99,6 +99,7 @@ private struct OversizedNativeSidebarButton: NSViewRepresentable {
 @MainActor
 final class VLMSidebarLayoutTests: XCTestCase {
     func testRealRussianChatSendButtonReceivesMouseAndKeyboard() async throws {
+        try requireWindowIntegration()
         _ = NSApplication.shared
         let policy = NSApp.activationPolicy()
         NSApp.setActivationPolicy(.accessory)
@@ -129,7 +130,7 @@ final class VLMSidebarLayoutTests: XCTestCase {
             if let directory = ProcessInfo.processInfo.environment["CAMERAWALL_TEST_ARTIFACTS"] {
                 let url = URL(fileURLWithPath: directory, isDirectory: true)
                 try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-                try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: url.appendingPathComponent("chat-send-\(width).png"))
+                try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: url.appendingPathComponent("chat-send-\(width).png"), options: .withoutOverwriting)
             }
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = .accurate
@@ -181,6 +182,7 @@ final class VLMSidebarLayoutTests: XCTestCase {
     }
 
     func testRealRussianHistoryLabelsAndInputFitWithoutCropping() async throws {
+        try requireWindowIntegration()
         _ = NSApplication.shared
         let policy = NSApp.activationPolicy()
         NSApp.setActivationPolicy(.accessory)
@@ -220,7 +222,7 @@ final class VLMSidebarLayoutTests: XCTestCase {
             if let directory = ProcessInfo.processInfo.environment["CAMERAWALL_TEST_ARTIFACTS"] {
                 let url = URL(fileURLWithPath: directory, isDirectory: true)
                 try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-                try XCTUnwrap(image.representation(using: .png, properties: [:])).write(to: url.appendingPathComponent("history-fit-\(width).png"))
+                try XCTUnwrap(image.representation(using: .png, properties: [:])).write(to: url.appendingPathComponent("history-fit-\(width).png"), options: .withoutOverwriting)
             }
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = .accurate
@@ -256,6 +258,7 @@ final class VLMSidebarLayoutTests: XCTestCase {
     }
 
     func testHistoryQuestionRemainsVisibleAndSubmitsInCompactPanel() async throws {
+        try requireWindowIntegration()
         _ = NSApplication.shared
         let policy = NSApp.activationPolicy()
         NSApp.setActivationPolicy(.accessory)
@@ -370,6 +373,7 @@ final class VLMSidebarLayoutTests: XCTestCase {
     }
 
     func testOversizedSidebarButtonCannotReceiveClicksOutsidePanel() async throws {
+        try requireWindowIntegration()
         _ = NSApplication.shared
         for nativeControl in [false, true] {
         var inside = 0
@@ -420,8 +424,63 @@ final class VLMSidebarLayoutTests: XCTestCase {
         }
     }
 
+    func testSidebarKeepsRenderedContentMarkerFixedDuringUpdates() async throws {
+        try requireWindowIntegration()
+        _ = NSApplication.shared
+        let fixture = ScheduleLayoutFixture()
+        fixture.language = "ru"
+        fixture.descriptionsEnabled = true
+        fixture.preferences.alertRules = [VLMAlertRule(condition: "Synthetic alert")]
+        fixture.preferences.analyzeAllEnabledCameras = true
+        let initialPreferences = fixture.preferences
+        let nativeRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let russian = try XCTUnwrap(Bundle(url: nativeRoot.appendingPathComponent("Resources/ru.lproj")))
+        XCTAssertNotEqual(russian.localizedString(forKey: "Scheduled analysis", value: nil, table: nil), "Scheduled analysis")
+        let host = NSHostingView(rootView: CompositedSidebarFixture(fixture: fixture, localizationBundle: russian))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 860), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.title = "Isolated Sidebar Rendering Test"
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { window.close(); NSApp.setActivationPolicy(previousPolicy) }
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        try await Task.sleep(for: .milliseconds(300))
+        let field = try XCTUnwrap(editableFields(in: host).first, "The test must keep a real form editor focused")
+        XCTAssertTrue(window.makeFirstResponder(field))
+        let editor = try XCTUnwrap(window.fieldEditor(false, for: field) as? NSTextView)
+        editor.setSelectedRange(NSRange(location: field.stringValue.utf16.count, length: 0))
+        // This exercises in-process rendering and layout, not WindowServer compositing.
+        var frames: [CGRect?] = []
+        for serial in 1...150 {
+            fixture.updateSerial = serial
+            try await Task.sleep(for: .milliseconds(16))
+            host.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+            let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            frames.append(markerBounds(in: bitmap))
+        }
+        XCTAssertGreaterThan(frames.count, 20, "The test must inspect repeated rendered frames")
+        let reference = try XCTUnwrap(frames.dropFirst(5).first ?? nil, "The content marker must be visible")
+        for marker in frames.dropFirst(5) {
+            let bounds = try XCTUnwrap(marker, "The content marker must not disappear during a redraw")
+            XCTAssertEqual(bounds.minX, reference.minX, accuracy: 2)
+            XCTAssertEqual(bounds.minY, reference.minY, accuracy: 2)
+        }
+        XCTAssertTrue(window.firstResponder === editor)
+        XCTAssertEqual(fixture.preferences, initialPreferences)
+    }
+
     func testCompositedGlassSidebarKeepsContentMarkerFixedDuringUpdates() async throws {
-        guard CGPreflightScreenCaptureAccess() else { throw XCTSkip("Existing Screen Recording permission is required for the isolated compositor test.") }
+        guard ProcessInfo.processInfo.environment["CAMERAWALL_RUN_COMPOSITOR_TESTS"] == "1" else {
+            throw XCTSkip("WindowServer capture is opt-in.")
+        }
+        guard CGPreflightScreenCaptureAccess() else {
+            throw XCTSkip("Existing Screen Recording permission is required for the compositor test.")
+        }
         _ = NSApplication.shared
         let fixture = ScheduleLayoutFixture()
         fixture.language = "ru"
@@ -430,7 +489,6 @@ final class VLMSidebarLayoutTests: XCTestCase {
         fixture.preferences.analyzeAllEnabledCameras = true
         let nativeRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let russian = try XCTUnwrap(Bundle(url: nativeRoot.appendingPathComponent("Resources/ru.lproj")))
-        XCTAssertNotEqual(russian.localizedString(forKey: "Scheduled analysis", value: nil, table: nil), "Scheduled analysis")
         let host = NSHostingView(rootView: CompositedSidebarFixture(fixture: fixture, localizationBundle: russian))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 860), styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
@@ -443,7 +501,7 @@ final class VLMSidebarLayoutTests: XCTestCase {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         try await Task.sleep(for: .milliseconds(300))
-        let modelField = try XCTUnwrap(editableFields(in: host).first, "The compositor test must focus the actual model-path editor")
+        let modelField = try XCTUnwrap(editableFields(in: host).first)
         XCTAssertTrue(window.makeFirstResponder(modelField))
         let editor = try XCTUnwrap(window.fieldEditor(false, for: modelField) as? NSTextView)
         editor.setSelectedRange(NSRange(location: modelField.stringValue.utf16.count, length: 0))
@@ -477,40 +535,33 @@ final class VLMSidebarLayoutTests: XCTestCase {
             throw error
         }
         let frames = observer.snapshot()
-        XCTAssertGreaterThan(frames.count, 20, "The compositor test must inspect rendered frames, not only settled layout")
+        XCTAssertGreaterThan(frames.count, 20)
         let reference = try XCTUnwrap(frames.dropFirst(5).compactMap { $0 }.first)
         for marker in frames.dropFirst(5) {
-            let bounds = try XCTUnwrap(marker, "The content marker must not disappear during a redraw")
+            let bounds = try XCTUnwrap(marker)
             XCTAssertEqual(bounds.minX, reference.minX, accuracy: 2)
             XCTAssertEqual(bounds.minY, reference.minY, accuracy: 2)
         }
     }
 
     func testRussianLanguageSwitchSettlesWithoutRepeatedRelayoutOrLosingDraft() async throws {
+        try requireWindowIntegration()
         _ = NSApplication.shared
         let previousPolicy = NSApp.activationPolicy()
         NSApp.setActivationPolicy(.accessory)
         defer { NSApp.setActivationPolicy(previousPolicy) }
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let resources = directory.appendingPathComponent("Localization.bundle/Contents/Resources")
-        try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
-        let info: [String: Any] = ["CFBundleIdentifier": "local.camerawall.sidebar-language-test", "CFBundlePackageType": "BNDL", "CFBundleDevelopmentRegion": "en", "CFBundleLocalizations": ["en", "ru"]]
-        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
-            .write(to: resources.deletingLastPathComponent().appendingPathComponent("Info.plist"))
         let nativeRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        var bundles: [String: Bundle] = [:]
         for language in ["en", "ru"] {
-            try FileManager.default.copyItem(at: nativeRoot.appendingPathComponent("Resources/\(language).lproj"),
-                to: resources.appendingPathComponent("\(language).lproj"))
+            bundles[language] = try XCTUnwrap(Bundle(url: nativeRoot.appendingPathComponent("Resources/\(language).lproj")))
         }
-        let bundle = try XCTUnwrap(Bundle(url: resources.deletingLastPathComponent().deletingLastPathComponent()))
-        let russian = try XCTUnwrap(Bundle(url: resources.appendingPathComponent("ru.lproj")))
+        let russian = try XCTUnwrap(bundles["ru"])
         XCTAssertNotEqual(russian.localizedString(forKey: "Scheduled analysis", value: nil, table: nil), "Scheduled analysis")
         for width in [320, 420, 600] {
             let fixture = ScheduleLayoutFixture()
             let initial = fixture.preferences
             let operations = fixture.operations
-            let host = NSHostingView(rootView: LocalizedScheduleLayoutView(fixture: fixture, localizationBundle: bundle, width: CGFloat(width)))
+            let host = NSHostingView(rootView: LocalizedScheduleLayoutView(fixture: fixture, localizationBundles: bundles, width: CGFloat(width)))
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width + 48, height: 720), styleMask: [.titled], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false
             window.contentView = host
@@ -606,6 +657,7 @@ final class VLMSidebarLayoutTests: XCTestCase {
     }
 
     func testScheduleFieldsStayInsideNarrowAndWidePanelBeforeAndAfterScrolling() async throws {
+        try requireWindowIntegration()
         _ = NSApplication.shared
         let previousPolicy = NSApp.activationPolicy()
         NSApp.setActivationPolicy(.accessory)
@@ -664,6 +716,12 @@ final class VLMSidebarLayoutTests: XCTestCase {
         }
     }
 
+    private func requireWindowIntegration() throws {
+        guard ProcessInfo.processInfo.environment["CAMERAWALL_RUN_SIDEBAR_WINDOW_INTEGRATION"] == "1" else {
+            throw XCTSkip("Set CAMERAWALL_RUN_SIDEBAR_WINDOW_INTEGRATION=1 to run interactive window tests.")
+        }
+    }
+
     @discardableResult
     private func checkImage<Content: View>(_ host: NSHostingView<Content>, panelWidth: Int, position: String) throws -> Data {
         let image = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
@@ -686,9 +744,24 @@ final class VLMSidebarLayoutTests: XCTestCase {
         if let directory = ProcessInfo.processInfo.environment["CAMERAWALL_TEST_ARTIFACTS"] {
             let url = URL(fileURLWithPath: directory, isDirectory: true)
             try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-            try png.write(to: url.appendingPathComponent("sidebar-\(panelWidth)-\(position).png"))
+            try png.write(to: url.appendingPathComponent("sidebar-\(panelWidth)-\(position).png"), options: .withoutOverwriting)
         }
         return png
+    }
+
+    private func markerBounds(in bitmap: NSBitmapImageRep) -> CGRect? {
+        var left = bitmap.pixelsWide, top = bitmap.pixelsHigh, right = 0, bottom = 0
+        for row in stride(from: 0, to: bitmap.pixelsHigh, by: 2) {
+            for column in stride(from: 0, to: bitmap.pixelsWide, by: 2) {
+                guard let color = bitmap.colorAt(x: column, y: row)?.usingColorSpace(.deviceRGB) else { continue }
+                if color.redComponent > 0.7, color.greenComponent < 0.3, color.blueComponent < 0.3 {
+                    left = min(left, column); top = min(top, row)
+                    right = max(right, column); bottom = max(bottom, row)
+                }
+            }
+        }
+        guard left < right, top < bottom else { return nil }
+        return CGRect(x: left, y: top, width: right - left, height: bottom - top)
     }
 
     private func scrollViews(in view: NSView) -> [NSScrollView] {

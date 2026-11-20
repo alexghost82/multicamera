@@ -14,13 +14,18 @@ struct VLMPanel: View {
     @ObservedObject var languageSettings: LanguageSettings
     @ObservedObject var windowState: ACTACanvasFilterState
     @ObservedObject private var voiceInput: LocalVoiceInput
+    @ObservedObject private var voiceOutput = LocalVoiceOutput.shared
     @State private var draft = VLMPreferences()
     @State private var operationsDraft = OperationsPreferences()
-    @State private var questionBeforeVoice = ""
+    @State private var voiceDraft: LocalVoiceDraft?
+    @State private var voiceDraftNotice: String?
+    @State private var voiceLanguage = LocalVoiceLanguage.interface
     @State private var questionUsesVoice = false
+    @State private var speakVoiceAnswers = true
     @State private var saveError = ""
     @State private var descriptionJobs: [CameraFeatureJob] = []
-    @State private var voiceOwner = UUID()
+    @State private var alertClearConfirmation: VLMAlertClearConfirmation?
+    @State private var showAlertClearConfirmation = false
 
     init(model: WallModel, languageSettings: LanguageSettings, windowState: ACTACanvasFilterState) {
         self.model = model
@@ -40,7 +45,9 @@ struct VLMPanel: View {
 
             Group {
                 switch windowState.analysisSection {
-                case .ask: actaAgentHistoryView
+                case .ask:
+                    actaAgentHistoryView(voiceOwner: windowState.analysisChatLifecycle)
+                        .id(windowState.analysisChatLifecycle)
                 case .schedule: scheduleTab
                 case .alerts: alertsTab
                 }
@@ -48,6 +55,19 @@ struct VLMPanel: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .font(.system(size: ACTAType.body))
+        .onAppear {
+            voiceLanguage = model.navigationBridge.voiceDictationLanguage
+        }
+        .onChange(of: voiceLanguage) { _, newValue in
+            if model.navigationBridge.voiceDictationLanguage != newValue {
+                model.navigationBridge.voiceDictationLanguage = newValue
+            }
+        }
+        .onReceive(model.navigationBridge.$voiceDictationLanguage) { target in
+            if voiceLanguage != target {
+                voiceLanguage = target
+            }
+        }
         .transaction { transaction in
             transaction.animation = nil
             transaction.disablesAnimations = true
@@ -58,7 +78,7 @@ struct VLMPanel: View {
         }
     }
 
-    private var actaAgentHistoryView: some View {
+    private func actaAgentHistoryView(voiceOwner: UUID) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 Label(languageSettings.localizedMessage(model.actaAgentStatus), systemImage: model.actaAgentBusy ? "hourglass" : "brain.head.profile")
@@ -123,6 +143,14 @@ struct VLMPanel: View {
                                 Text(msg.role == "user" ? "Operator" : "ACTA Agent")
                                     .font(.system(size: ACTAType.caption, weight: .semibold))
                                 Spacer()
+                                if msg.role == "assistant" {
+                                    Button {
+                                        speakAnswer(msg.text, owner: voiceOwner)
+                                    } label: { Image(systemName: "speaker.wave.2") }
+                                    .disabled(voiceOutput.isBusy || voiceInput.isBusy)
+                                    .help("Read answer aloud")
+                                    .accessibilityLabel("Read answer aloud")
+                                }
                                 Text(msg.createdAt.formatted(date: .abbreviated, time: .shortened, locale: languageSettings.locale))
                                     .font(.system(size: ACTAType.metadata)).foregroundStyle(.secondary)
                                     .lineLimit(1)
@@ -157,9 +185,30 @@ struct VLMPanel: View {
                                     in: RoundedRectangle(cornerRadius: 8))
                         .id(msg.messageID)
                     }
+                    if let preview = model.actaAnswerPreview {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Draft response — unverified and may change")
+                                .font(.system(size: ACTAType.caption, weight: .semibold))
+                            Text(preview)
+                                .font(.system(size: ACTAType.body))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .padding(10)
+                        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                    }
                     ForEach(model.actaBrokerReviews) { controller in
-                        ACTABrokerReviewView(controller: controller) { result in
+                        ACTABrokerReviewView(controller: controller, voiceInput: voiceInput,
+                            voiceAllowed: model.featurePreferences.allowVoiceInput && !voiceOutput.isBusy,
+                            voiceLocaleIdentifier: voiceLanguage.localeIdentifier(interfaceLocale: languageSettings.locale)) { result, voiceConfirmed in
                             model.finishACTABrokerReview(controller, result: result)
+                            if voiceConfirmed, speakVoiceAnswers, model.featurePreferences.allowVoiceInput,
+                               windowState.analysisSection == .ask, windowState.analysisChatLifecycle == voiceOwner,
+                               model.activeACTAThreadID == controller.review.threadID {
+                                let locale = voiceLanguage.localeIdentifier(interfaceLocale: languageSettings.locale)
+                                let status = LocalVoiceReviewStatus.message(verified: result.success && result.verified,
+                                    operationID: controller.review.operationID, localeIdentifier: locale)
+                                speakAnswer(status, owner: voiceOwner)
+                            }
                         }
                         .padding(8)
                         .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
@@ -180,19 +229,62 @@ struct VLMPanel: View {
             if model.actaAgentBusy {
                 Button("Cancel request") { model.cancelACTAAgent() }
             }
+            Toggle("Speak voice answers automatically", isOn: $speakVoiceAnswers)
+                .font(.system(size: ACTAType.caption))
+            if voiceOutput.isOwned(by: voiceOwner) {
+                Button("Stop speaking") { voiceOutput.stop(owner: voiceOwner) }
+            }
             HStack(alignment: .bottom, spacing: 8) {
             Button {
-                if voiceInput.isBusy { voiceInput.stop() }
+                if voiceInput.isOwned(by: voiceOwner) { voiceInput.finishAndWaitForFinal(owner: voiceOwner) }
+                else if voiceOutput.isOwned(by: voiceOwner) { voiceOutput.stop(owner: voiceOwner) }
                 else if windowState.analysisSection == .ask && model.featurePreferences.allowVoiceInput {
-                    questionBeforeVoice = model.actaQuestionDraft
-                    voiceInput.start(localeIdentifier: languageSettings.locale.identifier, owner: voiceOwner)
+                    guard !voiceOutput.isAttemptActive else { return }
+                    voiceDraftNotice = nil
+                    voiceDraft = LocalVoiceDraft(originalText: model.actaQuestionDraft, originallyUsedVoice: questionUsesVoice)
+                    voiceInput.start(localeIdentifier: voiceLanguage.localeIdentifier(interfaceLocale: languageSettings.locale),
+                                     owner: voiceOwner)
                 }
-            } label: { Image(systemName: voiceInput.isBusy ? "stop.fill" : "mic") }
-            .disabled((windowState.analysisSection != .ask || !model.featurePreferences.allowVoiceInput) && !voiceInput.isBusy)
-            .help(voiceInput.isBusy ? "Stop local dictation" : "Start local dictation")
+            } label: { Image(systemName: voiceInput.isOwned(by: voiceOwner) || voiceOutput.isOwned(by: voiceOwner) ? "stop.fill" : "mic") }
+            .disabled(voiceInput.isFinalizing || (voiceInput.isBusy && !voiceInput.isOwned(by: voiceOwner)) ||
+                      (voiceOutput.isBusy && !voiceOutput.isOwned(by: voiceOwner)) ||
+                      ((windowState.analysisSection != .ask || !model.featurePreferences.allowVoiceInput) && !voiceInput.isOwned(by: voiceOwner)))
+            .help(voiceOutput.isOwned(by: voiceOwner) ? "Stop speaking" :
+                  (voiceInput.isOwned(by: voiceOwner) ? "Stop local dictation" : "Start local dictation"))
+            .accessibilityLabel(voiceOutput.isOwned(by: voiceOwner) ? "Stop speaking" :
+                                (voiceInput.isOwned(by: voiceOwner) ? "Stop local dictation" : "Start local dictation"))
+            Menu {
+                Picker("Dictation language", selection: $voiceLanguage) {
+                    ForEach(LocalVoiceLanguage.allCases) { language in
+                        Text(LocalizedStringKey(language.title)).tag(language)
+                    }
+                }
+            } label: {
+                Image(systemName: "character.bubble")
+            }
+            .disabled(voiceInput.isBusy || !model.featurePreferences.allowVoiceInput)
+            .help("Dictation language")
+            .accessibilityLabel("Dictation language")
+            if voiceInput.isOwned(by: voiceOwner) {
+                Button {
+                    voiceInput.cancel(owner: voiceOwner)
+                    if let voiceDraft {
+                        if voiceDraft.canRestore(model.actaQuestionDraft) {
+                            model.actaQuestionDraft = voiceDraft.originalText
+                            questionUsesVoice = voiceDraft.originallyUsedVoice
+                        } else {
+                            voiceDraftNotice = "Dictation cancelled; edited text was kept."
+                        }
+                    }
+                    voiceDraft = nil
+                } label: { Image(systemName: "xmark") }
+                .keyboardShortcut(.escape, modifiers: [])
+                .help("Cancel dictation")
+                .accessibilityLabel("Cancel dictation")
+            }
             AnalysisQuestionComposer(
                 question: $model.actaQuestionDraft,
-                sendDisabled: model.actaAgentBusy || model.actaQuestionDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                sendDisabled: voiceInput.isBusy || model.actaAgentBusy || model.actaQuestionDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                 promptLabel: "Ask about live video or history of all cameras…",
                 inputIdentifier: "acta-question-input", sendIdentifier: "acta-send-question",
                 submit: submitHistoryQuestion
@@ -201,22 +293,55 @@ struct VLMPanel: View {
             .layoutPriority(1)
             }
             if let voiceError = voiceInput.errorMessage { Text(languageSettings.localizedMessage(voiceError)).foregroundStyle(ACTATheme.danger) }
+            if let voiceError = voiceOutput.errorMessage { Text(languageSettings.localizedMessage(voiceError)).foregroundStyle(ACTATheme.danger) }
+            if voiceInput.isFinalizing { Text("Finalizing dictation…").foregroundStyle(.secondary) }
+            if let voiceDraftNotice { Text(languageSettings.localizedMessage(voiceDraftNotice)).foregroundStyle(.secondary) }
         }
         .onChange(of: voiceInput.transcript) { _, text in
-            if voiceInput.isRecording {
-                if !text.isEmpty { questionUsesVoice = true }
-                model.actaQuestionDraft = [questionBeforeVoice, text].filter { !$0.isEmpty }.joined(separator: " ")
+            if voiceInput.transcriptOwner == voiceOwner, let draft = voiceDraft {
+                if draft.canRestore(model.actaQuestionDraft) {
+                    if !text.isEmpty { questionUsesVoice = true }
+                    if let rendered = voiceDraft?.render(text) { model.actaQuestionDraft = rendered }
+                } else {
+                    voiceDraftNotice = "Dictation update skipped; edited text was kept."
+                }
             }
         }
-        .onDisappear { voiceInput.stop(owner: voiceOwner) }
+        .onChange(of: model.actaVoiceAnswer) { _, answer in
+            guard speakVoiceAnswers, model.featurePreferences.allowVoiceInput,
+                  let answer, answer.owner == voiceOwner,
+                  answer.threadID == model.activeACTAThreadID else { return }
+            speakAnswer(answer.text, owner: voiceOwner)
+        }
+        .onChange(of: model.activeACTAThreadID) { _, _ in
+            voiceOutput.stop(owner: voiceOwner)
+        }
+        .onDisappear {
+            voiceInput.stop(owner: voiceOwner)
+            voiceOutput.stop(owner: voiceOwner)
+        }
+    }
+
+    private func speakAnswer(_ text: String, owner: UUID) {
+        guard !voiceInput.isAttemptActive, !model.canvasFilterBridge.hasActiveVoiceInput,
+              !voiceOutput.isAttemptActive else {
+            voiceDraftNotice = "Stop dictation or speech before speaking."
+            return
+        }
+        voiceDraftNotice = nil
+        voiceOutput.speak(text, localeIdentifier: voiceLanguage.localeIdentifier(interfaceLocale: languageSettings.locale), owner: owner)
     }
 
     private func submitHistoryQuestion() {
+        guard !voiceInput.isBusy else { return }
         let trimmed = model.actaQuestionDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        if model.askACTAAgent(question: trimmed, input: questionUsesVoice ? .voice : .chat) {
+        if model.askACTAAgent(question: trimmed, input: questionUsesVoice ? .voice : .chat,
+                              voiceAnswerOwner: questionUsesVoice ? windowState.analysisChatLifecycle : nil) {
+            voiceOutput.stop(owner: windowState.analysisChatLifecycle)
             model.actaQuestionDraft = ""
             questionUsesVoice = false
+            voiceDraft = nil
         }
     }
 
@@ -292,7 +417,22 @@ struct VLMPanel: View {
             HStack {
                 Text("Local alerts").font(.headline)
                 Spacer()
-                Button("Clear all", role: .destructive) { model.clearVLMAlerts() }
+                Button("Clear all", role: .destructive) {
+                    do {
+                        guard let confirmation = try model.prepareVLMAlertsClear() else {
+                            let message = "Alerts changed or could not be verified. Review them again before clearing."
+                            model.notice = message
+                            model.error = message
+                            return
+                        }
+                        alertClearConfirmation = confirmation
+                        showAlertClearConfirmation = true
+                    } catch {
+                        let message = "Alerts changed or could not be verified. Review them again before clearing."
+                        model.notice = message
+                        model.error = message
+                    }
+                }
                     .disabled(model.vlmAlerts.isEmpty)
             }
             if model.vlmAlerts.isEmpty {
@@ -316,6 +456,17 @@ struct VLMPanel: View {
             }
         }
         .padding(.top, 8)
+        .alert(languageSettings.localized("Clear all local alerts?"), isPresented: $showAlertClearConfirmation) {
+            Button(languageSettings.localized("Cancel"), role: .cancel) { alertClearConfirmation = nil }
+            Button(languageSettings.localized("Clear all"), role: .destructive) {
+                if let confirmation = alertClearConfirmation {
+                    model.clearVLMAlerts(confirmed: confirmation)
+                }
+                alertClearConfirmation = nil
+            }
+        } message: {
+            Text(languageSettings.localized("This clears the listed alerts and their clips. When operational alerts are enabled, it also clears all local reviews, acknowledgements and review history. A failure may leave a partial result."))
+        }
     }
 
     private func saveSettings() {

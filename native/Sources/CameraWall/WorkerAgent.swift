@@ -91,6 +91,9 @@ final class WorkerAgent {
     private let sessionID = UUID()
     private var coordinatorServer: WorkerControlServer?
     private var wallModel: WallModel?
+    private var drainingWallModel: WallModel?
+    private var drainingAnalytics: LocalVideoAnalyticsEngine?
+    private let cameraRuntime = ACTAWorkerCameraRuntime()
     private var signalSources: [DispatchSourceSignal] = []
     private var stopping = false
 
@@ -148,11 +151,14 @@ final class WorkerAgent {
         Task { @MainActor in
             do {
                 try await agent.run()
+                await agent.finishShutdown()
                 Darwin.exit(0)
             } catch {
-                FileHandle.standardError.write(Data("Worker startup failed: \(error.localizedDescription)\n".utf8))
-                agent.stop()
-                Darwin.exit(1)
+                if !agent.stopping {
+                    FileHandle.standardError.write(Data("Worker startup failed: \(error.localizedDescription)\n".utf8))
+                }
+                await agent.finishShutdown()
+                Darwin.exit(error is CancellationError ? 0 : 1)
             }
         }
         RunLoop.main.run()
@@ -188,8 +194,9 @@ final class WorkerAgent {
               let coordinatorPort = configuration.coordinatorPort else {
             throw WorkerTransportError.invalidConfiguration
         }
+        try ensureWorkerActive()
         let cameraConfigurationURL = URL(fileURLWithPath: path)
-        let localConfiguration = try ConfigurationStore.load(from: cameraConfigurationURL)
+        let localConfiguration = try cameraRuntime.open(cameraConfigurationURL)
         let localCameras = localConfiguration.cameras.filter {
             $0.enabled && $0.localDeviceID == nil && $0.screenDisplayID == nil && $0.fileURL == nil
         }
@@ -201,9 +208,22 @@ final class WorkerAgent {
         guard FileManager.default.fileExists(atPath: poseModelURL.path) else {
             throw YOLO26PoseDetectorError.modelUnavailable
         }
-        let model = WallModel(configURL: cameraConfigurationURL, workerMode: true, poseModelURL: poseModelURL)
-        try await model.prepareWorkerRuntime()
+        let cameraLease = try cameraRuntime.activeLease()
+        let model = WallModel(configURL: cameraConfigurationURL, workerMode: true, poseModelURL: poseModelURL,
+                              relayFactory: { Go2RTC(cameraLease: cameraLease) })
         wallModel = model
+        var expectedWorkerConfiguration = localConfiguration
+        expectedWorkerConfiguration.cameras = localCameras.map {
+            var camera = $0
+            camera.enabled = false
+            camera.yoloEnabled = true
+            return camera
+        }
+        guard model.config == expectedWorkerConfiguration else {
+            throw WorkerTransportError.invalidConfiguration
+        }
+        try await model.prepareWorkerRuntime()
+        try ensureWorkerActive()
         model.startWorker()
 
         let registration = WorkerRegistration(workerID: configuration.nodeID, sessionID: sessionID,
@@ -212,6 +232,7 @@ final class WorkerAgent {
                                               maximumCameraCount: configuration.maximumCameraCount,
                                               modelIdentifiers: [YOLO26PoseDetector.modelIdentifier])
         try await register(registration, address: coordinatorAddress, port: coordinatorPort, tls: tls)
+        try ensureWorkerActive()
 
         var sequence: UInt64 = 0
         var previousInferenceCount = model.workerDetectionCount
@@ -234,27 +255,54 @@ final class WorkerAgent {
                 let response = try await WorkerControlClient.request(WorkerControlRequest(heartbeat: heartbeat),
                                                                       host: coordinatorAddress, port: coordinatorPort,
                                                                       tlsConfiguration: tls)
+                try ensureWorkerActive()
                 model.applyWorkerLeases(response.leases)
                 lastAcknowledgement = ProcessInfo.processInfo.systemUptime
                 retryDelay = 2
             } catch WorkerTransportError.remoteRejected(let code)
                 where code == WorkerCoordinatorError.workerNotRegistered.code ||
                       code == WorkerCoordinatorError.sessionMismatch.code {
+                try ensureWorkerActive()
                 model.applyWorkerLeases([])
                 do {
                     try await register(registration, address: coordinatorAddress, port: coordinatorPort, tls: tls)
+                    try ensureWorkerActive()
                     lastAcknowledgement = ProcessInfo.processInfo.systemUptime
                     retryDelay = 2
                 } catch {
+                    try ensureWorkerActive()
                     retryDelay = min(15, retryDelay * 2)
                 }
             } catch {
+                try ensureWorkerActive()
                 if ProcessInfo.processInfo.systemUptime - lastAcknowledgement >= 10 {
                     model.applyWorkerLeases([])
                 }
                 retryDelay = min(15, retryDelay * 2)
             }
+            try ensureWorkerActive()
             try await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
+        }
+    }
+
+    private func ensureWorkerActive() throws {
+        try cameraRuntime.checkActive()
+        guard !stopping else { throw CancellationError() }
+    }
+
+    private func finishShutdown() async {
+        stop()
+        do {
+            try await drainingAnalytics?.stopAndDrain()
+            try await drainingWallModel?.waitForCameraNetworkStop()
+            await Go2RTC.waitForAllPendingRequests()
+            try await CameraReconnectAttempt.waitForStoppedSessions()
+            try await CameraSession.waitForStoppedSessions()
+            await Go2RTC.waitForAllChildrenToExit()
+            await Go2RTC.waitForAllPendingRequests()
+        } catch {
+            FileHandle.standardError.write(Data("Worker shutdown could not verify camera cleanup; retaining the camera lease.\n".utf8))
+            await withUnsafeContinuation { (_: UnsafeContinuation<Void, Never>) in }
         }
     }
 
@@ -267,8 +315,11 @@ final class WorkerAgent {
     private func stop() {
         guard !stopping else { return }
         stopping = true
+        cameraRuntime.stop()
         coordinatorServer?.stop()
         coordinatorServer = nil
+        drainingWallModel = wallModel
+        drainingAnalytics = wallModel?.localAnalyticsEngine
         wallModel?.shutdown()
         wallModel = nil
     }

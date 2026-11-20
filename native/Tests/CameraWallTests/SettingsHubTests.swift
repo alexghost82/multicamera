@@ -45,7 +45,8 @@ final class SettingsHubTests: XCTestCase {
     }
 
     func testDisabledModelsRejectInferenceBeforeLoading() async throws {
-        defer { ModelSelectionRegistry.update(ModelSelectionPreferences()) }
+        let previous = IsolatedWallFixtureSupport.modelPreferences()
+        defer { ModelSelectionRegistry.update(previous) }
         var preferences = ModelSelectionPreferences(); preferences.enabled = []
         ModelSelectionRegistry.update(preferences)
         XCTAssertThrowsError(try ModelSelectionRegistry.require(.yolo))

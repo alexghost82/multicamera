@@ -114,6 +114,9 @@ final class UnifiedAgentHistoryTests: XCTestCase {
     }
 
     func testRealQwenAnswersAllCameraHistoryAndFollowUp() async throws {
+        guard ProcessInfo.processInfo.environment["CAMERAWALL_RUN_INSTALLED_MODEL_INTEGRATION"] == "1" else {
+            throw XCTSkip("Set CAMERAWALL_RUN_INSTALLED_MODEL_INTEGRATION=1 to run installed model inference.")
+        }
         guard let model = ProcessInfo.processInfo.environment["CAMERAWALL_TEST_AGENT_MODEL"] else {
             throw XCTSkip("Set CAMERAWALL_TEST_AGENT_MODEL for real local-model end-to-end verification")
         }
@@ -152,9 +155,10 @@ final class UnifiedAgentHistoryTests: XCTestCase {
     }
 
     func testRealQwenAgainstPrivateHistoryCopy() async throws {
-        guard let model = ProcessInfo.processInfo.environment["CAMERAWALL_TEST_AGENT_MODEL"],
+        guard ProcessInfo.processInfo.environment["CAMERAWALL_RUN_PRIVATE_HISTORY_INTEGRATION"] == "1",
+              let model = ProcessInfo.processInfo.environment["CAMERAWALL_TEST_AGENT_MODEL"],
               let rootPath = ProcessInfo.processInfo.environment["CAMERAWALL_TEST_HISTORY_COPY"] else {
-            throw XCTSkip("An explicit private history copy is required")
+            throw XCTSkip("Set CAMERAWALL_RUN_PRIVATE_HISTORY_INTEGRATION=1 and provide an explicit private history copy.")
         }
         let root = URL(fileURLWithPath: rootPath)
         let store = try LocalTrackingStore(url: root.appendingPathComponent("identity-history.sqlite3"))
@@ -168,7 +172,7 @@ final class UnifiedAgentHistoryTests: XCTestCase {
         let (broker, session) = try await makeInspectionTestSession(store: store, threadID: threadID)
         let answer = await coordinator.askACTAChatAgent(question: "Проверь историю за всё время и расскажи, что вообще происходило на всех камерах.", threadID: threadID, broker: broker, brokerSession: session)
         let elapsed = Date().timeIntervalSince(start)
-        try JSONEncoder().encode(answer).write(to: root.appendingPathComponent("verified-answer.json"), options: .atomic)
+        try JSONEncoder().encode(answer).write(to: root.appendingPathComponent("verified-answer.json"), options: .withoutOverwriting)
         print("PRIVATE_HISTORY_QA elapsed=\(elapsed) citedRecords=\(answer.evidenceReferences.count) citedCameras=\(Set(answer.evidenceReferences.compactMap(\.cameraID)).count) answerChars=\(answer.answerMarkdown.count)")
         XCTAssertGreaterThan(answer.confidence, 0, "The real history query must return a grounded answer")
         XCTAssertFalse(answer.evidenceReferences.isEmpty)

@@ -41,7 +41,72 @@ private final class ScopedIncidentAudit: @unchecked Sendable {
     var events: [ACTABrokerAuditEvent] { lock.withLock { recorded } }
 }
 
+private actor IncidentModelScript {
+    let incidentID: UUID
+    private(set) var prompts: [String] = []
+    init(incidentID: UUID) { self.incidentID = incidentID }
+    func reply(_ prompt: String) -> String {
+        prompts.append(prompt)
+        if prompts.count == 1 {
+            return #"{"tool_calls":[{"name":"acta__incident__get","arguments":{"incident_id":"\#(incidentID.uuidString)"}}]}"#
+        }
+        return #"{"answerMarkdown":"Reviewed incident.","confidence":0.5}"#
+    }
+}
+
 final class ACTAScopedIncidentGetActionTests: XCTestCase {
+    func testChatLoopReceivesOnlyAuditedIncidentMetadata() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("acta-incident-chat-\(UUID().uuidString)", isDirectory: true)
+        let store = try LocalTrackingStore(url: root.appendingPathComponent("tracking.sqlite"))
+        defer { try? FileManager.default.removeItem(at: root) }
+        let incident = fixture()
+        let audit = ScopedIncidentAudit()
+        let action = ACTAScopedIncidentGetAction(
+            domainAction: ACTAIncidentGetAction(provider: ScopedIncidentProvider(.incident(incident))))
+        let (broker, key, session) = try await makeBroker(action, audit, chatScopes: true)
+        let script = IncidentModelScript(incidentID: incident.id)
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .mlxInProcess), transport: { _ in
+            XCTFail("Unexpected network request")
+            throw URLError(.notConnectedToInternet)
+        }, keyProvider: { _ in XCTFail("Unexpected Keychain access"); return nil },
+            localAgentInference: { prompt, _ in await script.reply(prompt) })
+        let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store)
+        _ = await coordinator.askACTAChatAgent(question: "Inspect this incident", threadID: "synthetic-thread",
+                                              broker: broker, brokerSession: session)
+        let prompts = await script.prompts
+        XCTAssertTrue(prompts.first?.contains("acta__incident__get") == true)
+        XCTAssertTrue(prompts.dropFirst().contains { $0.contains("FALL_CONFIRMED") && $0.contains("action_output") })
+        XCTAssertTrue(prompts.allSatisfy { !$0.contains("synthetic-secret") && !$0.contains(incident.cameraID.uuidString) })
+        XCTAssertTrue(audit.events.contains { $0.actionID == "incident.get" && $0.outcome == "success" })
+        await broker.closeSession(session, operatorKey: key)
+    }
+
+    func testModelRouteDoesNotReleaseIncidentOnAuditFailure() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("acta-incident-audit-\(UUID().uuidString)", isDirectory: true)
+        let store = try LocalTrackingStore(url: root.appendingPathComponent("tracking.sqlite"))
+        defer { try? FileManager.default.removeItem(at: root) }
+        let incident = fixture()
+        let action = ACTAScopedIncidentGetAction(
+            domainAction: ACTAIncidentGetAction(provider: ScopedIncidentProvider(.incident(incident))))
+        let (broker, key, session) = try await makeBroker(action, ScopedIncidentAudit(failAt: 3))
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .dryRun), transport: { _ in
+            XCTFail("Unexpected network request")
+            throw URLError(.notConnectedToInternet)
+        }, keyProvider: { _ in XCTFail("Unexpected Keychain access"); return nil })
+        let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store)
+        let name = "acta__incident__get"
+        let call = ACTAAgentFunctionCall(callID: "get", name: name,
+            argumentsJSON: #"{"incident_id":"\#(incident.id.uuidString)"}"#)
+        let result = await coordinator.executeModelGeneratedAgentTool(call, threadID: "synthetic-thread",
+            requestToolNames: [name], broker: broker, brokerSession: session)
+        XCTAssertTrue(result.outputJSON.contains("AUDIT_FAILED"))
+        XCTAssertFalse(result.outputJSON.contains("action_output"))
+        XCTAssertFalse(result.outputJSON.contains("FALL_CONFIRMED"))
+        await broker.closeSession(session, operatorKey: key)
+    }
+
     private func fixture() -> SafetyIncident {
         var incident = SafetyIncident(
             cameraID: UUID(), cameraName: "synthetic-secret-camera",
@@ -56,13 +121,16 @@ final class ACTAScopedIncidentGetActionTests: XCTestCase {
         return incident
     }
 
-    private func makeBroker(_ action: ACTAScopedIncidentGetAction, _ audit: ScopedIncidentAudit) async throws
+    private func makeBroker(_ action: ACTAScopedIncidentGetAction, _ audit: ScopedIncidentAudit,
+                            chatScopes: Bool = false) async throws
         -> (ACTALocalActionBroker, ACTABrokerOperator, ACTABrokerSession) {
+        let scopes = chatScopes ? ACTAAnalyticsCoordinator.localInspectionIDs : []
         let creation = await ACTALocalActionBroker.make(
-            actions: [action], allowedActionIDs: [action.id], audit: { try audit.record($0) })
+            actions: [action], allowedActionIDs: [action.id], allowedInspectionIDs: scopes,
+            audit: { try audit.record($0) })
         let host = try XCTUnwrap(creation)
         let issued = await host.broker.openSession(operatorKey: host.operatorKey,
-            input: .chat, threadID: "synthetic-thread", actionIDs: [action.id])
+            input: .chat, threadID: "synthetic-thread", actionIDs: [action.id], inspectionIDs: scopes)
         let session = try XCTUnwrap(issued)
         return (host.broker, host.operatorKey, session)
     }
@@ -124,14 +192,19 @@ final class ACTAScopedIncidentGetActionTests: XCTestCase {
 
     func testMissingServiceAndErrorsFailClosedThroughBroker() async throws {
         let incident = fixture()
-        let cases: [ACTAScopedIncidentGetAction] = [
-            ACTAScopedIncidentGetAction(),
-            ACTAScopedIncidentGetAction(domainAction: ACTAIncidentGetAction(provider: ScopedIncidentProvider(.unavailable))),
-            ACTAScopedIncidentGetAction(domainAction: ACTAIncidentGetAction(provider: ScopedIncidentProvider(.failure))),
-            ACTAScopedIncidentGetAction(domainAction: ACTAIncidentGetAction(provider: ScopedIncidentProvider(.incident(nil)))),
-            ACTAScopedIncidentGetAction(domainAction: ACTAIncidentGetAction(provider: ScopedIncidentProvider(.incident(fixture()))))
+        let cases: [(ACTAScopedIncidentGetAction, String)] = [
+            (ACTAScopedIncidentGetAction(), "UNAVAILABLE:"),
+            (ACTAScopedIncidentGetAction(domainAction: ACTAIncidentGetAction(provider: ScopedIncidentProvider(.unavailable))), "UNAVAILABLE:"),
+            (ACTAScopedIncidentGetAction(domainAction: ACTAIncidentGetAction(provider: ScopedIncidentProvider(.failure))), "STORAGE_ERROR:"),
+            (ACTAScopedIncidentGetAction(domainAction: ACTAIncidentGetAction(provider: ScopedIncidentProvider(.incident(nil)))), "NOT_FOUND:"),
+            (ACTAScopedIncidentGetAction(domainAction: ACTAIncidentGetAction(provider: ScopedIncidentProvider(.incident(fixture())))), "STORAGE_ERROR:")
         ]
-        for action in cases {
+        for (action, expected) in cases {
+            let direct = try await action.execute(parameters: ["incident_id": incident.id.uuidString],
+                                                  context: ACTAActionContext())
+            XCTAssertFalse(direct.success)
+            XCTAssertTrue(direct.error?.hasPrefix(expected) == true)
+            XCTAssertFalse(direct.outputJSON.contains("synthetic-secret"))
             let audit = ScopedIncidentAudit()
             let (broker, key, session) = try await makeBroker(action, audit)
             let result = await broker.request(session: session, actionID: action.id,
@@ -145,6 +218,22 @@ final class ACTAScopedIncidentGetActionTests: XCTestCase {
             XCTAssertEqual(audit.events.last?.outcome, "failed")
             await broker.closeSession(session, operatorKey: key)
         }
+    }
+
+    func testMissingSuppressionDeadlineIsOmitted() async throws {
+        var incident = fixture()
+        incident.suppressedUntil = nil
+        let action = ACTAScopedIncidentGetAction(
+            domainAction: ACTAIncidentGetAction(provider: ScopedIncidentProvider(.incident(incident))))
+        let (broker, key, session) = try await makeBroker(action, ScopedIncidentAudit())
+        let result = await broker.request(session: session, actionID: action.id,
+            argumentsJSON: #"{"incident_id":"\#(incident.id.uuidString)"}"#,
+            expectedThreadID: "synthetic-thread")
+        XCTAssertTrue(result.success)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.outputJSON.utf8)) as? [String: Any])
+        let fields = try XCTUnwrap(root["incident"] as? [String: Any])
+        XCTAssertEqual(Set(fields.keys), ["id", "type", "severity", "status", "created_at", "updated_at"])
+        await broker.closeSession(session, operatorKey: key)
     }
 
     func testAuditFailuresNeverReleaseIncident() async throws {

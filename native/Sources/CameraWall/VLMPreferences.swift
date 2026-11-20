@@ -247,3 +247,20 @@ enum VLMStore {
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 }
+
+struct VLMAlertClearConfirmation {
+    private let alerts: [VLMAlert]
+    private let diskImage: Data
+
+    static func capture(visible: [VLMAlert], from url: URL) throws -> VLMAlertClearConfirmation? {
+        guard !visible.isEmpty else { return nil }
+        let image = try Data(contentsOf: url)
+        guard try JSONDecoder().decode([VLMAlert].self, from: image) == visible else { return nil }
+        return VLMAlertClearConfirmation(alerts: visible, diskImage: image)
+    }
+
+    func isCurrent(visible: [VLMAlert], from url: URL) throws -> Bool {
+        guard visible == alerts else { return false }
+        return try Data(contentsOf: url) == diskImage
+    }
+}

@@ -1,4 +1,5 @@
 import CameraCore
+import Combine
 import Foundation
 import XCTest
 @testable import CameraWall
@@ -13,7 +14,54 @@ final class ACTACanvasSelectCamerasActionTests: XCTestCase {
 
     private final class Inventory {
         var ids: [UUID]?
+        var revision = UUID()
         init(_ ids: [UUID]?) { self.ids = ids }
+    }
+
+    func testGUISelectionRetainsWillSetPublication() {
+        let state = ACTACanvasFilterState()
+        let id = UUID()
+        var events: [String] = []
+        let changes = state.objectWillChange.sink { events.append("will:\(state.selectedCameraIDs == nil)") }
+        state.selectedCameraIDs = [id]
+        XCTAssertEqual(events, ["will:true"])
+        XCTAssertEqual(state.selectedCameraIDs, [id])
+        withExtendedLifetime(changes) {}
+    }
+
+    func testReviewedSelectionCommitsAndRejectsInventoryABA() async throws {
+        let camera = UUID()
+        for invalidate in [false, true] {
+            let inventory = Inventory([camera])
+            let bridge = ACTACanvasFilterBridge()
+            let state = ACTACanvasFilterState()
+            bridge.attach(state)
+            let action = ACTACanvasSelectCamerasAction(bridge: bridge, enabledCameraIDs: { inventory.ids },
+                                                       inventoryRevision: { inventory.revision })
+            let parameters = ["mode": "all"]
+            let context = ACTAActionContext(isConfirmed: true)
+            let review = try await action.prepareConfirmation(parameters: parameters, context: context)
+            let changes = state.objectWillChange.sink {
+                if invalidate {
+                    inventory.ids = []
+                    inventory.revision = UUID()
+                    inventory.ids = [camera]
+                    inventory.revision = UUID()
+                }
+            }
+            let result = try await action.executeConfirmed(parameters: parameters, context: context,
+                                                           snapshot: review.snapshot)
+            XCTAssertEqual(result.success, !invalidate)
+            XCTAssertEqual(state.selectedCameraIDs, invalidate ? nil : [camera])
+            let verified = try await action.verify(parameters: parameters, context: context)
+            XCTAssertEqual(verified, !invalidate)
+            if !invalidate {
+                inventory.revision = UUID()
+                let stale = try await action.verify(parameters: parameters, context: context)
+                XCTAssertFalse(stale)
+            }
+            withExtendedLifetime(changes) {}
+        }
     }
 
     func testTypedActionsUpdateTheActualCanvasSelection() async throws {
@@ -164,6 +212,28 @@ final class ACTACanvasSelectCamerasActionTests: XCTestCase {
         model.config.cameras = [enabled, disabled]
         let state = ACTACanvasFilterState()
         model.canvasFilterBridge.attach(state)
+        let reviewed = ACTACanvasSelectCamerasAction(bridge: model.canvasFilterBridge,
+            enabledCameraIDs: { model.config.cameras.filter(\.enabled).map(\.id) },
+            inventoryRevision: { model.cameraInventoryRevision })
+        let context = ACTAActionContext(isConfirmed: true)
+        let selectionReview = try await reviewed.prepareConfirmation(parameters: ["mode": "all"], context: context)
+        model.config.cameras[0].enabled = false
+        model.config.cameras[0].enabled = true
+        let staleSelection = try await reviewed.executeConfirmed(parameters: ["mode": "all"], context: context,
+                                                                   snapshot: selectionReview.snapshot)
+        XCTAssertFalse(staleSelection.success)
+        XCTAssertNil(state.selectedCameraIDs)
+        let reviewedFilter = ACTACanvasSetFilterAction(bridge: model.canvasFilterBridge,
+            locationGroups: { Set(model.config.cameras.filter(\.enabled).map {
+                ACTACanvasFilterState.locationGroup($0.location)
+            }) }, inventoryRevision: { model.cameraInventoryRevision })
+        let filterReview = try await reviewedFilter.prepareConfirmation(parameters: ["location": "Lobby"], context: context)
+        model.config.cameras[0].location = "Other"
+        model.config.cameras[0].location = " Lobby "
+        let staleFilter = try await reviewedFilter.executeConfirmed(parameters: ["location": "Lobby"],
+                                                                    context: context, snapshot: filterReview.snapshot)
+        XCTAssertFalse(staleFilter.success)
+        XCTAssertNil(state.locationFilter)
         let registry = ACTAActionRegistry()
         await registerAllWallActions(registry: registry, model: model)
 

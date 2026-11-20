@@ -19,7 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered, defer: false)
         window.title = languageSettings.localized("ACTA CameraWall")
-        window.contentView = NSHostingView(rootView: WallView(model: model, languageSettings: languageSettings))
+        window.contentView = NSHostingView(rootView: ContentView(model: model, languageSettings: languageSettings))
         window.minSize = NSSize(width: 1280, height: 800)
         window.center()
         window.makeKeyAndOrderFront(nil)
@@ -47,8 +47,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(editItem)
         NSApp.mainMenu = menu
     }
-    func applicationWillTerminate(_ notification: Notification) { model?.shutdown() }
+    func applicationWillTerminate(_ notification: Notification) {
+        LocalVoiceOutput.shared.stopAll()
+        model?.shutdown()
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+}
+
+if CommandLine.arguments.dropFirst().first == "--relay-lease-guardian" {
+    exit(RelayLeaseGuardian.run(arguments: CommandLine.arguments))
 }
 
 if CommandLine.arguments.contains("--check-vlm-language") {

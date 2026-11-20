@@ -105,6 +105,10 @@ int cw_open_file(CWDecoder *decoder, const char *path, int timeout_ms) {
 int cw_is_eof(int error) { return error == AVERROR_EOF; }
 
 CVPixelBufferRef cw_next(CWDecoder *decoder, int *error) {
+    // Keep the previous AVFrame lease until the caller has finished processing
+    // it and asks for the next frame. A CVPixelBuffer retain is not an
+    // AVBufferPool lease.
+    av_frame_unref(decoder->frame);
     decoder->deadline = av_gettime_relative() + decoder->timeout;
     while (!interrupted(decoder)) {
         int result = avcodec_receive_frame(decoder->codec, decoder->frame);
@@ -114,7 +118,7 @@ CVPixelBufferRef cw_next(CWDecoder *decoder, int *error) {
                 pixel = (CVPixelBufferRef)decoder->frame->data[3];
                 if (pixel) CVPixelBufferRetain(pixel);
             }
-            av_frame_unref(decoder->frame);
+            if (!pixel) av_frame_unref(decoder->frame);
             *error = pixel ? 0 : AVERROR(ENOTSUP);
             return pixel;
         }

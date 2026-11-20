@@ -1,8 +1,4 @@
 import Foundation
-import CoreImage
-import CoreVideo
-import ImageIO
-import UniformTypeIdentifiers
 import MLX
 import MLXVLM
 import MLXLMCommon
@@ -65,14 +61,16 @@ final class LocalVLMClient {
         return try await NativeVLMEngine.shared.analyze(images: [image], prompt: prompt, model: model, workload: workload)
     }
 
-    func analyze(images: [Data], prompt: String, maxTokens: Int? = nil, requestWorkload: VLMWorkload? = nil) async throws -> String {
+    func analyze(images: [Data], prompt: String, maxTokens: Int? = nil, requestWorkload: VLMWorkload? = nil,
+                 onChunk: (@Sendable (String) -> Void)? = nil) async throws -> String {
         try ModelSelectionRegistry.require(.qwen)
-        return try await NativeVLMEngine.shared.analyze(images: images, prompt: prompt, model: model, workload: requestWorkload ?? workload, maxTokens: maxTokens)
+        return try await NativeVLMEngine.shared.analyze(images: images, prompt: prompt, model: model, workload: requestWorkload ?? workload, maxTokens: maxTokens, onChunk: onChunk)
     }
 
-    func analyze(text: String, maxTokens: Int? = nil, requestWorkload: VLMWorkload? = nil) async throws -> String {
+    func analyze(text: String, maxTokens: Int? = nil, requestWorkload: VLMWorkload? = nil,
+                 onChunk: (@Sendable (String) -> Void)? = nil) async throws -> String {
         try ModelSelectionRegistry.require(.qwen)
-        return try await NativeVLMEngine.shared.analyze(images: [], prompt: text, model: model, workload: requestWorkload ?? workload, maxTokens: maxTokens)
+        return try await NativeVLMEngine.shared.analyze(images: [], prompt: text, model: model, workload: requestWorkload ?? workload, maxTokens: maxTokens, onChunk: onChunk)
     }
 }
 
@@ -217,7 +215,8 @@ private actor NativeVLMEngine {
         await pool.release(lease.slot)
     }
 
-    func analyze(images: [Data], prompt: String, model: String, workload: VLMWorkload, maxTokens: Int? = nil) async throws -> String {
+    func analyze(images: [Data], prompt: String, model: String, workload: VLMWorkload, maxTokens: Int? = nil,
+                 onChunk: (@Sendable (String) -> Void)? = nil) async throws -> String {
         guard images.count <= LocalVLMClient.maximumBatchImages,
               images.allSatisfy({ $0.count <= LocalVLMClient.maximumEvidenceImageBytes }) else {
             throw LocalVLMError.invalidResponse
@@ -233,7 +232,7 @@ private actor NativeVLMEngine {
         let lease = try await pool.acquire(workload)
         let requestID = UUID()
         let generation = Task {
-            try await Self.generate(images: images, prompt: prompt, container: lease.resource, maxTokens: maxTokens)
+            try await Self.generate(images: images, prompt: prompt, container: lease.resource, maxTokens: maxTokens, onChunk: onChunk)
         }
         if workload == .background { backgroundRequests[requestID] = generation }
         defer { backgroundRequests.removeValue(forKey: requestID) }
@@ -249,7 +248,8 @@ private actor NativeVLMEngine {
         }
     }
 
-    private static func generate(images: [Data], prompt: String, container: ModelContainer, maxTokens: Int? = nil) async throws -> String {
+    private static func generate(images: [Data], prompt: String, container: ModelContainer, maxTokens: Int? = nil,
+                                 onChunk: (@Sendable (String) -> Void)? = nil) async throws -> String {
         try Task.checkCancellation()
         var imageURLs: [URL] = []
         defer { imageURLs.forEach { try? FileManager.default.removeItem(at: $0) } }
@@ -271,7 +271,10 @@ private actor NativeVLMEngine {
                     context: context
                 ) {
                     try Task.checkCancellation()
-                    if case .chunk(let text) = event { output += text }
+                    if case .chunk(let text) = event {
+                        output += text
+                        onChunk?(text)
+                    }
                 }
                 return output
             }
@@ -332,39 +335,4 @@ private actor NativeVLMEngine {
             throw error
         }
     }
-}
-
-enum VLMFrameEncoder {
-    static func jpegData(from pixelBuffer: CVPixelBuffer, maxDimension: CGFloat = 1024,
-                         quality: CGFloat = 0.65) async throws -> Data {
-        let frame = SendablePixelBuffer(value: pixelBuffer)
-        return try await Task.detached(priority: .utility) {
-            try encode(frame.value, maxDimension: maxDimension, quality: quality)
-        }.value
-    }
-
-    private static func encode(_ pixelBuffer: CVPixelBuffer, maxDimension: CGFloat,
-                               quality: CGFloat) throws -> Data {
-        let image = CIImage(cvPixelBuffer: pixelBuffer)
-        let scale = min(1, maxDimension / max(image.extent.width, image.extent.height))
-        let resized = scale < 1
-            ? image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-            : image
-        let context = CIContext(options: [.cacheIntermediates: false])
-        guard let cgImage = context.createCGImage(resized, from: resized.extent) else {
-            throw LocalVLMError.invalidImage
-        }
-        let data = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else {
-            throw LocalVLMError.invalidImage
-        }
-        CGImageDestinationAddImage(destination, cgImage,
-                                  [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
-        guard CGImageDestinationFinalize(destination) else { throw LocalVLMError.invalidImage }
-        return data as Data
-    }
-}
-
-private struct SendablePixelBuffer: @unchecked Sendable {
-    let value: CVPixelBuffer
 }

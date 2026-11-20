@@ -4,8 +4,9 @@ import SQLite3
 
 final class CrossCameraIdentityTests: XCTestCase {
     func testReviewDecisionUsesSidecarAndNeverChangesOperatorGroups() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try IsolatedStoreTestDirectory()
+        defer { try? fixture.remove() }
+        let directory = fixture.url
         let featureStore = try CameraFeatureStore(url: directory.appendingPathComponent("features.sqlite3"))
         let trackingStore = try LocalTrackingStore(url: directory.appendingPathComponent("tracking.sqlite3"))
         let trackA = UUID()
@@ -48,8 +49,9 @@ final class CrossCameraIdentityTests: XCTestCase {
     }
 
     func testRejectedPairBecomesCannotLinkAndFeatureMustBeEnabled() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try IsolatedStoreTestDirectory()
+        defer { try? fixture.remove() }
+        let directory = fixture.url
         let store = try CameraFeatureStore(url: directory.appendingPathComponent("features.sqlite3"))
         let trackA = UUID()
         let trackB = UUID()
@@ -86,8 +88,9 @@ final class CrossCameraIdentityTests: XCTestCase {
     }
 
     func testCannotLinkBlocksTransitiveIdentityMerge() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try IsolatedStoreTestDirectory()
+        defer { try? fixture.remove() }
+        let directory = fixture.url
         let store = try CameraFeatureStore(url: directory.appendingPathComponent("features.sqlite3"))
         let preferences = CameraFeaturePreferences(enabledFeatures: [.crossCameraIdentity])
         let trackA = UUID()
@@ -121,8 +124,9 @@ final class CrossCameraIdentityTests: XCTestCase {
     }
 
     func testUndoAcceptedEdgeSplitsIdentityChainTransactionally() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try IsolatedStoreTestDirectory()
+        defer { try? fixture.remove() }
+        let directory = fixture.url
         let store = try CameraFeatureStore(url: directory.appendingPathComponent("features.sqlite3"))
         let preferences = CameraFeaturePreferences(enabledFeatures: [.crossCameraIdentity])
         let trackA = UUID()
@@ -155,8 +159,9 @@ final class CrossCameraIdentityTests: XCTestCase {
     }
 
     func testReconciliationRemovesExpiredTrackLinksButKeepsAudit() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try IsolatedStoreTestDirectory()
+        defer { try? fixture.remove() }
+        let directory = fixture.url
         let trackingStore = try LocalTrackingStore(url: directory.appendingPathComponent("tracking.sqlite3"))
         let featureStore = try CameraFeatureStore(url: directory.appendingPathComponent("features.sqlite3"))
         let trackA = UUID()
@@ -185,10 +190,10 @@ final class CrossCameraIdentityTests: XCTestCase {
     }
 
     func testVersionOneFeatureDatabaseMigratesWithoutReplacingExistingTables() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try IsolatedStoreTestDirectory()
+        defer { try? fixture.remove() }
+        let directory = fixture.url
         let databaseURL = directory.appendingPathComponent("features.sqlite3")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         var database: OpaquePointer?
         XCTAssertEqual(sqlite3_open(databaseURL.path, &database), SQLITE_OK)
         let setupResult = sqlite3_exec(

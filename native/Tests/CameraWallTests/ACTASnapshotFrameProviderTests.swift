@@ -58,6 +58,18 @@ private func snapshotPlane(_ pixel: CVPixelBuffer, plane: Int) throws -> [UInt8]
     }
 }
 
+private func fillSnapshotPlane(_ pixel: CVPixelBuffer, plane: Int, value: UInt8) throws {
+    guard CVPixelBufferLockBaseAddress(pixel, []) == kCVReturnSuccess else {
+        throw SnapshotPixelTestError.inaccessible
+    }
+    defer { CVPixelBufferUnlockBaseAddress(pixel, []) }
+    guard let base = CVPixelBufferGetBaseAddressOfPlane(pixel, plane) else {
+        throw SnapshotPixelTestError.inaccessible
+    }
+    memset(base, Int32(value), CVPixelBufferGetBytesPerRowOfPlane(pixel, plane)
+        * CVPixelBufferGetHeightOfPlane(pixel, plane))
+}
+
 @MainActor
 private final class SnapshotSourceFixture {
     var camera = Camera(name: "Fake", substream: "")
@@ -78,6 +90,22 @@ struct ACTASnapshotFrameProviderTests {
         return try #require(pixel)
     }
 
+    private func capture(_ provider: ACTAWallSnapshotFrameProvider, source: SnapshotSourceFixture,
+                         pixel: CVPixelBuffer) async throws -> ACTASnapshotFrame {
+        let session = source.session
+        let task = Task { try await provider.captureFreshFrame(cameraID: source.camera.id) }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        while !session.hasPendingOwnedFrameCapture && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        guard session.hasPendingOwnedFrameCapture else {
+            task.cancel()
+            throw SnapshotPixelTestError.inaccessible
+        }
+        session.publish(pixel, message: "Synthetic delivery")
+        return try await task.value
+    }
+
     @Test func heldFrameRejectsChangedBytesSessionAndCameraButNotNewFrames() async throws {
         let source = SnapshotSourceFixture()
         let pixel = try pixel()
@@ -86,7 +114,7 @@ struct ACTASnapshotFrameProviderTests {
             source: { source.source($0) },
             encode: { _ in Data([0xff, 0xd8, 1, 0xff, 0xd9]) },
             now: { ProcessInfo.processInfo.systemUptime })
-        let frame = try await provider.captureFreshFrame(cameraID: source.camera.id)
+        let frame = try await capture(provider, source: source, pixel: pixel)
         #expect(try await provider.isCaptureValid(frame))
         let altered = ACTASnapshotFrame(cameraID: frame.cameraID, frameID: frame.frameID,
                                         capturedUptime: frame.capturedUptime, selectedUptime: frame.selectedUptime,
@@ -97,7 +125,7 @@ struct ACTASnapshotFrameProviderTests {
         source.camera.name = "Fake"
         source.session.publish(pixel, message: "next fake frame")
         #expect(try await provider.isCaptureValid(frame))
-        let next = try await provider.captureFreshFrame(cameraID: source.camera.id)
+        let next = try await capture(provider, source: source, pixel: pixel)
         source.session = CameraSession()
         #expect(try await !provider.isCaptureValid(next))
     }
@@ -114,14 +142,15 @@ struct ACTASnapshotFrameProviderTests {
                 return Data([0xff, 0xd8, UInt8(CVPixelBufferGetWidth(buffer)), 0xff, 0xd9])
             },
             now: { ProcessInfo.processInfo.systemUptime })
-        let frame = try await provider.captureFreshFrame(cameraID: source.camera.id)
+        let frame = try await capture(provider, source: source, pixel: pixel)
         #expect(frame.jpeg == Data([0xff, 0xd8, 2, 0xff, 0xd9]))
         #expect(try await provider.isCaptureValid(frame))
     }
 
     @Test func sessionChangeDuringEncodingIsRejected() async throws {
         let source = SnapshotSourceFixture()
-        source.session.publish(try pixel(), message: "fake")
+        let pixel = try pixel()
+        source.session.publish(pixel, message: "fake")
         let provider = ACTAWallSnapshotFrameProvider(
             source: { source.source($0) },
             encode: { _ in
@@ -130,7 +159,25 @@ struct ACTASnapshotFrameProviderTests {
             },
             now: { ProcessInfo.processInfo.systemUptime })
         await #expect(throws: ACTASnapshotActionError.self) {
-            try await provider.captureFreshFrame(cameraID: source.camera.id)
+            try await capture(provider, source: source, pixel: pixel)
+        }
+    }
+
+    @Test func sessionStopRejectsNextFrameRequest() async throws {
+        let session = CameraSession()
+        let old = try pixel()
+        session.publish(old, message: "old frame")
+        let waiting = Task { try await session.captureNextOwnedFrame(timeout: .seconds(2)) }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        while !session.hasPendingOwnedFrameCapture && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        #expect(session.hasPendingOwnedFrameCapture)
+        session.stop()
+        session.publish(old, message: "late")
+        await #expect(throws: ACTAFrameCaptureGate.Failure.self) { try await waiting.value }
+        await #expect(throws: ACTAFrameCaptureGate.Failure.self) {
+            try await session.captureNextOwnedFrame()
         }
     }
 
@@ -148,26 +195,48 @@ struct ACTASnapshotFrameProviderTests {
                 return Data([0xff, 0xd8, try firstSnapshotByte(copied), 0xff, 0xd9])
             },
             now: { ProcessInfo.processInfo.systemUptime })
-        let frame = try await provider.captureFreshFrame(cameraID: source.camera.id)
+        let frame = try await capture(provider, source: source, pixel: original)
         #expect(try firstSnapshotByte(original) == 99)
         #expect(frame.jpeg == Data([0xff, 0xd8, 17, 0xff, 0xd9]))
     }
 
     @Test func copiesBothBiPlanarPlanesAndRejectsUnsupportedFormats() throws {
-        var buffer: CVPixelBuffer?
-        #expect(CVPixelBufferCreate(nil, 4, 4, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-                                    nil, &buffer) == kCVReturnSuccess)
-        let original = try #require(buffer)
-        try fillSnapshotPixel(original, value: 23)
-        let copy = try ACTASnapshotPixelCopy.copy(original)
-        try fillSnapshotPixel(original, value: 91)
-        #expect(try snapshotPlane(copy, plane: 0) == Array(repeating: UInt8(23), count: 16))
-        #expect(try snapshotPlane(copy, plane: 1) == Array(repeating: UInt8(23), count: 8))
+        for format in [kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+                       kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange] {
+            var buffer: CVPixelBuffer?
+            #expect(CVPixelBufferCreate(nil, 4, 4, format, nil, &buffer) == kCVReturnSuccess)
+            let original = try #require(buffer)
+            try fillSnapshotPlane(original, plane: 0, value: 23)
+            try fillSnapshotPlane(original, plane: 1, value: 37)
+            let copy = try ACTASnapshotPixelCopy.copy(original)
+            #expect(try snapshotPlane(original, plane: 0) == Array(repeating: UInt8(23), count: 16))
+            #expect(try snapshotPlane(original, plane: 1) == Array(repeating: UInt8(37), count: 8))
+            try fillSnapshotPixel(original, value: 91)
+            #expect(try snapshotPlane(copy, plane: 0) == Array(repeating: UInt8(23), count: 16))
+            #expect(try snapshotPlane(copy, plane: 1) == Array(repeating: UInt8(37), count: 8))
+        }
 
         var unsupported: CVPixelBuffer?
         #expect(CVPixelBufferCreate(nil, 4, 4, kCVPixelFormatType_OneComponent8, nil, &unsupported) == kCVReturnSuccess)
         #expect(throws: ACTASnapshotActionError.self) {
             try ACTASnapshotPixelCopy.copy(#require(unsupported))
         }
+    }
+
+    @Test func realEncoderReceivesFrozenDelivery() async throws {
+        let source = SnapshotSourceFixture()
+        let original = try pixel()
+        try fillSnapshotPixel(original, value: 53)
+        let expected = try await VLMFrameEncoder.jpegData(from: ACTASnapshotPixelCopy.copy(original))
+        let provider = ACTAWallSnapshotFrameProvider(
+            source: { source.source($0) },
+            encode: { copied in
+                try fillSnapshotPixel(original, value: 97)
+                return try await VLMFrameEncoder.jpegData(from: copied)
+            },
+            now: { ProcessInfo.processInfo.systemUptime })
+        let frame = try await capture(provider, source: source, pixel: original)
+        #expect(frame.jpeg == expected)
+        #expect(try firstSnapshotByte(original) == 97)
     }
 }

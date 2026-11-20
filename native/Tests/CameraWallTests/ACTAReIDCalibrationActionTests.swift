@@ -3,6 +3,28 @@ import Foundation
 import XCTest
 @testable import CameraWall
 
+private actor CalibrationChatScript {
+    private(set) var prompts: [String] = []
+    func reply(_ prompt: String) -> String {
+        prompts.append(prompt)
+        if prompts.count == 1 {
+            return #"{"tool_calls":[{"name":"acta__reid__calibrate","arguments":{"target_precision":0.95}}]}"#
+        }
+        return #"{"answerMarkdown":"Calibration complete.","confidence":0.5}"#
+    }
+}
+
+private actor CalibrationUpdateChatScript {
+    private(set) var prompts: [String] = []
+    func reply(_ prompt: String) -> String {
+        prompts.append(prompt)
+        if prompts.count == 1 {
+            return #"{"tool_calls":[{"name":"acta__settings__update_reid_calibration","arguments":{"target_precision":0.95}}]}"#
+        }
+        return #"{"answerMarkdown":"Review requested.","confidence":0.5}"#
+    }
+}
+
 @MainActor
 final class ACTAReIDCalibrationActionTests: XCTestCase {
     private final class Provider: ACTAReIDCalibrationProvider {
@@ -19,6 +41,56 @@ final class ACTAReIDCalibrationActionTests: XCTestCase {
 
     private struct SensitiveError: LocalizedError {
         var errorDescription: String? { "/private/synthetic-track" }
+    }
+
+    func testAuditedChatLoopReturnsOnlyAggregateCalibration() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("acta-calibration-chat-\(UUID().uuidString)", isDirectory: true)
+        let store = try LocalTrackingStore(url: root.appendingPathComponent("tracking.sqlite"))
+        defer { try? FileManager.default.removeItem(at: root) }
+        let provider = Provider()
+        provider.pairs = [LabeledReIDPair(distance: 0.1, sameObject: true)]
+        let action = ACTAReIDCalibrationAction(provider: provider)
+        let scopes = ACTAAnalyticsCoordinator.localInspectionIDs
+        let made = await ACTALocalActionBroker.make(actions: [action], allowedActionIDs: [action.id],
+                                                     allowedInspectionIDs: scopes, audit: { _ in })
+        let host = try XCTUnwrap(made)
+        let issued = await host.broker.openSession(operatorKey: host.operatorKey, input: .chat,
+            threadID: "fixture", actionIDs: [action.id], inspectionIDs: scopes)
+        let session = try XCTUnwrap(issued)
+        let script = CalibrationChatScript()
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .mlxInProcess), transport: { _ in
+            XCTFail("Unexpected network request")
+            throw URLError(.notConnectedToInternet)
+        }, keyProvider: { _ in XCTFail("Unexpected Keychain access"); return nil },
+            localAgentInference: { prompt, _ in await script.reply(prompt) })
+        let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store)
+        _ = await coordinator.askACTAChatAgent(question: "Calculate calibration", threadID: "fixture",
+                                              broker: host.broker, brokerSession: session)
+        let prompts = await script.prompts
+        XCTAssertTrue(prompts.first?.contains("acta__reid__calibrate") == true)
+        XCTAssertTrue(prompts.dropFirst().contains { $0.contains("positive_pairs") && $0.contains("action_output") })
+        XCTAssertEqual(provider.calls, 1)
+        await host.broker.closeSession(session, operatorKey: host.operatorKey)
+    }
+
+    func testBrokerAuditFailureDoesNotReleaseCalibration() async throws {
+        let provider = Provider()
+        provider.pairs = [LabeledReIDPair(distance: 0.1, sameObject: true)]
+        let action = ACTAReIDCalibrationAction(provider: provider)
+        let made = await ACTALocalActionBroker.make(actions: [action], allowedActionIDs: [action.id], audit: { event in
+            if event.phase == .result && event.outcome == "success" { throw CocoaError(.fileWriteUnknown) }
+        })
+        let host = try XCTUnwrap(made)
+        let issued = await host.broker.openSession(operatorKey: host.operatorKey, input: .chat,
+            threadID: "fixture", actionIDs: [action.id])
+        let session = try XCTUnwrap(issued)
+        let result = await host.broker.request(session: session, actionID: action.id,
+                                               argumentsJSON: #"{"target_precision":0.95}"#)
+        XCTAssertFalse(result.success)
+        XCTAssertTrue(result.error?.hasPrefix("AUDIT_FAILED:") == true)
+        XCTAssertFalse(result.outputJSON.contains("positive_pairs"))
+        await host.broker.closeSession(session, operatorKey: host.operatorKey)
     }
 
     func testAggregateUsesRequestedPrecisionAndDoesNotApplySettings() async throws {
@@ -180,6 +252,23 @@ final class ACTAReIDCalibrationActionTests: XCTestCase {
         withExtendedLifetime(subscription) {}
     }
 
+    func testPrecisionViewStateNotifiesGUIBeforeAndValueSubscribersAfterCommit() {
+        let state = ACTAReIDCalibrationViewState()
+        var observed: [String] = []
+        let changes = state.objectWillChange.sink {
+            observed.append("will:\(state.targetPrecision)")
+        }
+        let values = state.$targetPrecision.sink { value in
+            observed.append("value:\(value):state:\(state.targetPrecision)")
+        }
+        let initial = state.targetPrecision
+        XCTAssertFalse(state.setTargetPrecision(0.9025))
+        XCTAssertTrue(state.setTargetPrecision(0.95))
+        XCTAssertEqual(observed, ["value:\(initial):state:\(initial)",
+                                  "will:\(initial)", "value:0.95:state:0.95"])
+        withExtendedLifetime((changes, values)) {}
+    }
+
     func testPrecisionVerificationRejectsInterveningChangesAndReattachment() async throws {
         let bridge = ACTAReIDCalibrationViewBridge()
         let state = ACTAReIDCalibrationViewState()
@@ -225,5 +314,247 @@ final class ACTAReIDCalibrationActionTests: XCTestCase {
             XCTAssertEqual(state.targetPrecision, 0.92)
         }
         withExtendedLifetime(subscription) {}
+    }
+
+    func testReviewedCalibrationBrokerChatAndApproval() async throws {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent(".acta-reid-chat-\(UUID().uuidString)", isDirectory: true)
+        let store = try LocalTrackingStore(url: root.appendingPathComponent("tracking.sqlite"))
+        defer { try? FileManager.default.removeItem(at: root) }
+        let bridge = ACTAReIDCalibrationViewBridge()
+        let state = ACTAReIDCalibrationViewState()
+        bridge.attach(state)
+        let action = ACTAReviewedReIDCalibrationAction(bridge: bridge)
+        let scopes = ACTAAnalyticsCoordinator.localInspectionIDs
+        let made = await ACTALocalActionBroker.make(
+            actions: [action], allowedActionIDs: [action.id], allowedInspectionIDs: scopes, audit: { _ in })
+        let host = try XCTUnwrap(made)
+        let opened = await host.broker.openSession(operatorKey: host.operatorKey,
+            input: .chat, threadID: "fixture", actionIDs: [action.id], inspectionIDs: scopes)
+        let session = try XCTUnwrap(opened)
+        let script = CalibrationUpdateChatScript()
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .mlxInProcess), transport: { _ in
+            XCTFail("Unexpected network request")
+            throw URLError(.notConnectedToInternet)
+        }, keyProvider: { _ in XCTFail("Unexpected Keychain access"); return nil },
+            localAgentInference: { prompt, _ in await script.reply(prompt) })
+        let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store)
+        _ = await coordinator.askACTAChatAgent(question: "Change calibration", threadID: "fixture",
+                                               broker: host.broker, brokerSession: session)
+        let prompts = await script.prompts
+        XCTAssertTrue(prompts.first?.contains("acta__settings__update_reid_calibration") == true)
+        XCTAssertTrue(prompts.dropFirst().contains { $0.contains("requires_operator_confirmation") })
+        XCTAssertFalse(prompts.dropFirst().contains { $0.contains("recommended_distance") || $0.contains("positive_pairs") })
+        XCTAssertEqual(state.targetPrecision, ReIDThresholdCalibrator.defaultTargetPrecision)
+        let reviews = await host.broker.reviews(operatorKey: host.operatorKey, session: session)
+        let review = try XCTUnwrap(reviews.first)
+        XCTAssertEqual(reviews.count, 1)
+        XCTAssertTrue(review.title.contains("0.95"))
+        XCTAssertTrue(review.title.contains("asynchronous validation metric recalculation"))
+        let result = await host.broker.resolve(operatorKey: host.operatorKey, session: session,
+                                               reviewed: review, approved: true)
+        XCTAssertTrue(result.success && result.verified, result.summary)
+        XCTAssertTrue(result.summary.contains("asynchronous validation metric recalculation"))
+        XCTAssertTrue(action.description.contains("asynchronous validation metric recalculation"))
+        XCTAssertEqual(state.targetPrecision, 0.95)
+        XCTAssertFalse(result.outputJSON.contains("recommended_distance"))
+        XCTAssertFalse(result.outputJSON.contains("positive_pairs"))
+        let replay = await host.broker.resolve(operatorKey: host.operatorKey, session: session,
+                                               reviewed: review, approved: true)
+        XCTAssertFalse(replay.success)
+        await host.broker.closeSession(session, operatorKey: host.operatorKey)
+    }
+
+    func testReviewedCalibrationRejectsStaleABAAndLifecycleChanges() async throws {
+        for scenario in 0..<4 {
+            let bridge = ACTAReIDCalibrationViewBridge()
+            let state = ACTAReIDCalibrationViewState()
+            let other = ACTAReIDCalibrationViewState()
+            bridge.attach(state)
+            let action = ACTAReviewedReIDCalibrationAction(bridge: bridge)
+            let parameters = ["target_precision": "0.95"]
+            let context = ACTAActionContext(threadID: "fixture")
+            let confirmedContext = ACTAActionContext(threadID: "fixture", isConfirmed: true)
+            let prepared = try await action.prepareConfirmation(parameters: parameters, context: context)
+            switch scenario {
+            case 0:
+                let old = state.targetPrecision
+                XCTAssertTrue(state.setTargetPrecision(0.9))
+                XCTAssertTrue(state.setTargetPrecision(old))
+            case 1:
+                bridge.detach(state)
+                bridge.attach(state)
+            case 2:
+                bridge.attach(other)
+            default:
+                bridge.detach(state)
+            }
+            let before = state.targetPrecision
+            let result = try await action.executeConfirmed(parameters: parameters, context: confirmedContext,
+                                                            snapshot: prepared.snapshot)
+            XCTAssertFalse(result.success)
+            XCTAssertTrue(result.error?.hasPrefix("STALE_REVIEW:") == true)
+            XCTAssertEqual(state.targetPrecision, before)
+        }
+    }
+
+    func testReviewedCalibrationRejectsReentrancyAndModelScopeConfusion() async throws {
+        let bridge = ACTAReIDCalibrationViewBridge()
+        let otherModelBridge = ACTAReIDCalibrationViewBridge()
+        let state = ACTAReIDCalibrationViewState()
+        let other = ACTAReIDCalibrationViewState()
+        bridge.attach(state)
+        otherModelBridge.attach(other)
+        let action = ACTAReviewedReIDCalibrationAction(bridge: bridge)
+        let parameters = ["target_precision": "0.95"]
+        let context = ACTAActionContext(threadID: "fixture")
+        let confirmedContext = ACTAActionContext(threadID: "fixture", isConfirmed: true)
+        var prepared = try await action.prepareConfirmation(parameters: parameters, context: context)
+        let subscription = state.objectWillChange.sink {
+            bridge.detach(state)
+            bridge.attach(state)
+        }
+        let before = state.targetPrecision
+        var result = try await action.executeConfirmed(parameters: parameters, context: confirmedContext, snapshot: prepared.snapshot)
+        XCTAssertFalse(result.success)
+        XCTAssertEqual(state.targetPrecision, before)
+        subscription.cancel()
+        prepared = try await action.prepareConfirmation(parameters: parameters, context: context)
+        var nestedResult = true
+        let nested = state.$targetPrecision.dropFirst().sink { _ in
+            nestedResult = state.setTargetPrecision(0.9)
+        }
+        result = try await action.executeConfirmed(parameters: parameters, context: confirmedContext, snapshot: prepared.snapshot)
+        XCTAssertFalse(result.success)
+        XCTAssertFalse(nestedResult)
+        XCTAssertEqual(state.targetPrecision, 0.95)
+        XCTAssertEqual(other.targetPrecision, ReIDThresholdCalibrator.defaultTargetPrecision)
+        nested.cancel()
+        prepared = try await action.prepareConfirmation(parameters: ["target_precision": "0.96"], context: context)
+        result = try await action.executeConfirmed(parameters: ["target_precision": "0.96"],
+                                                   context: confirmedContext, snapshot: prepared.snapshot)
+        XCTAssertTrue(result.success)
+        let verified = try await action.verify(parameters: ["target_precision": "0.96"], context: confirmedContext)
+        XCTAssertTrue(verified)
+        XCTAssertEqual(other.targetPrecision, ReIDThresholdCalibrator.defaultTargetPrecision)
+    }
+
+    func testReviewedCalibrationRejectionAndAuditFailureDoNotWrite() async throws {
+        for failAudit in [false, true] {
+            let bridge = ACTAReIDCalibrationViewBridge()
+            let state = ACTAReIDCalibrationViewState()
+            bridge.attach(state)
+            let action = ACTAReviewedReIDCalibrationAction(bridge: bridge)
+            let made = await ACTALocalActionBroker.make(actions: [action],
+                allowedActionIDs: [action.id], audit: { event in
+                    if failAudit && event.phase == .review { throw CocoaError(.fileWriteUnknown) }
+                })
+            let host = try XCTUnwrap(made)
+            let opened = await host.broker.openSession(operatorKey: host.operatorKey,
+                input: .chat, threadID: "fixture", actionIDs: [action.id])
+            let session = try XCTUnwrap(opened)
+            let pending = await host.broker.request(session: session, actionID: action.id,
+                                                     argumentsJSON: #"{"target_precision":0.95}"#)
+            XCTAssertTrue(pending.requiresOperatorConfirmation)
+            let reviews = await host.broker.reviews(operatorKey: host.operatorKey, session: session)
+            let review = try XCTUnwrap(reviews.first)
+            let result = await host.broker.resolve(operatorKey: host.operatorKey, session: session,
+                                                   reviewed: review, approved: failAudit)
+            XCTAssertFalse(result.success)
+            if failAudit { XCTAssertTrue(result.error?.hasPrefix("AUDIT_FAILED:") == true) }
+            XCTAssertEqual(state.targetPrecision, ReIDThresholdCalibrator.defaultTargetPrecision)
+            await host.broker.closeSession(session, operatorKey: host.operatorKey)
+        }
+    }
+
+    func testReviewedCalibrationRequiresUniqueViewAndVerifiesRevision() async throws {
+        let bridge = ACTAReIDCalibrationViewBridge()
+        let first = ACTAReIDCalibrationViewState()
+        let second = ACTAReIDCalibrationViewState()
+        let action = ACTAReviewedReIDCalibrationAction(bridge: bridge)
+        let parameters = ["target_precision": "0.95"]
+        let context = ACTAActionContext(threadID: "fixture")
+        let confirmedContext = ACTAActionContext(threadID: "fixture", isConfirmed: true)
+        do {
+            _ = try await action.prepareConfirmation(parameters: parameters, context: context)
+            XCTFail("No attached view must be unavailable")
+        } catch {}
+        bridge.attach(first)
+        bridge.attach(second)
+        do {
+            _ = try await action.prepareConfirmation(parameters: parameters, context: context)
+            XCTFail("Multiple attached views must be unavailable")
+        } catch {}
+        bridge.detach(second)
+        let prepared = try await action.prepareConfirmation(parameters: parameters, context: context)
+        let result = try await action.executeConfirmed(parameters: parameters, context: confirmedContext,
+                                                        snapshot: prepared.snapshot)
+        XCTAssertTrue(result.success)
+        XCTAssertTrue(first.setTargetPrecision(0.9))
+        XCTAssertTrue(first.setTargetPrecision(0.95))
+        let verified = try await action.verify(parameters: parameters, context: confirmedContext)
+        XCTAssertFalse(verified)
+        XCTAssertEqual(second.targetPrecision, ReIDThresholdCalibrator.defaultTargetPrecision)
+    }
+
+    func testReviewedCalibrationRejectsUnconfirmedContextAndConsumesSnapshot() async throws {
+        let bridge = ACTAReIDCalibrationViewBridge()
+        let state = ACTAReIDCalibrationViewState()
+        bridge.attach(state)
+        let action = ACTAReviewedReIDCalibrationAction(bridge: bridge)
+        let parameters = ["target_precision": "0.95"]
+        let context = ACTAActionContext(threadID: "fixture")
+        let prepared = try await action.prepareConfirmation(parameters: parameters, context: context)
+        let revision = state.revision
+        let result = try await action.executeConfirmed(parameters: parameters, context: context,
+                                                       snapshot: prepared.snapshot)
+        XCTAssertFalse(result.success)
+        XCTAssertTrue(result.error?.hasPrefix("CONFIRMATION_REQUIRED:") == true)
+        XCTAssertEqual(state.revision, revision)
+        XCTAssertEqual(state.targetPrecision, ReIDThresholdCalibrator.defaultTargetPrecision)
+        let confirmed = ACTAActionContext(threadID: "fixture", isConfirmed: true)
+        let replay = try await action.executeConfirmed(parameters: parameters, context: confirmed,
+                                                       snapshot: prepared.snapshot)
+        XCTAssertTrue(replay.error?.hasPrefix("CONFIRMATION_CONSUMED:") == true)
+    }
+
+    func testReviewedCalibrationBrokerRejectsStaleAndWithholdsUnauditedResult() async throws {
+        for stale in [true, false] {
+            let bridge = ACTAReIDCalibrationViewBridge()
+            let state = ACTAReIDCalibrationViewState()
+            bridge.attach(state)
+            let action = ACTAReviewedReIDCalibrationAction(bridge: bridge)
+            let made = await ACTALocalActionBroker.make(actions: [action], allowedActionIDs: [action.id],
+                audit: { event in
+                    if !stale && event.phase == .result && event.outcome == "success" {
+                        throw CocoaError(.fileWriteUnknown)
+                    }
+                })
+            let host = try XCTUnwrap(made)
+            let opened = await host.broker.openSession(operatorKey: host.operatorKey, input: .chat,
+                                                        threadID: "fixture", actionIDs: [action.id])
+            let session = try XCTUnwrap(opened)
+            let request = await host.broker.request(session: session, actionID: action.id,
+                                                     argumentsJSON: #"{"target_precision":0.95}"#)
+            XCTAssertTrue(request.requiresOperatorConfirmation)
+            let reviews = await host.broker.reviews(operatorKey: host.operatorKey, session: session)
+            let review = try XCTUnwrap(reviews.first)
+            if stale {
+                bridge.detach(state)
+                bridge.attach(state)
+            }
+            let result = await host.broker.resolve(operatorKey: host.operatorKey, session: session,
+                                                   reviewed: review, approved: true)
+            XCTAssertFalse(result.success)
+            if stale {
+                XCTAssertTrue(result.error?.hasPrefix("STALE_REVIEW:") == true)
+                XCTAssertEqual(state.targetPrecision, ReIDThresholdCalibrator.defaultTargetPrecision)
+            } else {
+                XCTAssertTrue(result.error?.hasPrefix("AUDIT_FAILED:") == true)
+                XCTAssertEqual(state.targetPrecision, 0.95)
+                XCTAssertFalse(result.outputJSON.contains("target_precision"))
+            }
+            await host.broker.closeSession(session, operatorKey: host.operatorKey)
+        }
     }
 }

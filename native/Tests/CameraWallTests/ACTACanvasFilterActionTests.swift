@@ -1,4 +1,5 @@
 import CameraCore
+import Combine
 import Foundation
 import XCTest
 @testable import CameraWall
@@ -6,10 +7,13 @@ import XCTest
 @MainActor
 private final class CanvasLocationInventory {
     var groups: Set<String>? = ["Entrance", "Other"]
+    var revision = UUID()
 }
 
 @MainActor
 final class ACTACanvasFilterActionTests: XCTestCase {
+    private let inventoryRevision = UUID()
+
     func testSharedStatePatchAndTypedTransport() async throws {
         let bridge = ACTACanvasFilterBridge()
         let state = ACTACanvasFilterState()
@@ -17,7 +21,8 @@ final class ACTACanvasFilterActionTests: XCTestCase {
         state.searchText = "previous"
         bridge.attach(state)
         let registry = ACTAActionRegistry()
-        await registry.register(ACTACanvasSetFilterAction(bridge: bridge, locationGroups: { ["Entrance", "Other"] }))
+        await registry.register(ACTACanvasSetFilterAction(bridge: bridge, locationGroups: { ["Entrance", "Other"] },
+                                                           inventoryRevision: { self.inventoryRevision }))
         let tools = try await ACTAAnalyticsCoordinator.registryTools(registry: registry)
         let tool = try XCTUnwrap(tools.first { $0.name == "acta__canvas__set_filter" })
         let schema = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(tool.parametersSchemaJSON.utf8)) as? [String: Any])
@@ -50,7 +55,8 @@ final class ACTACanvasFilterActionTests: XCTestCase {
         let state = ACTACanvasFilterState()
         bridge.attach(state)
         let registry = ACTAActionRegistry()
-        await registry.register(ACTACanvasSetFilterAction(bridge: bridge, locationGroups: { ["Entrance"] }))
+        await registry.register(ACTACanvasSetFilterAction(bridge: bridge, locationGroups: { ["Entrance"] },
+                                                           inventoryRevision: { self.inventoryRevision }))
         for json in ["{}", #"{"status":"unknown"}"#, #"{"favorites_only":"true"}"#,
                      #"{"events_only":1}"#, #"{"location":"Unknown"}"#, #"{"location":"All Locations"}"#,
                      #"{"search":"ok","events_only":null}"#] {
@@ -69,7 +75,8 @@ final class ACTACanvasFilterActionTests: XCTestCase {
 
     func testUnavailableViewsAndVerificationAfterGUIChanges() async throws {
         let bridge = ACTACanvasFilterBridge()
-        let action = ACTACanvasSetFilterAction(bridge: bridge, locationGroups: { ["Entrance"] })
+        let action = ACTACanvasSetFilterAction(bridge: bridge, locationGroups: { ["Entrance"] },
+                                               inventoryRevision: { self.inventoryRevision })
         let context = ACTAActionContext()
         let params = ["search": "gate"]
         let missing = try await action.execute(parameters: params, context: context)
@@ -103,7 +110,8 @@ final class ACTACanvasFilterActionTests: XCTestCase {
         let state = ACTACanvasFilterState()
         let inventory = CanvasLocationInventory()
         bridge.attach(state)
-        let action = ACTACanvasSetFilterAction(bridge: bridge, locationGroups: { inventory.groups })
+        let action = ACTACanvasSetFilterAction(bridge: bridge, locationGroups: { inventory.groups },
+                                               inventoryRevision: { inventory.revision })
         let context = ACTAActionContext()
         let selected = ["location": "Other"]
         let applied = try await action.execute(parameters: selected, context: context)
@@ -134,7 +142,8 @@ final class ACTACanvasFilterActionTests: XCTestCase {
         let bridge = ACTACanvasFilterBridge()
         let state = ACTACanvasFilterState()
         bridge.attach(state)
-        let action = ACTACanvasSetFilterAction(bridge: bridge, locationGroups: { ["Other", "GATE"] })
+        let action = ACTACanvasSetFilterAction(bridge: bridge, locationGroups: { ["Other", "GATE"] },
+                                               inventoryRevision: { self.inventoryRevision })
         let applied = try await action.execute(parameters: [
             "search": "gate", "status": "live", "favorites_only": "true", "events_only": "true"
         ], context: ACTAActionContext())
@@ -150,5 +159,130 @@ final class ACTACanvasFilterActionTests: XCTestCase {
         XCTAssertFalse(state.includes(name: "Entrance", location: "GATE", stale: false, favorite: true, hasEvents: true))
         state.cameraScope = .offline
         XCTAssertTrue(state.includes(name: "Entrance", location: nil, stale: nil, favorite: true, hasEvents: true))
+    }
+
+    func testReviewedFilterCommitsAllFieldsAfterOneNotification() async throws {
+        let bridge = ACTACanvasFilterBridge()
+        let state = ACTACanvasFilterState()
+        let inventory = CanvasLocationInventory()
+        bridge.attach(state)
+        let action = ACTACanvasSetFilterAction(bridge: bridge, locationGroups: { inventory.groups },
+                                               inventoryRevision: { inventory.revision })
+        let parameters = ["search": "gate", "location": "Entrance", "status": "live",
+                          "favorites_only": "true", "events_only": "true"]
+        let context = ACTAActionContext(isConfirmed: true)
+        let review = try await action.prepareConfirmation(parameters: parameters, context: context)
+        var notifications = 0
+        let subscription = state.objectWillChange.sink {
+            notifications += 1
+            XCTAssertEqual(state.searchText, "")
+            XCTAssertNil(state.locationFilter)
+            XCTAssertEqual(state.cameraScope, .all)
+            XCTAssertFalse(state.favoritesOnly)
+            XCTAssertFalse(state.alertsOnly)
+        }
+        let result = try await action.executeConfirmed(parameters: parameters, context: context, snapshot: review.snapshot)
+        XCTAssertTrue(result.success)
+        XCTAssertEqual(notifications, 1)
+        XCTAssertEqual(state.searchText, "gate")
+        XCTAssertEqual(state.locationFilter, "Entrance")
+        XCTAssertEqual(state.cameraScope, .live)
+        XCTAssertTrue(state.favoritesOnly)
+        XCTAssertTrue(state.alertsOnly)
+        let verified = try await action.verify(parameters: parameters, context: context)
+        XCTAssertTrue(verified)
+        withExtendedLifetime(subscription) {}
+    }
+
+    func testReviewedFilterRejectsReentrantDetachStateAndInventoryABA() async throws {
+        for mutation in 0..<3 {
+            let bridge = ACTACanvasFilterBridge()
+            let state = ACTACanvasFilterState()
+            let inventory = CanvasLocationInventory()
+            bridge.attach(state)
+            let action = ACTACanvasSetFilterAction(bridge: bridge, locationGroups: { inventory.groups },
+                                                   inventoryRevision: { inventory.revision })
+            let parameters = ["search": "gate", "status": "live", "events_only": "true"]
+            let context = ACTAActionContext(isConfirmed: true)
+            let review = try await action.prepareConfirmation(parameters: parameters, context: context)
+            var fired = false
+            let subscription = state.objectWillChange.sink {
+                guard !fired else { return }
+                fired = true
+                switch mutation {
+                case 0:
+                    bridge.detach(state)
+                    bridge.attach(state)
+                case 1:
+                    state.searchText = "intervening"
+                    state.searchText = ""
+                default:
+                    inventory.groups = ["Other"]
+                    inventory.revision = UUID()
+                    inventory.groups = ["Entrance", "Other"]
+                    inventory.revision = UUID()
+                }
+            }
+            let result = try await action.executeConfirmed(parameters: parameters, context: context,
+                                                           snapshot: review.snapshot)
+            XCTAssertFalse(result.success)
+            XCTAssertEqual(state.searchText, "")
+            XCTAssertEqual(state.cameraScope, .all)
+            XCTAssertFalse(state.alertsOnly)
+            let verified = try await action.verify(parameters: parameters, context: context)
+            XCTAssertFalse(verified)
+            withExtendedLifetime(subscription) {}
+        }
+    }
+
+    func testReviewedCommitCannotRunInsideGUIWillChange() {
+        let state = ACTACanvasFilterState()
+        var commitRevision: UUID?
+        let subscription = state.objectWillChange.sink {
+            commitRevision = state.commitReviewed(expectedRevision: state.reviewRevision, isValid: { true }) {
+                $0.favoritesOnly = true
+            }
+        }
+        state.searchText = "GUI"
+        XCTAssertNil(commitRevision)
+        XCTAssertEqual(state.searchText, "GUI")
+        XCTAssertFalse(state.favoritesOnly)
+        withExtendedLifetime(subscription) {}
+    }
+
+    func testAnalysisChatLifecycleChangesOnlyOnCommittedSectionTransitions() {
+        let state = ACTACanvasFilterState()
+        let initial = state.analysisChatLifecycle
+        state.analysisSection = .alerts
+        let alerts = state.analysisChatLifecycle
+        XCTAssertNotEqual(initial, alerts)
+        state.analysisSection = .alerts
+        XCTAssertEqual(alerts, state.analysisChatLifecycle)
+
+        var fired = false
+        let subscription = state.objectWillChange.sink {
+            guard !fired else { return }
+            fired = true
+            state.searchText = "intervening"
+        }
+        let rejected = state.commitReviewed(expectedRevision: state.reviewRevision, isValid: { true }) {
+            $0.analysisSection = .ask
+        }
+        XCTAssertNil(rejected)
+        XCTAssertEqual(state.analysisSection, .alerts)
+        XCTAssertEqual(state.analysisChatLifecycle, alerts)
+        subscription.cancel()
+
+        let committed = state.commitReviewed(expectedRevision: state.reviewRevision, isValid: { true }) {
+            $0.analysisSection = .ask
+        }
+        XCTAssertNotNil(committed)
+        XCTAssertEqual(state.analysisSection, .ask)
+        XCTAssertNotEqual(state.analysisChatLifecycle, alerts)
+        let reopenedOwner = state.analysisChatLifecycle
+        let previousRevision = state.reviewRevision
+        state.invalidateAnalysisChatLifecycle()
+        XCTAssertNotEqual(state.analysisChatLifecycle, reopenedOwner)
+        XCTAssertNotEqual(state.reviewRevision, previousRevision)
     }
 }

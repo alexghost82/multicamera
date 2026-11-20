@@ -198,6 +198,35 @@ public final class CameraMemoryStore: @unchecked Sendable {
         return retained.sorted { $0.capturedAt > $1.capturedAt }
     }
 
+    /// Reads the retained index without performing retention or orphan cleanup.
+    public func inspect(now: Date = Date()) throws -> [CameraMemoryFrame] {
+        guard now.timeIntervalSinceReferenceDate.isFinite else { throw CameraMemoryStoreError.storageFailure }
+        lock.lock()
+        defer { lock.unlock() }
+        var directory = stat()
+        if lstat(directoryURL.path, &directory) != 0 {
+            guard errno == ENOENT else { throw CameraMemoryStoreError.storageFailure }
+            return []
+        }
+        guard (directory.st_mode & S_IFMT) == S_IFDIR else { throw CameraMemoryStoreError.storageFailure }
+        let descriptor = open(directoryURL.appendingPathComponent(".memory.lock").path, O_RDONLY | O_NOFOLLOW)
+        guard descriptor >= 0 else { throw CameraMemoryStoreError.storageFailure }
+        defer { close(descriptor) }
+        var attributes = stat()
+        guard fstat(descriptor, &attributes) == 0, (attributes.st_mode & S_IFMT) == S_IFREG,
+              flock(descriptor, LOCK_SH) == 0 else {
+            throw CameraMemoryStoreError.storageFailure
+        }
+        defer { flock(descriptor, LOCK_UN) }
+        var journal = stat()
+        if lstat(journalURL.path, &journal) == 0 { throw CameraMemoryStoreError.recoveryRequired }
+        guard errno == ENOENT else { throw CameraMemoryStoreError.storageFailure }
+        return try readIndex().filter {
+            Self.isRetained($0, now: now)
+                && FileManager.default.fileExists(atPath: directoryURL.appendingPathComponent($0.fileName).path)
+        }.sorted { $0.capturedAt > $1.capturedAt }
+    }
+
     public func imageData(for frame: CameraMemoryFrame) throws -> Data {
         let descriptor = try acquireLock()
         defer { releaseLock(descriptor) }

@@ -15,6 +15,9 @@ final class ONNXReIDEncoderTests: XCTestCase {
     }
 
     func testDownloadedReIDModelsReturnNormalized512DEmbeddings() throws {
+        guard ProcessInfo.processInfo.environment["CAMERAWALL_RUN_INSTALLED_MODEL_INTEGRATION"] == "1" else {
+            throw XCTSkip("Set CAMERAWALL_RUN_INSTALLED_MODEL_INTEGRATION=1 to run installed model inference.")
+        }
         guard ONNXReIDEncoder.modelURL(for: .person) != nil,
               ONNXReIDEncoder.modelURL(for: .vehicle) != nil else {
             throw XCTSkip("Run make -C native reid-models to fetch the source GHOST encoders.")

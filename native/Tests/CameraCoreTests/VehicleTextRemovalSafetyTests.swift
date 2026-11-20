@@ -5,10 +5,9 @@ import XCTest
 
 final class VehicleTextRemovalSafetyTests: XCTestCase {
     func testReviewedEvidenceCannotRemoveNewerEvidenceFromAnotherStore() throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(".vehicle-text-test-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try IsolatedStoreTestDirectory()
+        defer { try? fixture.remove() }
+        let directory = fixture.url
         let url = directory.appendingPathComponent("tracking.sqlite3")
         let now = Date(timeIntervalSince1970: 2_000_000_000)
         let store = try LocalTrackingStore(url: url, now: now)
@@ -64,10 +63,9 @@ final class VehicleTextRemovalSafetyTests: XCTestCase {
     }
 
     func testTrackOnlyRemovalRejectsMissingTrackAndPreservesSearchData() throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(".vehicle-text-test-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try IsolatedStoreTestDirectory()
+        defer { try? fixture.remove() }
+        let directory = fixture.url
         let url = directory.appendingPathComponent("tracking.sqlite3")
         let now = Date(timeIntervalSince1970: 2_000_000_000)
         let store = try LocalTrackingStore(url: url, now: now)

@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 // MARK: - Engine Lifecycle & Execution Mode
@@ -713,6 +714,11 @@ public struct VideoAnalyticsSettings: Codable, Equatable, Sendable {
 }
 
 public enum VideoAnalyticsSettingsStore {
+    public struct Snapshot: Equatable, Sendable {
+        public let settings: VideoAnalyticsSettings
+        public let revision: UUID?
+    }
+
     public static var defaultURL: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("CameraWall/video-analytics-settings.json")
@@ -729,16 +735,157 @@ public enum VideoAnalyticsSettingsStore {
 
     public static func save(_ settings: VideoAnalyticsSettings, to url: URL = defaultURL) throws {
         try settings.validate()
+        try withLock(url) {
+            try saveLocked(settings, to: url)
+        }
+    }
+
+    public static func snapshot(from url: URL = defaultURL) throws -> Snapshot {
+        try withLock(url) {
+            try snapshotLocked(from: url)
+        }
+    }
+
+    public static func compareAndSave(_ settings: VideoAnalyticsSettings, expected: Snapshot,
+                                      to url: URL = defaultURL) throws -> Snapshot? {
+        try settings.validate()
+        return try withLock(url) {
+            guard try snapshotLocked(from: url) == expected else { return nil }
+            if FileManager.default.fileExists(atPath: url.path) {
+                let original = try Data(contentsOf: url)
+                let encoded = try JSONEncoder().encode(expected.settings)
+                guard try hasUniqueJSONKeys(original),
+                      try normalizedJSON(original).isEqual(normalizedJSON(encoded)) else {
+                    throw ConfigurationError.invalid("Analytics settings contain unsupported or incomplete fields.")
+                }
+            }
+            try saveLocked(settings, to: url)
+            return try snapshotLocked(from: url)
+        }
+    }
+
+    private static func normalizedJSON(_ data: Data) throws -> NSDictionary {
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw ConfigurationError.invalid("Invalid analytics settings.")
+        }
+        var result = root
+        if let overrides = root["cameraOverrides"] as? [Any] {
+            guard overrides.count.isMultiple(of: 2) else {
+                throw ConfigurationError.invalid("Invalid camera overrides.")
+            }
+            var pairs: [(String, Any)] = []
+            for index in stride(from: 0, to: overrides.count, by: 2) {
+                guard let key = overrides[index] as? String else {
+                    throw ConfigurationError.invalid("Invalid camera override key.")
+                }
+                pairs.append((key, overrides[index + 1]))
+            }
+            pairs.sort { $0.0 < $1.0 }
+            result["cameraOverrides"] = pairs.flatMap { [$0.0, $0.1] }
+        }
+        return result as NSDictionary
+    }
+
+    private static func hasUniqueJSONKeys(_ data: Data) throws -> Bool {
+        let bytes = [UInt8](data)
+        var containers: [Set<String>?] = []
+        var index = 0
+        while index < bytes.count {
+            switch bytes[index] {
+            case 123: containers.append([])
+            case 91: containers.append(nil)
+            case 125, 93: _ = containers.popLast()
+            case 34:
+                let start = index
+                index += 1
+                while index < bytes.count && bytes[index] != 34 {
+                    if bytes[index] == 92 { index += 1 }
+                    index += 1
+                }
+                guard index < bytes.count else {
+                    throw ConfigurationError.invalid("Invalid analytics settings JSON.")
+                }
+                var next = index + 1
+                while next < bytes.count && [9, 10, 13, 32].contains(bytes[next]) { next += 1 }
+                if next < bytes.count, bytes[next] == 58, !containers.isEmpty,
+                   var keys = containers[containers.count - 1] {
+                    let fragment = Data(bytes[start...index])
+                    guard let key = try JSONSerialization.jsonObject(with: fragment, options: [.fragmentsAllowed]) as? String else {
+                        throw ConfigurationError.invalid("Invalid analytics settings key.")
+                    }
+                    guard keys.insert(key).inserted else { return false }
+                    containers[containers.count - 1] = keys
+                }
+            default: break
+            }
+            index += 1
+        }
+        return true
+    }
+
+    private static func withLock<T>(_ url: URL, _ body: () throws -> T) throws -> T {
         let dir = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(
             at: dir,
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
+        let lockURL = dir.appendingPathComponent(".\(url.lastPathComponent).lock")
+        let fd = open(lockURL.path, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK, mode_t(0o600))
+        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { close(fd) }
+        func validateLock() throws {
+            var opened = stat()
+            var current = stat()
+            guard fstat(fd, &opened) == 0, lstat(lockURL.path, &current) == 0,
+                  opened.st_mode & S_IFMT == S_IFREG, opened.st_nlink == 1,
+                  opened.st_uid == geteuid(), opened.st_mode & 0o077 == 0,
+                  current.st_mode & S_IFMT == S_IFREG, current.st_nlink == 1,
+                  current.st_uid == geteuid(), current.st_mode & 0o077 == 0,
+                  current.st_dev == opened.st_dev, current.st_ino == opened.st_ino else {
+                throw ConfigurationError.invalid("Unsafe analytics settings lock; a write may have completed. Reload and reconcile settings.")
+            }
+        }
+        try validateLock()
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { flock(fd, LOCK_UN) }
+        try validateLock()
+        do {
+            let result = try body()
+            try validateLock()
+            return result
+        } catch {
+            try validateLock()
+            throw error
+        }
+    }
+
+    private static func snapshotLocked(from url: URL) throws -> Snapshot {
+        let revisionURL = url.deletingLastPathComponent().appendingPathComponent(".\(url.lastPathComponent).revision")
+        let revision: UUID?
+        if FileManager.default.fileExists(atPath: revisionURL.path) {
+            let value = try String(contentsOf: revisionURL, encoding: .utf8)
+            guard let parsed = UUID(uuidString: value) else {
+                throw ConfigurationError.invalid("Invalid analytics settings revision.")
+            }
+            revision = parsed
+        } else {
+            revision = nil
+        }
+        return Snapshot(settings: try load(from: url), revision: revision)
+    }
+
+    private static func saveLocked(_ settings: VideoAnalyticsSettings, to url: URL) throws {
+        let dir = url.deletingLastPathComponent()
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(settings)
+        let revisionURL = dir.appendingPathComponent(".\(url.lastPathComponent).revision")
+        try Data(UUID().uuidString.utf8).write(to: revisionURL, options: [.atomic])
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: revisionURL.path)
         try data.write(to: url, options: [.atomic])
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }

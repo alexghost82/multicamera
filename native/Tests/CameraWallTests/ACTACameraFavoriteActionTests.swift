@@ -7,20 +7,12 @@ import XCTest
 private final class FavoriteFake: ACTACameraFavoritesStorage {
     var value = ""
     var writes = 0
-    var discardWrites = false
-    func read() -> String { value }
+    var reads = 0
+    func read() -> String { reads += 1; return value }
     func write(_ value: String) {
         writes += 1
-        if !discardWrites { self.value = value }
+        self.value = value
     }
-}
-
-@MainActor
-private final class FavoriteFileFixture: ACTACameraFavoritesStorage {
-    let url: URL
-    init(url: URL) { self.url = url }
-    func read() throws -> String { try String(contentsOf: url, encoding: .utf8) }
-    func write(_ value: String) throws { try value.write(to: url, atomically: true, encoding: .utf8) }
 }
 
 @MainActor
@@ -35,75 +27,77 @@ final class ACTACameraFavoriteActionTests: XCTestCase {
         })
     }
 
-    func testSharedFormatAndFileBackedRoundTrip() async throws {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent(".favorite-fixture-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: url) }
-        let store = FavoriteFileFixture(url: url)
-        try store.write("\(other.uuidString),invalid,\(other.uuidString)")
-        let registry = ACTAActionRegistry()
-        await registry.register(action(store))
-        let tools = try await ACTAAnalyticsCoordinator.registryTools(registry: registry)
-        let tool = try XCTUnwrap(tools.first { $0.name == "acta__camera__set_favorite" })
-        let schema = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(tool.parametersSchemaJSON.utf8)) as? [String: Any])
-        XCTAssertEqual(Set(try XCTUnwrap(schema["required"] as? [String])), ["camera_id", "favorite"])
-
-        let added = try await registry.executeJSON(actionID: "camera.set_favorite",
-            argumentsJSON: "{\"camera_id\":\"Entrance\",\"favorite\":true}")
-        XCTAssertTrue(added.success, added.summary)
-        XCTAssertTrue(added.verified)
-        XCTAssertEqual(ACTACameraFavorites.decode(try store.read()), [camera, other])
-        XCTAssertEqual(try store.read(), ACTACameraFavorites.encode([camera, other]))
-        let output = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(added.outputJSON.utf8)) as? [String: Any])
-        XCTAssertEqual(output["camera_id"] as? String, camera.uuidString)
-        XCTAssertEqual(output["favorite"] as? Bool, true)
-
-        try store.write(ACTACameraFavorites.toggling(camera, in: store.read()))
-        XCTAssertEqual(ACTACameraFavorites.decode(try store.read()), [other])
-        try store.write(ACTACameraFavorites.toggling(camera, in: store.read()))
-        let removed = try await registry.execute(actionID: "camera.set_favorite",
-            parameters: ["camera_id": camera.uuidString, "favorite": "false"])
-        XCTAssertTrue(removed.success, removed.summary)
-        XCTAssertEqual(ACTACameraFavorites.decode(try store.read()), [other])
-    }
-
-    func testInvalidRequestsAndDiscardedWriteNeverReportSuccess() async throws {
+    func testLegacyActionFailsClosedEvenWhenManuallyRegistered() async throws {
         let store = FavoriteFake()
+        store.value = ACTACameraFavorites.encode([camera, other])
         let registry = ACTAActionRegistry()
         await registry.register(action(store))
-        for json in [
-            "{\"camera_id\":\"missing\",\"favorite\":true}",
-            "{\"camera_id\":\"Entrance\",\"favorite\":\"true\"}",
-            "{\"camera_id\":\"Entrance\"}",
-            "{\"camera_id\":\"Entrance\",\"favorite\":true,\"extra\":1}"
-        ] {
+        let before = store.value
+        for json in [#"{"camera_id":"Entrance","favorite":true}"#,
+                     #"{"camera_id":"Entrance","favorite":false}"#] {
             let result = try await registry.executeJSON(actionID: "camera.set_favorite", argumentsJSON: json)
             XCTAssertFalse(result.success)
             XCTAssertFalse(result.verified)
         }
+        XCTAssertEqual(store.reads, 0)
         XCTAssertEqual(store.writes, 0)
-        store.discardWrites = true
-        let result = try await registry.execute(actionID: "camera.set_favorite",
-            parameters: ["camera_id": "Entrance", "favorite": "true"])
-        XCTAssertFalse(result.success)
-        XCTAssertFalse(result.verified)
-        XCTAssertEqual(store.value, "")
-        store.value = ACTACameraFavorites.encode([camera, other])
-        let failedRemoval = try await registry.execute(actionID: "camera.set_favorite",
-            parameters: ["camera_id": "Entrance", "favorite": "false"])
-        XCTAssertFalse(failedRemoval.success)
-        XCTAssertEqual(ACTACameraFavorites.decode(store.read()), [camera, other])
+        XCTAssertEqual(store.value, before)
+        let verified = try await action(store).verify(parameters: ["camera_id": "Entrance", "favorite": "true"],
+                                                       context: ACTAActionContext())
+        XCTAssertFalse(verified)
+        XCTAssertEqual(store.reads, 0)
     }
 
-    func testReadAfterWriteVerificationDetectsSubsequentChange() async throws {
+    func testBrokerApprovalCannotEnableLegacyFavoriteWrites() async throws {
         let store = FavoriteFake()
-        let action = action(store)
-        let result = try await action.execute(parameters: ["camera_id": "Entrance", "favorite": "true"],
-                                              context: ACTAActionContext())
-        XCTAssertTrue(result.success)
-        store.value = ""
-        let verified = try await action.verify(parameters: ["camera_id": "Entrance", "favorite": "true"],
-                                               context: ACTAActionContext())
-        XCTAssertFalse(verified)
+        store.value = ACTACameraFavorites.encode([other])
+        let created = await ACTALocalActionBroker.make(
+            actions: [action(store)], allowedActionIDs: ["camera.set_favorite"], audit: { _ in })
+        let host = try XCTUnwrap(created)
+        let opened = await host.broker.openSession(operatorKey: host.operatorKey, input: .chat,
+            threadID: "favorite-test", actionIDs: ["camera.set_favorite"])
+        let session = try XCTUnwrap(opened)
+        let pending = await host.broker.request(session: session, actionID: "camera.set_favorite",
+            argumentsJSON: #"{"camera_id":"Entrance","favorite":true}"#)
+        XCTAssertTrue(pending.requiresOperatorConfirmation)
+        let reviews = await host.broker.reviews(operatorKey: host.operatorKey, session: session)
+        let review = try XCTUnwrap(reviews.first)
+        let result = await host.broker.resolve(operatorKey: host.operatorKey, session: session,
+                                               reviewed: review, approved: true)
+        XCTAssertFalse(result.success)
+        XCTAssertFalse(result.verified)
+        XCTAssertEqual(store.value, ACTACameraFavorites.encode([other]))
+        XCTAssertEqual(store.reads, 0)
+        XCTAssertEqual(store.writes, 0)
+        await host.broker.closeSession(session, operatorKey: host.operatorKey)
+    }
+
+    func testGUIFavoriteFormatStillTogglesCameraIDs() throws {
+        let initial = ACTACameraFavorites.encode([other])
+        let added = try ACTACameraFavorites.checkedToggle(camera, storedValue: initial)
+        XCTAssertEqual(ACTACameraFavorites.decode(added), [camera, other])
+        XCTAssertEqual(try ACTACameraFavorites.checkedToggle(camera, storedValue: added), initial)
+    }
+
+    func testCheckedGUITogglePreservesOtherIDsAndAcceptsOlderNoncanonicalOrdering() throws {
+        let initial = "\(other.uuidString.lowercased()),\(camera.uuidString.lowercased())"
+        let removed = try ACTACameraFavorites.checkedToggle(camera, storedValue: initial)
+        XCTAssertEqual(ACTACameraFavorites.decode(removed), [other])
+        let added = try ACTACameraFavorites.checkedToggle(camera, storedValue: removed)
+        XCTAssertEqual(ACTACameraFavorites.decode(added), [camera, other])
+        XCTAssertEqual(try ACTACameraFavorites.checkedToggle(camera, storedValue: nil),
+                       ACTACameraFavorites.encode([camera]))
+        XCTAssertEqual(try ACTACameraFavorites.checkedToggle(camera, storedValue: ""),
+                       ACTACameraFavorites.encode([camera]))
+    }
+
+    func testCheckedGUIToggleRejectsDataThatWouldBeLost() {
+        let id = other.uuidString
+        let invalid: [Any] = [42, ["unexpected"], "\(id),invalid", "\(id),",
+                              ",\(id)", "\(id),\(id.lowercased())"]
+        for value in invalid {
+            XCTAssertThrowsError(try ACTACameraFavorites.checkedToggle(camera, storedValue: value),
+                                 "Accepted invalid value: \(value)")
+        }
     }
 }

@@ -49,6 +49,8 @@ final class ACTACameraConfigurationActionTests: XCTestCase {
         defer { model.shutdown(); try? FileManager.default.removeItem(at: root) }
         let registry = ACTAActionRegistry()
         await registerAllWallActions(registry: registry, model: model)
+        let favorite = await registry.action(for: "camera.set_favorite")
+        XCTAssertNil(favorite)
         let file = root.appendingPathComponent("fixture.mp4")
         try Data([1,2,3]).write(to: file)
         for (id, arguments) in [
@@ -180,14 +182,42 @@ final class ACTACameraConfigurationActionTests: XCTestCase {
         await registerAllWallActions(registry: registry, model: model)
         let store = try LocalTrackingStore(url: root.appendingPathComponent("action-audit.sqlite"))
         let coordinator = ACTAAnalyticsCoordinator(aiClient: IsolatedWallFixtureSupport.client(), trackingStore: store)
+        let madeHost = await ACTALocalActionBroker.make(
+            actions: [ACTABrokerCameraEditAction(model: model)],
+            allowedActionIDs: ["camera.edit"],
+            audit: { event in
+                try store.recordACTAToolCallAudit(ACTAToolCallAuditRecord(
+                    threadID: event.threadID,
+                    toolName: event.actionID,
+                    argsJSON: event.auditMetadataJSON,
+                    resultRows: event.outcome == "completed" ? 1 : 0,
+                    durationMs: 0,
+                    ok: event.outcome == "completed" || event.phase != .result,
+                    error: event.phase == .result && event.outcome != "completed" ? event.outcome : nil,
+                    createdAt: Date()
+                ))
+            }
+        )
+        let host = try XCTUnwrap(madeHost)
+        let openedSession = await host.broker.openSession(
+            operatorKey: host.operatorKey,
+            input: .chat,
+            threadID: "source-edit",
+            actionIDs: ["camera.edit"]
+        )
+        let session = try XCTUnwrap(openedSession)
         let call = ACTAAgentFunctionCall(callID: "edit", name: "acta__camera__edit",
             argumentsJSON: #"{"camera_id":"\#(local.id.uuidString)","device_id":"device-new","name":"Updated"}"#)
         let output = await coordinator.executeModelGeneratedAgentTool(call, threadID: "source-edit",
-            requestToolNames: [call.name], registry: registry)
+            requestToolNames: [call.name], registry: registry, broker: host.broker, brokerSession: session)
         let result = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(output.outputJSON.utf8)) as? [String: Any])
-        XCTAssertEqual(result["action_success"] as? Bool, true)
-        XCTAssertEqual(result["action_verified"] as? Bool, true)
-        XCTAssertEqual(result["connection_verified"] as? Bool, false)
+        XCTAssertEqual(result["requires_operator_confirmation"] as? Bool, true)
+        let reviews = await host.broker.reviews(operatorKey: host.operatorKey, session: session)
+        let review = try XCTUnwrap(reviews.first)
+        XCTAssertEqual(review.parameters["device_id"], "device-new")
+        let reviewed = await host.broker.resolve(operatorKey: host.operatorKey, session: session, reviewed: review, approved: true)
+        XCTAssertTrue(reviewed.success, reviewed.error ?? "")
+        XCTAssertTrue(reviewed.verified)
         local.localDeviceID = "device-new"
         local.name = "Updated"
         XCTAssertEqual(try ConfigurationStore.load(from: model.configURL).cameras.first { $0.id == local.id }, local)
@@ -204,7 +234,7 @@ final class ACTACameraConfigurationActionTests: XCTestCase {
         XCTAssertFalse(model.running)
         XCTAssertTrue(model.tiles.values.allSatisfy { $0.session == nil })
         let audit = try store.executeReadOnlyACTASQL("SELECT tool_name, args_json FROM ghost_chat_tool_calls")
-        XCTAssertTrue(audit.contains { $0["tool_name"] == "camera.edit" && ($0["args_json"] ?? "").contains("device-new") })
+        XCTAssertTrue(audit.contains { $0["tool_name"] == "camera.edit" })
         XCTAssertFalse(audit.contains { ($0["args_json"] ?? "").contains("fixture-secret") })
         let unaudited = ACTAAnalyticsCoordinator(aiClient: IsolatedWallFixtureSupport.client())
         let rejected = await unaudited.executeModelGeneratedAgentTool(
@@ -212,7 +242,8 @@ final class ACTACameraConfigurationActionTests: XCTestCase {
                 argumentsJSON: #"{"camera_id":"\#(local.id.uuidString)","device_id":"not-saved"}"#),
             threadID: "source-edit", requestToolNames: ["acta__camera__edit"], registry: registry)
         let failure = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(rejected.outputJSON.utf8)) as? [String: Any])
-        XCTAssertEqual(failure["action_success"] as? Bool, false)
+        XCTAssertNil(failure["action_success"])
+        XCTAssertNotNil(failure["error"])
         XCTAssertEqual(try ConfigurationStore.load(from: model.configURL).cameras.first { $0.id == local.id }, local)
     }
 

@@ -21,8 +21,9 @@ final class TrackDescriptionSearchTests: XCTestCase {
     }
 
     func testSearchPagesAcrossHistoryAndCapsOnlyDisplayedRecords() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try IsolatedStoreTestDirectory()
+        defer { try? fixture.remove() }
+        let directory = fixture.url
         let store = try LocalTrackingStore(url: directory.appendingPathComponent("tracking.sqlite3"))
         let cameraID = UUID()
         let timestamp = Date(timeIntervalSince1970: 2_000_000)
@@ -50,10 +51,9 @@ final class TrackDescriptionSearchTests: XCTestCase {
     }
 
     func testSearchFindsMatchesBeyondFiveHundredRecentTracks() throws {
-        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
-            .appendingPathComponent(".track-search-test-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try IsolatedStoreTestDirectory()
+        defer { try? fixture.remove() }
+        let directory = fixture.url
         let store = try LocalTrackingStore(url: directory.appendingPathComponent("tracking.sqlite3"))
         let cameraID = UUID()
         let timestamp = Date(timeIntervalSince1970: 2_000_000)

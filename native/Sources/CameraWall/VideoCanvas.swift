@@ -48,7 +48,11 @@ struct VideoCanvas: View {
                                         return model.canvasLayoutSnapshot
                                     },
                                     expand: { model.toggleExpanded(camera) }, edit: { edit(camera) },
-                                    reconnect: { model.reconnect(camera) }, snapshot: { model.snapshot(camera) },
+                                    reconnect: { model.reconnect(camera) },
+                                    snapshot: {
+                                        ACTAOperationalExportUI.start(ACTAReviewedFrameExport.make(
+                                            cameraID: camera.id, frames: ACTAWallSnapshotFrameProvider(model: model)))
+                                    },
                                     remove: { remove(camera) },
                                     toggleYOLO: { model.setYOLOEnabled(for: camera.id, enabled: $0) },
                                     toggleAIChat: { model.setAIChatEnabled(for: camera.id, enabled: $0) })

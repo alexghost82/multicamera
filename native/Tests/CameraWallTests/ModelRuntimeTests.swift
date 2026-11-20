@@ -52,12 +52,15 @@ final class ModelRuntimeTests: XCTestCase {
                 try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
                 let bitmap = NSBitmapImageRep(cgImage: image)
                 let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
-                try png.write(to: url.appendingPathComponent("models-\(width).png"))
+                try png.write(to: url.appendingPathComponent("models-\(width).png"), options: .withoutOverwriting)
             }
         }
     }
 
     func testInstalledDetectionSegmentationAndReIDModelsPrepare() async throws {
+        guard ProcessInfo.processInfo.environment["CAMERAWALL_RUN_INSTALLED_MODEL_INTEGRATION"] == "1" else {
+            throw XCTSkip("Set CAMERAWALL_RUN_INSTALLED_MODEL_INTEGRATION=1 to prepare installed models.")
+        }
         guard YOLO26Detector.defaultModelURL != nil, ONNXSegmentationEncoder.modelURL != nil,
               ReIDModelKind.allCases.allSatisfy({ ONNXReIDEncoder.modelURL(for: $0) != nil }) else {
             throw XCTSkip("Local YOLO, segmentation and ReID model files are required for preparation smoke testing.")

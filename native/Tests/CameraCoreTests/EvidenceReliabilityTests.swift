@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import XCTest
 @testable import CameraCore
@@ -87,6 +88,239 @@ final class EvidenceReliabilityTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: manifest), broken)
         XCTAssertEqual(evidence.loadSnapshot(for: canonicalID), Data([1]))
         XCTAssertNotNil(evidence.lastPersistenceError)
+    }
+
+    func testDeletionReportsInaccessiblePathInsteadOfClaimingAbsence() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let blocker = root.appendingPathComponent("not-a-directory")
+        try Data([1]).write(to: blocker)
+        let evidence = SafetyEvidenceStore(baseDirectoryURL: blocker.appendingPathComponent("evidence"))
+        let id = UUID()
+        XCTAssertThrowsError(try evidence.hasEvidenceBundleChecked(for: id))
+        XCTAssertThrowsError(try evidence.deleteEvidence(for: id))
+        XCTAssertNotNil(evidence.lastPersistenceError)
+        XCTAssertEqual(try Data(contentsOf: blocker), Data([1]))
+    }
+
+    func testCheckedExistenceRejectsDanglingParentWithoutChangingLinkedRootBehavior() throws {
+        let root = try IsolatedStoreTestDirectory()
+        defer { try? root.remove() }
+        let id = UUID()
+        let dangling = root.url.appendingPathComponent("dangling")
+        try FileManager.default.createSymbolicLink(at: dangling,
+            withDestinationURL: root.url.appendingPathComponent("missing"))
+        let store = SafetyEvidenceStore(baseDirectoryURL: dangling.appendingPathComponent("evidence"))
+        XCTAssertThrowsError(try store.hasEvidenceBundleChecked(for: id))
+        XCTAssertThrowsError(try store.deleteEvidence(for: id))
+        XCTAssertThrowsError(try SafetyEvidenceStore(baseDirectoryURL: dangling).hasEvidenceBundleChecked(for: id))
+        let linkedRoot = root.url.appendingPathComponent("linked-root")
+        try FileManager.default.createSymbolicLink(at: linkedRoot, withDestinationURL: root.url)
+        let linkedStore = SafetyEvidenceStore(baseDirectoryURL: linkedRoot)
+        XCTAssertFalse(try linkedStore.hasEvidenceBundleChecked(for: id))
+        try FileManager.default.createDirectory(at: root.url.appendingPathComponent(id.uuidString.lowercased()),
+                                                withIntermediateDirectories: false)
+        XCTAssertTrue(try linkedStore.hasEvidenceBundleChecked(for: id))
+        XCTAssertFalse(try SafetyEvidenceStore(baseDirectoryURL: root.url.appendingPathComponent("absent"))
+            .hasEvidenceBundleChecked(for: id))
+    }
+
+    func testDeletionRejectsNonDirectoryBundleWithoutRemovingIt() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let evidence = SafetyEvidenceStore(baseDirectoryURL: root)
+        let id = UUID()
+        let path = root.appendingPathComponent(id.uuidString.lowercased())
+        try Data([1, 2]).write(to: path)
+        XCTAssertThrowsError(try evidence.deleteEvidence(for: id))
+        XCTAssertEqual(try Data(contentsOf: path), Data([1, 2]))
+        let linkedID = UUID()
+        let link = root.appendingPathComponent(linkedID.uuidString.lowercased())
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: path)
+        XCTAssertThrowsError(try evidence.deleteEvidence(for: linkedID))
+        XCTAssertEqual(try Data(contentsOf: link), Data([1, 2]))
+    }
+
+    func testCheckedSnapshotDistinguishesAbsenceFromReadableFile() throws {
+        let root = try IsolatedStoreTestDirectory()
+        defer { try? root.remove() }
+        let base = root.url.appendingPathComponent("evidence")
+        let store = SafetyEvidenceStore(baseDirectoryURL: base)
+        let id = UUID()
+        XCTAssertNil(try store.loadSnapshotChecked(for: id))
+
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: false)
+        XCTAssertNil(try store.loadSnapshotChecked(for: id))
+        let bundle = base.appendingPathComponent(id.uuidString.lowercased())
+        try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: false)
+        XCTAssertNil(try store.loadSnapshotChecked(for: id))
+        XCTAssertNil(store.loadSnapshot(for: id))
+
+        let bytes = Data([1, 2, 3])
+        try bytes.write(to: bundle.appendingPathComponent("snapshot.jpg"))
+        XCTAssertEqual(try store.loadSnapshotChecked(for: id), bytes)
+        XCTAssertEqual(store.loadSnapshot(for: id), bytes)
+    }
+
+    func testCheckedSnapshotRejectsInvalidPathsAndLinks() throws {
+        let root = try IsolatedStoreTestDirectory()
+        defer { try? root.remove() }
+        let id = UUID()
+        let blocker = root.url.appendingPathComponent("file")
+        try Data([1]).write(to: blocker)
+        XCTAssertThrowsError(try SafetyEvidenceStore(baseDirectoryURL: blocker).loadSnapshotChecked(for: id))
+        XCTAssertThrowsError(try SafetyEvidenceStore(baseDirectoryURL: blocker.appendingPathComponent("child"))
+            .loadSnapshotChecked(for: id))
+        XCTAssertThrowsError(try SafetyEvidenceStore(baseDirectoryURL: URL(string: "https://example.invalid/evidence")!)
+            .loadSnapshotChecked(for: id))
+
+        let store = SafetyEvidenceStore(baseDirectoryURL: root.url)
+        let bundle = root.url.appendingPathComponent(id.uuidString.lowercased())
+        try Data([1]).write(to: bundle)
+        XCTAssertThrowsError(try store.loadSnapshotChecked(for: id))
+        try FileManager.default.removeItem(at: bundle)
+        try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: false)
+        let snapshot = bundle.appendingPathComponent("snapshot.jpg")
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: false)
+        XCTAssertThrowsError(try store.loadSnapshotChecked(for: id))
+        try FileManager.default.removeItem(at: snapshot)
+        try FileManager.default.createSymbolicLink(at: snapshot, withDestinationURL: blocker)
+        XCTAssertThrowsError(try store.loadSnapshotChecked(for: id))
+        XCTAssertEqual(store.loadSnapshot(for: id), Data([1]))
+        XCTAssertEqual(try Data(contentsOf: blocker), Data([1]))
+        try FileManager.default.removeItem(at: snapshot)
+        XCTAssertEqual(mkfifo(snapshot.path, 0o600), 0)
+        XCTAssertThrowsError(try store.loadSnapshotChecked(for: id))
+
+        let linkedID = UUID()
+        let linkedBundle = root.url.appendingPathComponent(linkedID.uuidString.lowercased())
+        try FileManager.default.createSymbolicLink(at: linkedBundle, withDestinationURL: bundle)
+        XCTAssertThrowsError(try store.loadSnapshotChecked(for: linkedID))
+        let danglingID = UUID()
+        try FileManager.default.createSymbolicLink(
+            at: root.url.appendingPathComponent(danglingID.uuidString.lowercased()),
+            withDestinationURL: root.url.appendingPathComponent("missing"))
+        XCTAssertThrowsError(try store.loadSnapshotChecked(for: danglingID))
+        let linkedBase = root.url.appendingPathComponent("linked-root")
+        try FileManager.default.createSymbolicLink(at: linkedBase, withDestinationURL: root.url)
+        XCTAssertThrowsError(try SafetyEvidenceStore(baseDirectoryURL: linkedBase).loadSnapshotChecked(for: id))
+        let danglingParent = root.url.appendingPathComponent("dangling-parent")
+        try FileManager.default.createSymbolicLink(at: danglingParent,
+                                                   withDestinationURL: root.url.appendingPathComponent("missing"))
+        XCTAssertThrowsError(try SafetyEvidenceStore(baseDirectoryURL: danglingParent.appendingPathComponent("evidence"))
+            .loadSnapshotChecked(for: id))
+    }
+
+    func testCheckedSnapshotReportsRealReadPermissionFailure() throws {
+        guard geteuid() != 0 else { throw XCTSkip("Root can bypass file permissions.") }
+        let root = try IsolatedStoreTestDirectory()
+        defer { try? root.remove() }
+        let id = UUID()
+        let bundle = root.url.appendingPathComponent(id.uuidString.lowercased())
+        try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: false)
+        let snapshot = bundle.appendingPathComponent("snapshot.jpg")
+        try Data([1]).write(to: snapshot)
+        guard chmod(snapshot.path, 0) == 0 else { throw POSIXError(.EIO) }
+        defer { _ = chmod(snapshot.path, 0o600) }
+
+        let store = SafetyEvidenceStore(baseDirectoryURL: root.url)
+        XCTAssertThrowsError(try store.loadSnapshotChecked(for: id)) { error in
+            XCTAssertEqual((error as? POSIXError)?.code, .EACCES)
+        }
+        XCTAssertNil(store.loadSnapshot(for: id))
+    }
+
+    func testCheckedClipFramesHandlesMissingAndPreservesFrameOrder() throws {
+        let root = try IsolatedStoreTestDirectory()
+        defer { try? root.remove() }
+        let base = root.url.appendingPathComponent("evidence")
+        let store = SafetyEvidenceStore(baseDirectoryURL: base)
+        let id = UUID()
+        XCTAssertEqual(try store.loadClipFramesChecked(for: id), [])
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: false)
+        XCTAssertEqual(try store.loadClipFramesChecked(for: id), [])
+        let bundle = base.appendingPathComponent(id.uuidString.lowercased())
+        try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: false)
+        XCTAssertEqual(try store.loadClipFramesChecked(for: id), [])
+        for (name, value) in [("post-02.jpg", 4), ("pre-02.jpg", 2),
+                              ("post-01.jpg", 3), ("pre-01.jpg", 1), ("other.jpg", 5)] {
+            try Data([UInt8(value)]).write(to: bundle.appendingPathComponent(name))
+        }
+        let frames = [Data([1]), Data([2]), Data([3]), Data([4])]
+        XCTAssertEqual(try store.loadClipFramesChecked(for: id), frames)
+        XCTAssertEqual(store.loadClipFrames(for: id), frames)
+    }
+
+    func testCheckedClipFramesRejectsInvalidPathsAndFrameTypes() throws {
+        let root = try IsolatedStoreTestDirectory()
+        defer { try? root.remove() }
+        let id = UUID()
+        let blocker = root.url.appendingPathComponent("file")
+        try Data([1]).write(to: blocker)
+        XCTAssertThrowsError(try SafetyEvidenceStore(baseDirectoryURL: blocker).loadClipFramesChecked(for: id))
+        XCTAssertThrowsError(try SafetyEvidenceStore(baseDirectoryURL: blocker.appendingPathComponent("child"))
+            .loadClipFramesChecked(for: id))
+        XCTAssertThrowsError(try SafetyEvidenceStore(baseDirectoryURL: URL(string: "https://example.invalid/evidence")!)
+            .loadClipFramesChecked(for: id))
+        let dangling = root.url.appendingPathComponent("dangling")
+        try FileManager.default.createSymbolicLink(at: dangling, withDestinationURL: root.url.appendingPathComponent("missing"))
+        XCTAssertThrowsError(try SafetyEvidenceStore(baseDirectoryURL: dangling.appendingPathComponent("evidence"))
+            .loadClipFramesChecked(for: id))
+
+        let store = SafetyEvidenceStore(baseDirectoryURL: root.url)
+        let bundle = root.url.appendingPathComponent(id.uuidString.lowercased())
+        try Data([1]).write(to: bundle)
+        XCTAssertThrowsError(try store.loadClipFramesChecked(for: id))
+        try FileManager.default.removeItem(at: bundle)
+        try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: false)
+        let frame = bundle.appendingPathComponent("pre-01.jpg")
+        try FileManager.default.createDirectory(at: frame, withIntermediateDirectories: false)
+        XCTAssertThrowsError(try store.loadClipFramesChecked(for: id))
+        try FileManager.default.removeItem(at: frame)
+        try FileManager.default.createSymbolicLink(at: frame, withDestinationURL: blocker)
+        XCTAssertThrowsError(try store.loadClipFramesChecked(for: id))
+        XCTAssertEqual(store.loadClipFrames(for: id), [Data([1])])
+        try FileManager.default.removeItem(at: frame)
+        XCTAssertEqual(mkfifo(frame.path, 0o600), 0)
+        XCTAssertThrowsError(try store.loadClipFramesChecked(for: id))
+
+        let linkedID = UUID()
+        try FileManager.default.createSymbolicLink(at: root.url.appendingPathComponent(linkedID.uuidString.lowercased()),
+                                                   withDestinationURL: bundle)
+        XCTAssertThrowsError(try store.loadClipFramesChecked(for: linkedID))
+        let danglingID = UUID()
+        try FileManager.default.createSymbolicLink(at: root.url.appendingPathComponent(danglingID.uuidString.lowercased()),
+                                                   withDestinationURL: root.url.appendingPathComponent("missing"))
+        XCTAssertThrowsError(try store.loadClipFramesChecked(for: danglingID))
+        let linkedBase = root.url.appendingPathComponent("linked-root")
+        try FileManager.default.createSymbolicLink(at: linkedBase, withDestinationURL: root.url)
+        XCTAssertThrowsError(try SafetyEvidenceStore(baseDirectoryURL: linkedBase).loadClipFramesChecked(for: id))
+    }
+
+    func testCheckedClipFramesReportsRealPermissionFailure() throws {
+        guard geteuid() != 0 else { throw XCTSkip("Root can bypass file permissions.") }
+        let root = try IsolatedStoreTestDirectory()
+        defer { try? root.remove() }
+        let id = UUID()
+        let bundle = root.url.appendingPathComponent(id.uuidString.lowercased())
+        try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: false)
+        let frame = bundle.appendingPathComponent("pre-01.jpg")
+        try Data([1]).write(to: frame)
+        guard chmod(frame.path, 0) == 0 else { throw POSIXError(.EIO) }
+        defer { _ = chmod(frame.path, 0o600) }
+
+        let store = SafetyEvidenceStore(baseDirectoryURL: root.url)
+        XCTAssertThrowsError(try store.loadClipFramesChecked(for: id)) { error in
+            XCTAssertEqual((error as? POSIXError)?.code, .EACCES)
+        }
+        XCTAssertEqual(store.loadClipFrames(for: id), [])
+        defer { _ = chmod(bundle.path, 0o700) }
+        guard chmod(frame.path, 0o600) == 0, chmod(bundle.path, 0o100) == 0 else { throw POSIXError(.EIO) }
+        XCTAssertThrowsError(try store.loadClipFramesChecked(for: id)) { error in
+            XCTAssertEqual((error as? POSIXError)?.code, .EACCES)
+        }
     }
 
     func testSuppressedEventCreatesNoEvidenceAndDeletionClearsReferences() throws {

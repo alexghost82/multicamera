@@ -32,6 +32,9 @@ public actor ACTAActionRegistry {
     private var actions: [String: any ACTAActionProtocol] = [:]
     private var actionGenerations: [String: UUID] = [:]
     private var pendingConfirmations: [String: PendingConfirmation] = [:]
+    private var idempotencyResults: [String: ACTAActionResult] = [:]
+    private var idempotencyOrder: [String] = []
+    private static let maxIdempotencyEntries = 256
     private var preparationReservations = 0
     private let maxPendingConfirmations: Int
     private let confirmationNow: @Sendable () -> Date
@@ -227,7 +230,9 @@ public actor ACTAActionRegistry {
             initiator: context.initiator,
             now: context.now,
             trackingStore: context.trackingStore,
-            isConfirmed: false
+            isConfirmed: false,
+            idempotencyKey: context.idempotencyKey,
+            timeoutSeconds: context.timeoutSeconds
         )
         return try await executeValidated(
             actionID: actionID, parameters: parameters, context: unconfirmedContext, confirmed: false,
@@ -266,7 +271,8 @@ public actor ACTAActionRegistry {
     ) async throws -> ACTAActionResult {
         let unconfirmedContext = ACTAActionContext(
             threadID: context.threadID, initiator: context.initiator, now: context.now,
-            trackingStore: context.trackingStore, isConfirmed: false
+            trackingStore: context.trackingStore, isConfirmed: false,
+            idempotencyKey: context.idempotencyKey, timeoutSeconds: context.timeoutSeconds
         )
         return try await executeValidated(
             actionID: actionID, parameters: [:], context: unconfirmedContext, confirmed: false,
@@ -300,6 +306,9 @@ public actor ACTAActionRegistry {
 
         // Capture the action and its schema before the first suspension point.
         let actionParameters = action.parameters
+        guard Set(actionParameters.map(\.name)).count == actionParameters.count else {
+            return .failed(actionID: actionID, error: "INVALID_SCHEMA: Duplicate parameter name.")
+        }
         // Validate before requesting confirmation or allowing any side effect.
         var parameters = parameters
         if let argumentsJSON {
@@ -413,24 +422,47 @@ public actor ACTAActionRegistry {
         // Actor reentrancy across execute/verify must not permit lost-update mutations.
         // Reject overlapping writes explicitly; callers may retry after the active action completes.
         let isMutation = action.classification != .inspect
+        let idempotencyCacheKey: String? = {
+            guard isMutation, let rawKey = context.idempotencyKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !rawKey.isEmpty else { return nil }
+            return "\(actionID)\u{0}\(context.threadID)\u{0}\(rawKey)"
+        }()
+        if let idempotencyCacheKey, let cached = idempotencyResults[idempotencyCacheKey] {
+            return cached
+        }
         if isMutation && mutationInProgress {
             return .failed(actionID: actionID, error: "ACTION_BUSY: Another mutation is still executing or verifying.")
         }
         if isMutation { mutationInProgress = true }
         defer { if isMutation { mutationInProgress = false } }
 
-        // 2. Execute Action
+        // 2. Execute Action (with optional deadline enforcement)
+        let validatedParameters = parameters
+        let deadlineSeconds = context.timeoutSeconds.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
         let result: ACTAActionResult
         do {
-            if confirmed, let preparedExecution {
-                result = try await preparedExecution.execute(parameters, context)
+            if let deadlineSeconds {
+                result = try await Self.withTimeout(seconds: deadlineSeconds) {
+                    if confirmed, let preparedExecution {
+                        return try await preparedExecution.execute(validatedParameters, context)
+                    } else {
+                        return try await action.execute(parameters: validatedParameters, context: context)
+                    }
+                }
+            } else if confirmed, let preparedExecution {
+                result = try await preparedExecution.execute(validatedParameters, context)
             } else {
-                result = try await action.execute(parameters: parameters, context: context)
+                result = try await action.execute(parameters: validatedParameters, context: context)
             }
+        } catch is TimeoutError {
+            return .failed(actionID: actionID, error: "ACTION_TIMED_OUT: Action exceeded execution deadline.")
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             return ACTAActionResult.failed(actionID: actionID, error: error.localizedDescription)
         }
 
+        try Task.checkCancellation()
         guard result.success else {
             return result
         }
@@ -438,10 +470,28 @@ public actor ACTAActionRegistry {
         // 3. Read-After-Write Verification
         let isVerified: Bool
         do {
-            isVerified = try await action.verify(parameters: parameters, context: context)
+            if let deadlineSeconds {
+                isVerified = try await Self.withTimeout(seconds: deadlineSeconds) {
+                    try await action.verify(parameters: validatedParameters, context: context)
+                }
+            } else {
+                isVerified = try await action.verify(parameters: validatedParameters, context: context)
+            }
+        } catch is TimeoutError {
+            return ACTAActionResult(
+                actionID: actionID,
+                success: false,
+                summary: "Action '\(actionID)' completed execution, but read-after-write verification timed out.",
+                outputJSON: result.outputJSON,
+                verified: false,
+                error: "ACTION_TIMED_OUT: Verification exceeded deadline for \(actionID)"
+            )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             isVerified = false
         }
+        try Task.checkCancellation()
 
         if !isVerified {
             return ACTAActionResult(
@@ -454,7 +504,47 @@ public actor ACTAActionRegistry {
             )
         }
 
+        if let idempotencyCacheKey {
+            recordIdempotentResult(key: idempotencyCacheKey, result: result)
+        }
         return result
+    }
+
+    private struct TimeoutError: Error {}
+
+    private static func withTimeout<T: Sendable>(
+        seconds: TimeInterval,
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        let nanoseconds = UInt64(max(1, min(seconds, 3600) * 1_000_000_000))
+        return try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask {
+                let value = try await operation()
+                try Task.checkCancellation()
+                return value
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: nanoseconds)
+                throw TimeoutError()
+            }
+            guard let first = try await group.next() else {
+                throw CancellationError()
+            }
+            group.cancelAll()
+            try Task.checkCancellation()
+            return first
+        }
+    }
+
+    private func recordIdempotentResult(key: String, result: ACTAActionResult) {
+        if idempotencyResults[key] == nil {
+            idempotencyOrder.append(key)
+        }
+        idempotencyResults[key] = result
+        while idempotencyOrder.count > Self.maxIdempotencyEntries {
+            let evicted = idempotencyOrder.removeFirst()
+            idempotencyResults.removeValue(forKey: evicted)
+        }
     }
 
     // MARK: - Confirmation Resolution
@@ -607,7 +697,9 @@ public actor ACTAActionRegistry {
             initiator: pending.context.initiator,
             now: Date(),
             trackingStore: pending.context.trackingStore,
-            isConfirmed: true
+            isConfirmed: true,
+            idempotencyKey: pending.context.idempotencyKey,
+            timeoutSeconds: pending.context.timeoutSeconds
         )
 
         return try await executeValidated(

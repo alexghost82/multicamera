@@ -107,8 +107,10 @@ struct ACTASecurityCenterView: View {
     var resetLayout: () -> Void
     var editCamera: (Camera) -> Void
     var removeCamera: (Camera) -> Void
+    var identityFollowUpDomain: ACTAIdentityFollowUpDomain? = nil
 
     @AppStorage(ACTACameraFavorites.key) private var favoritesStorage = ""
+    @State private var favoritePreferenceError = false
     @State private var section: ACTASection = .cameras
     @State private var requestedSettings = ACTASettingsSection.general
     @StateObject private var filters = ACTACanvasFilterState()
@@ -219,13 +221,37 @@ struct ACTASecurityCenterView: View {
         .frame(minWidth: 1280, minHeight: 800)
         .foregroundStyle(ACTATheme.textPrimary)
         .preferredColorScheme(.dark)
-        .onAppear { model.canvasFilterBridge.attach(filters) }
+        .onAppear {
+            model.canvasFilterBridge.attach(filters)
+            model.navigationBridge.selectedMainSection = section.rawValue
+            model.navigationBridge.selectedSettingsSection = requestedSettings
+        }
+        .onChange(of: section) { _, newValue in
+            if model.navigationBridge.selectedMainSection != newValue.rawValue {
+                model.navigationBridge.selectedMainSection = newValue.rawValue
+            }
+        }
+        .onReceive(model.navigationBridge.$selectedMainSection) { target in
+            if let mapped = ACTASection(rawValue: target), mapped != section {
+                section = mapped
+            }
+        }
+        .onReceive(model.navigationBridge.$selectedSettingsSection) { target in
+            if requestedSettings != target {
+                requestedSettings = target
+            }
+        }
         .onDisappear {
             filters.stopAnalysisVoice()
             model.canvasFilterBridge.detach(filters)
         }
         .sheet(item: $selectedAlert) { alert in
             alertDetail(alert)
+        }
+        .alert(languageSettings.localized("Favorite settings unavailable"), isPresented: $favoritePreferenceError) {
+            Button(languageSettings.localized("OK"), role: .cancel) {}
+        } message: {
+            Text(languageSettings.localized("The saved favorite settings have an unsupported format. This action did not change them."))
         }
     }
 
@@ -862,6 +888,7 @@ struct ACTASecurityCenterView: View {
     }
 
     private func closeAIChat() {
+        if aiChatPresented { filters.invalidateAnalysisChatLifecycle() }
         filters.stopAnalysisVoice()
         aiChatPresented = false
     }
@@ -948,11 +975,11 @@ struct ACTASecurityCenterView: View {
         case .timeline:
             timelineContent
         case .memory:
-            CameraMemoryView(model: model)
+            CameraMemoryView(model: model, narrativePresentation: model.narrativePresentation)
         case .identities:
             IdentityHistoryView(model: model)
         case .crossCameraIdentity:
-            CrossCameraIdentityView()
+            CrossCameraIdentityView(followUpDomain: identityFollowUpDomain)
         case .localShowcase:
             LocalShowcaseView(model: model)
         case .analysis:
@@ -1055,7 +1082,10 @@ struct ACTASecurityCenterView: View {
                             expand: { model.toggleExpanded(camera) },
                             edit: { editCamera(camera) },
                             reconnect: { model.reconnect(camera) },
-                            snapshot: { model.snapshot(camera) },
+                            snapshot: {
+                                ACTAOperationalExportUI.start(ACTAReviewedFrameExport.make(
+                                    cameraID: camera.id, frames: ACTAWallSnapshotFrameProvider(model: model)))
+                            },
                             remove: { removeCamera(camera) },
                             toggleYOLO: { model.setYOLOEnabled(for: camera.id, enabled: $0) },
                             toggleAIChat: { model.setAIChatEnabled(for: camera.id, enabled: $0) })
@@ -1703,8 +1733,12 @@ struct ACTASecurityCenterView: View {
     }
 
     private func toggleFavorite(_ camera: Camera) {
-        let current = UserDefaults.standard.string(forKey: ACTACameraFavorites.key) ?? ""
-        favoritesStorage = ACTACameraFavorites.toggling(camera.id, in: current)
+        do {
+            let current = UserDefaults.standard.object(forKey: ACTACameraFavorites.key)
+            favoritesStorage = try ACTACameraFavorites.checkedToggle(camera.id, storedValue: current)
+        } catch {
+            favoritePreferenceError = true
+        }
     }
 }
 

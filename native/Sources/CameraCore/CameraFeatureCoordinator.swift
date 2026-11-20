@@ -38,6 +38,13 @@ public final class CameraFeatureCoordinator: @unchecked Sendable {
         try locked { try CameraFeaturePreferencesStore.load(from: preferencesURL) }
     }
 
+    /// The callback must not re-enter feature preference operations.
+    public func withLockedPreferencesSnapshot<T>(
+        _ body: (CameraFeaturePreferencesStore.Snapshot) throws -> T
+    ) throws -> T {
+        try locked { try CameraFeaturePreferencesStore.withLockedSnapshot(from: preferencesURL, body) }
+    }
+
     public func savePreferences(_ preferences: CameraFeaturePreferences) throws {
         try locked {
             try CameraFeaturePreferencesStore.save(preferences, to: preferencesURL)
@@ -278,6 +285,16 @@ public final class CameraFeatureCoordinator: @unchecked Sendable {
     /// Authorization must also be checked by the caller before receipt readback.
     public func hasDescriptionRetryReceipt(_ receipt: DescriptionRetryReceipt) throws -> Bool {
         try locked { try openStore().hasDescriptionRetryReceipt(receipt) }
+    }
+
+    public func makeCrossCameraIdentityReviewService(tracking: LocalTrackingStore) throws -> CrossCameraIdentityPolicyReviewService {
+        try locked {
+            CrossCameraIdentityPolicyReviewService(
+                tracking: tracking,
+                features: try openStore(),
+                preferencesURL: preferencesURL
+            )
+        }
     }
 
     private func loadPreferences() throws -> CameraFeaturePreferences {

@@ -12,15 +12,21 @@ enum ACTACameraFavorites {
         ids.map(\.uuidString).sorted().joined(separator: ",")
     }
 
-    static func setting(_ favorite: Bool, for cameraID: UUID, in value: String) -> String {
-        var ids = decode(value)
-        if favorite { ids.insert(cameraID) } else { ids.remove(cameraID) }
+    static func checkedToggle(_ cameraID: UUID, storedValue: Any?) throws -> String {
+        guard let storedValue else { return encode([cameraID]) }
+        guard let value = storedValue as? String else { throw InvalidPreference() }
+        if value.isEmpty { return encode([cameraID]) }
+        var ids = Set<UUID>()
+        for component in value.split(separator: ",", omittingEmptySubsequences: false) {
+            guard let id = UUID(uuidString: String(component)), ids.insert(id).inserted else {
+                throw InvalidPreference()
+            }
+        }
+        if ids.contains(cameraID) { ids.remove(cameraID) } else { ids.insert(cameraID) }
         return encode(ids)
     }
 
-    static func toggling(_ cameraID: UUID, in value: String) -> String {
-        setting(!decode(value).contains(cameraID), for: cameraID, in: value)
-    }
+    struct InvalidPreference: Error {}
 }
 
 @MainActor
@@ -38,7 +44,7 @@ struct ACTAUserDefaultsCameraFavoritesStorage: ACTACameraFavoritesStorage {
 struct ACTACameraSetFavoriteAction: ACTAActionProtocol {
     let id = "camera.set_favorite"
     let title = "Set Camera Favorite"
-    let description = "Set a configured camera's favorite flag in the same preference used by the camera view. Readback verifies the current preference, not durable disk synchronization."
+    let description = "Unavailable until camera identity and favorite preference writers are coordinated."
     let classification = ACTAActionClassification.reversible
     let parameters = [
         ACTAActionParameterSchema(name: "camera_id", type: "string", description: "Camera UUID or unique name", isRequired: true),
@@ -49,32 +55,10 @@ struct ACTACameraSetFavoriteAction: ACTAActionProtocol {
     let resolve: @MainActor @Sendable (String) -> UUID?
 
     func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
-        try await MainActor.run {
-            try Task.checkCancellation()
-            guard let value = parameters["camera_id"], let cameraID = resolve(value) else {
-                return .failed(actionID: id, error: "Camera does not exist or its name is ambiguous; specify a UUID.")
-            }
-            guard let raw = parameters["favorite"], raw == "true" || raw == "false" else {
-                return .failed(actionID: id, error: "INVALID_ARGUMENT: Invalid favorite.")
-            }
-            let favorite = raw == "true"
-            let expected = ACTACameraFavorites.setting(favorite, for: cameraID, in: try storage.read())
-            try storage.write(expected)
-            guard try storage.read() == expected else {
-                return .failed(actionID: id, error: "Favorite preference readback failed.")
-            }
-            let data = try JSONSerialization.data(withJSONObject: ["camera_id": cameraID.uuidString, "favorite": favorite])
-            return ACTAActionResult(actionID: id, success: true,
-                summary: "Favorite preference updated and read back; disk synchronization is not verified.",
-                outputJSON: String(decoding: data, as: UTF8.self))
-        }
+        .failed(actionID: id, error: "UNAVAILABLE: Favorite updates require coordinated camera and preference writers.")
     }
 
     func verify(parameters: [String: String], context: ACTAActionContext) async throws -> Bool {
-        try await MainActor.run {
-            guard let value = parameters["camera_id"], let cameraID = resolve(value),
-                  let raw = parameters["favorite"], raw == "true" || raw == "false" else { return false }
-            return ACTACameraFavorites.decode(try storage.read()).contains(cameraID) == (raw == "true")
-        }
+        false
     }
 }

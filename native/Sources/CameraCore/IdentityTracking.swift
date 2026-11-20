@@ -1349,6 +1349,88 @@ public final class LocalTrackingStore: @unchecked Sendable {
         try execute("ALTER TABLE \(table) ADD COLUMN \(column) \(declaration)")
     }
 
+    private func ensureACTAIdentityFollowUpTables() throws {
+        try execute("BEGIN IMMEDIATE")
+        var transactionOpen = true
+        defer { if transactionOpen { try? execute("ROLLBACK") } }
+        try execute("""
+            CREATE TABLE IF NOT EXISTS ghost_identity_follow_up (
+                identity_id TEXT PRIMARY KEY NOT NULL,
+                flagged INTEGER NOT NULL CHECK(flagged IN (0, 1))
+            )
+            """)
+        try execute("""
+            CREATE TABLE IF NOT EXISTS ghost_identity_follow_up_revision (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                revision BLOB NOT NULL CHECK(length(revision) = 16)
+            )
+            """)
+        try execute("""
+            CREATE TABLE IF NOT EXISTS ghost_identity_follow_up_pending (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                identity_id TEXT NOT NULL,
+                token TEXT NOT NULL
+            )
+            """)
+        try validateIdentityFollowUpSchema(table: "ghost_identity_follow_up",
+            columns: [("identity_id", "TEXT", 1, 1), ("flagged", "INTEGER", 1, 0)])
+        try validateIdentityFollowUpSchema(table: "ghost_identity_follow_up_revision",
+            columns: [("singleton", "INTEGER", 0, 1), ("revision", "BLOB", 1, 0)])
+        try validateIdentityFollowUpSchema(table: "ghost_identity_follow_up_pending",
+            columns: [("singleton", "INTEGER", 0, 1), ("identity_id", "TEXT", 1, 0), ("token", "TEXT", 1, 0)])
+        try execute("INSERT OR IGNORE INTO ghost_identity_follow_up_revision VALUES (1, randomblob(16))")
+        try execute("""
+            CREATE TRIGGER IF NOT EXISTS ghost_identity_follow_up_profile_insert
+            AFTER INSERT ON ghost_identities BEGIN
+                DELETE FROM ghost_identity_follow_up WHERE identity_id = NEW.identity_id;
+                UPDATE ghost_identity_follow_up_revision SET revision = randomblob(16) WHERE singleton = 1;
+            END
+            """)
+        try execute("""
+            CREATE TRIGGER IF NOT EXISTS ghost_identity_follow_up_profile_update
+            AFTER UPDATE ON ghost_identities BEGIN
+                UPDATE ghost_identity_follow_up_revision SET revision = randomblob(16) WHERE singleton = 1;
+            END
+            """)
+        try execute("""
+            CREATE TRIGGER IF NOT EXISTS ghost_identity_follow_up_profile_delete
+            AFTER DELETE ON ghost_identities BEGIN
+                DELETE FROM ghost_identity_follow_up WHERE identity_id = OLD.identity_id;
+                UPDATE ghost_identity_follow_up_revision SET revision = randomblob(16) WHERE singleton = 1;
+            END
+            """)
+        for operation in ["INSERT", "UPDATE", "DELETE"] {
+            try execute("""
+                CREATE TRIGGER IF NOT EXISTS ghost_identity_follow_up_flag_\(operation.lowercased())
+                AFTER \(operation) ON ghost_identity_follow_up BEGIN
+                    UPDATE ghost_identity_follow_up_revision SET revision = randomblob(16) WHERE singleton = 1;
+                END
+                """)
+        }
+        try execute("COMMIT")
+        transactionOpen = false
+    }
+
+    private func validateIdentityFollowUpSchema(table: String, columns: [(String, String, Int32, Int32)]) throws {
+        let statement = try prepare("PRAGMA table_info(\(table))")
+        defer { sqlite3_finalize(statement) }
+        var index = 0
+        var status = sqlite3_step(statement)
+        while status == SQLITE_ROW {
+            guard index < columns.count, text(statement, 1) == columns[index].0,
+                  text(statement, 2).uppercased() == columns[index].1,
+                  sqlite3_column_int(statement, 3) == columns[index].2,
+                  sqlite3_column_int(statement, 5) == columns[index].3 else {
+                throw LocalTrackingStoreError.query("Identity follow-up schema is incompatible.")
+            }
+            index += 1
+            status = sqlite3_step(statement)
+        }
+        guard status == SQLITE_DONE, index == columns.count else {
+            throw LocalTrackingStoreError.query("Identity follow-up schema is incompatible.")
+        }
+    }
+
     private func ensureACTATables() throws {
         try execute("""
             CREATE TABLE IF NOT EXISTS ghost_identities (
@@ -1359,6 +1441,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
                 updated_at REAL NOT NULL
             )
             """)
+        try ensureACTAIdentityFollowUpTables()
         try execute("""
             CREATE TABLE IF NOT EXISTS ghost_camera_links (
                 link_key TEXT PRIMARY KEY,
@@ -1743,6 +1826,10 @@ public final class LocalTrackingStore: @unchecked Sendable {
         guard sqlite3_step(statement) == SQLITE_DONE else { throw databaseError() }
     }
 
+    public func makeACTAIdentityFollowUpStore() throws -> ACTAIdentityFollowUpSQLiteStore {
+        try ACTAIdentityFollowUpSQLiteStore(databaseURL: databaseURL)
+    }
+
     public func deleteACTAIdentityProfile(identityID: String) throws {
         lock.lock()
         defer { lock.unlock() }
@@ -1910,6 +1997,10 @@ public final class LocalTrackingStore: @unchecked Sendable {
         try writeACTANarrativeChapterRecord(record, collageJPEG: collageJPEG, insertOnly: true)
     }
 
+    public func makeACTANarrativePinStore() throws -> ACTANarrativePinSQLiteStore {
+        try ACTANarrativePinSQLiteStore(databaseURL: databaseURL)
+    }
+
     private func writeACTANarrativeChapterRecord(
         _ record: ACTANarrativeChapterRecord,
         collageJPEG: Data?,
@@ -1919,6 +2010,8 @@ public final class LocalTrackingStore: @unchecked Sendable {
         guard let json = String(data: data, encoding: .utf8) else { return }
         lock.lock()
         defer { lock.unlock() }
+        try ACTANarrativeWriteCoordination.withLock(databaseURL: databaseURL) { fd in
+        try ACTANarrativeWriteCoordination.advance(fd)
         var transactionOpen = false
         if insertOnly {
             try execute("BEGIN IMMEDIATE")
@@ -2035,11 +2128,14 @@ public final class LocalTrackingStore: @unchecked Sendable {
             try execute("COMMIT")
             transactionOpen = false
         }
+        }
     }
 
     public func setACTANarrativePinned(chapterID: String, pinned: Bool) throws {
         lock.lock()
         defer { lock.unlock() }
+        try ACTANarrativeWriteCoordination.withLock(databaseURL: databaseURL) { fd in
+        try ACTANarrativeWriteCoordination.advance(fd)
         let stmt = try prepare("""
             UPDATE ghost_narrative_chapters
             SET pinned = ?,
@@ -2051,12 +2147,15 @@ public final class LocalTrackingStore: @unchecked Sendable {
         sqlite3_bind_int(stmt, 2, pinned ? 1 : 0)
         bind(chapterID, at: 3, to: stmt)
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
+        }
     }
 
     /// Saves or clears operator custom text on a narrative chapter while preserving `ai_summary` and keeping `operator_marked = 1`.
     public func setACTANarrativeOperatorText(chapterID: String, operatorText: String?) throws {
         lock.lock()
         defer { lock.unlock() }
+        try ACTANarrativeWriteCoordination.withLock(databaseURL: databaseURL) { fd in
+        try ACTANarrativeWriteCoordination.advance(fd)
         let trimmed = operatorText?.trimmingCharacters(in: .whitespacesAndNewlines)
         let stmt = try prepare("""
             UPDATE ghost_narrative_chapters
@@ -2072,6 +2171,7 @@ public final class LocalTrackingStore: @unchecked Sendable {
         }
         bind(chapterID, at: 2, to: stmt)
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw databaseError() }
+        }
     }
 
     public func loadACTANarrativeChapterRecord(chapterID: String) throws -> ACTANarrativeChapterRecord? {
@@ -2091,6 +2191,46 @@ public final class LocalTrackingStore: @unchecked Sendable {
         }
     }
 
+    public enum ACTANarrativePreviousSummary {
+        case none
+        case only(String)
+        case ambiguous
+    }
+
+    /// Legacy timestamps cannot establish insertion order after a clock rollback.
+    public func actaNarrativePreviousSummary(cameraID: UUID) throws -> ACTANarrativePreviousSummary {
+        lock.lock()
+        defer { lock.unlock() }
+        let statement = try prepare("""
+            SELECT chapter_json, ai_summary, operator_text
+            FROM ghost_narrative_chapters WHERE camera_id = ? LIMIT 2
+            """)
+        defer { sqlite3_finalize(statement) }
+        bind(cameraID.uuidString, at: 1, to: statement)
+        switch sqlite3_step(statement) {
+        case SQLITE_DONE: return .none
+        case SQLITE_ROW: break
+        default: throw databaseError()
+        }
+        let json = text(statement, 0)
+        let aiSummary = sqlite3_column_type(statement, 1) == SQLITE_NULL ? nil : text(statement, 1)
+        let operatorText = sqlite3_column_type(statement, 2) == SQLITE_NULL ? nil : text(statement, 2)
+        switch sqlite3_step(statement) {
+        case SQLITE_ROW: return .ambiguous
+        case SQLITE_DONE: break
+        default: throw databaseError()
+        }
+        guard let data = json.data(using: .utf8),
+              let narrative = try? JSONDecoder().decode(ACTATemporalNarrativeResult.self, from: data) else {
+            throw LocalTrackingStoreError.query("Cannot decode the only narrative chapter")
+        }
+        if let edited = operatorText?.trimmingCharacters(in: .whitespacesAndNewlines), !edited.isEmpty {
+            return .only(edited)
+        }
+        let summary = aiSummary ?? narrative.summary
+        return .only(summary.isEmpty ? narrative.summary : summary)
+    }
+
     /// Reads the JPEG collage persisted next to a narrative chapter, if any.
     public func actaNarrativeCollageData(for record: ACTANarrativeChapterRecord) -> Data? {
         guard let name = record.collagePath,
@@ -2104,7 +2244,8 @@ public final class LocalTrackingStore: @unchecked Sendable {
         cameraID: UUID? = nil,
         since: Date? = nil,
         until: Date? = nil,
-        limit: Int = 50
+        limit: Int = 50,
+        requireValidRows: Bool = false
     ) throws -> [ACTANarrativeChapterRecord] {
         lock.lock()
         defer { lock.unlock() }
@@ -2146,16 +2287,25 @@ public final class LocalTrackingStore: @unchecked Sendable {
 
         var records: [ACTANarrativeChapterRecord] = []
         let decoder = JSONDecoder()
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        while true {
+            let status = sqlite3_step(stmt)
+            if status == SQLITE_DONE { break }
+            guard status == SQLITE_ROW else { throw databaseError() }
             let cid = text(stmt, 0)
             let camIDStr = text(stmt, 1)
+            if requireValidRows, UUID(uuidString: camIDStr) == nil {
+                throw LocalTrackingStoreError.query("Invalid narrative camera identifier")
+            }
             let camUUID = UUID(uuidString: camIDStr) ?? UUID()
             let camName = text(stmt, 2)
             let sAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 3))
             let eAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 4))
             let json = text(stmt, 5)
             guard let data = json.data(using: .utf8),
-                  let chapter = try? decoder.decode(ACTATemporalNarrativeResult.self, from: data) else { continue }
+                  let chapter = try? decoder.decode(ACTATemporalNarrativeResult.self, from: data) else {
+                if requireValidRows { throw LocalTrackingStoreError.query("Invalid narrative chapter") }
+                continue
+            }
             let aiSum = sqlite3_column_type(stmt, 6) == SQLITE_NULL ? chapter.summary : text(stmt, 6)
             let opText = sqlite3_column_type(stmt, 7) == SQLITE_NULL ? nil : text(stmt, 7)
             let opMarked = sqlite3_column_int(stmt, 8) != 0

@@ -73,6 +73,9 @@ final class SettingsTests: XCTestCase {
     }
 
     func testNativeSliderUpdatesDraftAndSaveUsesItsValue() async throws {
+        guard ProcessInfo.processInfo.environment["CAMERAWALL_RUN_SETTINGS_WINDOW_INTEGRATION"] == "1" else {
+            throw XCTSkip("Set CAMERAWALL_RUN_SETTINGS_WINDOW_INTEGRATION=1 to run the interactive window test.")
+        }
         _ = NSApplication.shared
         let draft = WallSettingsDraft(configuration: WallConfiguration(), bundledRelayPath: "/usr/bin/true")
         var saved: WallConfiguration?
@@ -108,7 +111,7 @@ final class SettingsTests: XCTestCase {
             let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
             host.cacheDisplay(in: host.bounds, to: bitmap)
             let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
-            try png.write(to: url.appendingPathComponent("settings-before.png"))
+            try png.write(to: url.appendingPathComponent("settings-before.png"), options: .withoutOverwriting)
         }
         let sliderFrame = try XCTUnwrap(controlFrames["confidence"])
         let inset: CGFloat = 8
@@ -135,7 +138,7 @@ final class SettingsTests: XCTestCase {
             let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
             host.cacheDisplay(in: host.bounds, to: bitmap)
             let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
-            try png.write(to: url.appendingPathComponent("settings-70.png"))
+            try png.write(to: url.appendingPathComponent("settings-70.png"), options: .withoutOverwriting)
         }
     }
 

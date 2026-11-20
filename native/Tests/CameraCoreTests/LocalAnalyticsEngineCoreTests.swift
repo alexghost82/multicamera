@@ -3,6 +3,145 @@ import XCTest
 @testable import CameraCore
 
 final class LocalAnalyticsEngineCoreTests: XCTestCase {
+    func testAnalyticsSettingsCompareAndSaveRejectsABAAndUnknownFields() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("analytics-cas-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("settings.json")
+        try VideoAnalyticsSettingsStore.save(.safeDefaults, to: url)
+        let original = try VideoAnalyticsSettingsStore.snapshot(from: url)
+        var changed = original.settings
+        changed.enableSoundAlert.toggle()
+        try VideoAnalyticsSettingsStore.save(changed, to: url)
+        try VideoAnalyticsSettingsStore.save(original.settings, to: url)
+        XCTAssertNil(try VideoAnalyticsSettingsStore.compareAndSave(changed, expected: original, to: url))
+        let fresh = try VideoAnalyticsSettingsStore.snapshot(from: url)
+        XCTAssertEqual(try VideoAnalyticsSettingsStore.compareAndSave(changed, expected: fresh, to: url)?.settings, changed)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        object["futureSetting"] = "preserve"
+        try JSONSerialization.data(withJSONObject: object).write(to: url)
+        let unknown = try VideoAnalyticsSettingsStore.snapshot(from: url)
+        XCTAssertThrowsError(try VideoAnalyticsSettingsStore.compareAndSave(original.settings, expected: unknown, to: url))
+        let after = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        XCTAssertEqual(after["futureSetting"] as? String, "preserve")
+    }
+
+    func testAnalyticsSettingsCompareAndSavePreservesMultipleCameraOverrides() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("analytics-overrides-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("settings.json")
+        var settings = VideoAnalyticsSettings.safeDefaults
+        for _ in 0..<8 {
+            let id = UUID()
+            settings.cameraOverrides[id] = CameraAnalyticsOverride(cameraID: id)
+        }
+        try VideoAnalyticsSettingsStore.save(settings, to: url)
+        let snapshot = try VideoAnalyticsSettingsStore.snapshot(from: url)
+        settings.enableSoundAlert.toggle()
+        let result = try VideoAnalyticsSettingsStore.compareAndSave(settings, expected: snapshot, to: url)
+        XCTAssertEqual(result?.settings, settings)
+        XCTAssertEqual(try VideoAnalyticsSettingsStore.load(from: url).cameraOverrides, settings.cameraOverrides)
+    }
+
+    func testAnalyticsSettingsCompareAndSaveRejectsDuplicateKeys() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("analytics-duplicates-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("settings.json")
+        try VideoAnalyticsSettingsStore.save(.safeDefaults, to: url)
+        let json = try String(contentsOf: url, encoding: .utf8)
+        let expression = try NSRegularExpression(pattern: "\"enableSoundAlert\"\\s*:")
+        let duplicate = expression.stringByReplacingMatches(
+            in: json, range: NSRange(json.startIndex..., in: json),
+            withTemplate: "\"enableSoundAlert\":false,\"enableSoundAlert\":"
+        )
+        XCTAssertNotEqual(duplicate, json)
+        try Data(duplicate.utf8).write(to: url)
+        let snapshot = try VideoAnalyticsSettingsStore.snapshot(from: url)
+        XCTAssertThrowsError(try VideoAnalyticsSettingsStore.compareAndSave(.safeDefaults, expected: snapshot, to: url))
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), duplicate)
+    }
+
+    func testAnalyticsSettingsRejectsWritesWhileAnotherProcessHoldsLock() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("analytics-lock-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("settings.json")
+        try VideoAnalyticsSettingsStore.save(.safeDefaults, to: url)
+        let snapshot = try VideoAnalyticsSettingsStore.snapshot(from: url)
+        var changed = snapshot.settings
+        changed.enableSoundAlert.toggle()
+
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        child.arguments = ["-I", "-B", "-c",
+            "import fcntl, os, sys; f=open(sys.argv[1], 'r+'); fcntl.flock(f, fcntl.LOCK_EX); os.write(1, b'R'); sys.stdin.buffer.read(1)",
+            root.appendingPathComponent(".settings.json.lock").path]
+        let input = Pipe()
+        let output = Pipe()
+        child.standardInput = input
+        child.standardOutput = output
+        try child.run()
+        defer {
+            try? input.fileHandleForWriting.close()
+            if child.isRunning { child.terminate() }
+            child.waitUntilExit()
+        }
+        XCTAssertEqual(output.fileHandleForReading.readData(ofLength: 1), Data("R".utf8))
+        XCTAssertThrowsError(try VideoAnalyticsSettingsStore.snapshot(from: url))
+        XCTAssertThrowsError(try VideoAnalyticsSettingsStore.compareAndSave(changed, expected: snapshot, to: url))
+        try input.fileHandleForWriting.write(contentsOf: Data("x".utf8))
+        child.waitUntilExit()
+        XCTAssertEqual(child.terminationStatus, 0)
+        XCTAssertEqual(try VideoAnalyticsSettingsStore.snapshot(from: url), snapshot)
+        XCTAssertEqual(try VideoAnalyticsSettingsStore.compareAndSave(changed, expected: snapshot, to: url)?.settings, changed)
+    }
+
+    func testAnalyticsSettingsRejectsUnsafeLockPermissionsAndHardLinks() throws {
+        let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".analytics-lock-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("settings.json")
+        try VideoAnalyticsSettingsStore.save(.safeDefaults, to: url)
+        let snapshot = try VideoAnalyticsSettingsStore.snapshot(from: url)
+        let original = try Data(contentsOf: url)
+        let lock = root.appendingPathComponent(".settings.json.lock")
+        var changed = snapshot.settings
+        changed.enableSoundAlert.toggle()
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: lock.path)
+        XCTAssertThrowsError(try VideoAnalyticsSettingsStore.snapshot(from: url))
+        XCTAssertThrowsError(try VideoAnalyticsSettingsStore.compareAndSave(changed, expected: snapshot, to: url))
+        XCTAssertEqual(try Data(contentsOf: url), original)
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: lock.path)
+        let link = root.appendingPathComponent("lock-link")
+        try FileManager.default.linkItem(at: lock, to: link)
+        XCTAssertThrowsError(try VideoAnalyticsSettingsStore.save(changed, to: url))
+        XCTAssertEqual(try Data(contentsOf: url), original)
+        try FileManager.default.removeItem(at: link)
+        XCTAssertEqual(try VideoAnalyticsSettingsStore.compareAndSave(changed, expected: snapshot, to: url)?.settings, changed)
+    }
+
+    func testAnalyticsSettingsCorruptRevisionDoesNotOverwriteSettings() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("analytics-revision-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("settings.json")
+        try VideoAnalyticsSettingsStore.save(.safeDefaults, to: url)
+        let snapshot = try VideoAnalyticsSettingsStore.snapshot(from: url)
+        let original = try Data(contentsOf: url)
+        let revision = root.appendingPathComponent(".settings.json.revision")
+        try Data("invalid revision".utf8).write(to: revision)
+        var changed = snapshot.settings
+        changed.enableSoundAlert.toggle()
+        XCTAssertThrowsError(try VideoAnalyticsSettingsStore.snapshot(from: url))
+        XCTAssertThrowsError(try VideoAnalyticsSettingsStore.compareAndSave(changed, expected: snapshot, to: url))
+        XCTAssertEqual(try Data(contentsOf: url), original)
+        XCTAssertEqual(try Data(contentsOf: revision), Data("invalid revision".utf8))
+    }
+
     func testSettingsValidationProfilesAndPerCameraInheritance() throws {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("analytics-settings-test-\(UUID().uuidString)", isDirectory: true)

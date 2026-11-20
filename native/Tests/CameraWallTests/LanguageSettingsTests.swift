@@ -59,6 +59,24 @@ final class LanguageSettingsTests: XCTestCase {
         XCTAssertEqual(language.localizedMessage("Unknown external detail 123"), "Unknown external detail 123")
     }
 
+    func testRussianFavoriteAndEvidenceFailureMessages() {
+        let language = AppLanguage.russian
+        XCTAssertEqual(language.localized("Favorite settings unavailable"), "Настройки избранного недоступны")
+        XCTAssertEqual(language.localizedMessage("Camera shutdown did not finish: detail"),
+                       "Остановка камер не завершена: detail")
+        let message = "Evidence deletion failed: Evidence may have been deleted; check the bundle, incident and audit before retrying: detail"
+        XCTAssertEqual(language.localizedMessage(message),
+            "Не удалось удалить материалы инцидента: Материалы могли быть удалены; проверьте файлы, инцидент и журнал аудита перед повторной попыткой: detail")
+        let nested = "Evidence deletion failed: Evidence may have been deleted; check the bundle, incident and audit before retrying: Evidence bundle path is not a directory."
+        XCTAssertTrue(language.localizedMessage(nested).contains("Путь к материалам инцидента не является каталогом."))
+        XCTAssertEqual(language.localized("Cannot read evidence snapshot: %@", arguments: [
+            language.localizedMessage("Evidence snapshot path is not a regular file.")
+        ]), "Не удалось прочитать снимок инцидента: Путь к снимку инцидента не является обычным файлом.")
+        XCTAssertEqual(language.localized("Cannot read evidence clip frames: %@", arguments: [
+            language.localizedMessage("Evidence clip frame path is not a regular file.")
+        ]), "Не удалось прочитать кадры инцидента: Путь к кадру инцидента не является обычным файлом.")
+    }
+
     func testRussianCompilerCatalogHasNoMissingKeys() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let catalog = try XCTUnwrap(try PropertyListSerialization.propertyList(

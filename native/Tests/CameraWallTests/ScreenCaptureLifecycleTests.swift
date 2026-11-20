@@ -67,7 +67,40 @@ final class ScreenCaptureLifecycleTests: XCTestCase {
         while stream.counts.stops < count && ContinuousClock.now < deadline {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
+
         XCTAssertGreaterThanOrEqual(stream.counts.stops, count)
+    }
+
+    func testSessionStopAndWaitDrainsLateScreenStart() async throws {
+        let session = CameraSession()
+        let stream = FakeScreenStream()
+        await session.startScreenCapture { stream }
+        let task = Task { try await session.stopAndWait() }
+        try await waitForStops(1, stream: stream)
+        stream.finishStart()
+        try await task.value
+        XCTAssertEqual(stream.counts.stops, 2)
+        XCTAssertTrue(session.isStopped)
+    }
+
+    @MainActor
+    func testPreviouslyStoppedSessionRemainsTrackedUntilLateStartEnds() async throws {
+        let session = CameraSession()
+        let stream = FakeScreenStream()
+        await session.startScreenCapture { stream }
+        session.stop()
+        try await waitForStops(1, stream: stream)
+        var finished = false
+        let drain = Task {
+            try await CameraSession.waitForStoppedSessions()
+            finished = true
+        }
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertFalse(finished)
+        stream.finishStart()
+        try await drain.value
+        XCTAssertTrue(finished)
+        XCTAssertEqual(stream.counts.stops, 2)
     }
 
     func testStopWhileFactoryIsSuspendedNeverStartsLateStream() async {

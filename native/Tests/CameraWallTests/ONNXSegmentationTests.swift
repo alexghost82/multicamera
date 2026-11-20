@@ -5,6 +5,9 @@ import XCTest
 
 final class ONNXSegmentationTests: XCTestCase {
     func testDownloadedSegmentationModelProducesTransparentCutout() throws {
+        guard ProcessInfo.processInfo.environment["CAMERAWALL_RUN_INSTALLED_MODEL_INTEGRATION"] == "1" else {
+            throw XCTSkip("Set CAMERAWALL_RUN_INSTALLED_MODEL_INTEGRATION=1 to run installed model inference.")
+        }
         guard ONNXSegmentationEncoder.modelURL != nil else {
             throw XCTSkip("Run make -C native seg-models to export the segmentation ONNX model.")
         }

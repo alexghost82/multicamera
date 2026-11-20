@@ -74,36 +74,74 @@ struct CameraDiscovery {
         return DetectedCamera(substream: sub.source, mainstream: main.source == sub.source ? nil : main.source)
     }
 
+    static func detectCoordinated(ip: String, credentials: Credentials, config: WallConfiguration,
+                                  configURL: URL, preferred: Camera?,
+                                  progress: @escaping (String) -> Void) async throws -> DetectedCamera {
+        try Task.checkCancellation()
+        let lease = try ACTACameraDiscoveryLeaseScope.acquire(for: configURL, expected: config)
+        return try await detect(ip: ip, credentials: credentials, config: config, preferred: preferred,
+                                cameraLease: lease, progress: progress)
+    }
+
     static func detect(ip: String, credentials: Credentials, config: WallConfiguration, preferred: Camera?,
-                       progress: (String) -> Void) async throws -> DetectedCamera {
+                       cameraLease: CoordinatedCameraConfigurationStore.RuntimeLease? = nil,
+                       progress: @escaping (String) -> Void) async throws -> DetectedCamera {
         let address = try CameraAddress(ip)
-        let relay = Go2RTC()
-        defer { relay.stop() }
+        let relay = Go2RTC(cameraLease: cameraLease)
         var temporary = config
         temporary.apiPort = Int.random(in: 20000...29999)
         temporary.rtspPort = Int.random(in: 30000...39999)
         temporary.cameras = []
-        progress("Starting camera discovery")
-        try await relay.start(config: temporary)
-        let discovery = CameraDiscovery(profiles: { address, credentials in
-            try await relay.profiles(address: address, credentials: credentials)
-        }, probe: { source, credentials in
-            try Task.checkCancellation()
-            let name = "probe_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
-            let localURL = try await relay.register(source: source, name: name, credentials: credentials)
-            let session = CameraSession()
-            defer { session.stop() }
-            session.start(url: localURL)
-            let deadline = ProcessInfo.processInfo.systemUptime + 4
-            while ProcessInfo.processInfo.systemUptime < deadline {
+        var probeDrainFailed = false
+        let operation: @MainActor () async throws -> DetectedCamera = {
+            progress("Starting camera discovery")
+            try await relay.start(config: temporary)
+            let discovery = CameraDiscovery(profiles: { address, credentials in
+                try await relay.profiles(address: address, credentials: credentials)
+            }, probe: { source, credentials in
                 try Task.checkCancellation()
-                if let pixel = session.snapshot().pixel {
-                    return DetectedStream(source: source, width: CVPixelBufferGetWidth(pixel), height: CVPixelBufferGetHeight(pixel))
+                let name = "probe_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+                let localURL = try await relay.register(source: source, name: name, credentials: credentials)
+                try Task.checkCancellation()
+                let session = CameraSession()
+                session.start(url: localURL)
+                let result: Result<DetectedStream?, Error>
+                do {
+                    let deadline = ProcessInfo.processInfo.systemUptime + 4
+                    var detected: DetectedStream?
+                    while ProcessInfo.processInfo.systemUptime < deadline {
+                        try Task.checkCancellation()
+                        if let pixel = session.snapshot().pixel {
+                            detected = DetectedStream(source: source, width: CVPixelBufferGetWidth(pixel),
+                                                      height: CVPixelBufferGetHeight(pixel))
+                            break
+                        }
+                        try await Task.sleep(nanoseconds: 50_000_000)
+                    }
+                    result = .success(detected)
+                } catch {
+                    result = .failure(error)
                 }
-                try await Task.sleep(nanoseconds: 50_000_000)
-            }
-            return nil
-        })
-        return try await discovery.discover(address: address, credentials: credentials, preferred: preferred, progress: progress)
+                do {
+                    try await session.stopAndWait()
+                } catch {
+                    probeDrainFailed = true
+                    throw error
+                }
+                return try result.get()
+            })
+            return try await discovery.discover(address: address, credentials: credentials, preferred: preferred, progress: progress)
+        }
+        if let cameraLease {
+            let scope = ACTACameraDiscoveryLeaseScope(lease: cameraLease, stop: { relay.stop() }, drain: {
+                await relay.waitForPendingReadinessRequests()
+                await relay.waitForPendingRequests()
+                await relay.waitForChildrenToExit()
+                if probeDrainFailed { throw ConfigurationError.invalid("Discovery cleanup could not be verified.") }
+            })
+            return try await scope.run(operation)
+        }
+        defer { relay.stop() }
+        return try await operation()
     }
 }

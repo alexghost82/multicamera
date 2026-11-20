@@ -34,11 +34,36 @@ private final class SettingsAudit: @unchecked Sendable {
     var events: [ACTABrokerAuditEvent] { lock.withLock { entries } }
 }
 
+private actor SuspendedSettingsFixture: ACTAExistingSystemSettingsReadProvider {
+    let value: WallConfiguration
+    private var started = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var release: CheckedContinuation<Void, Never>?
+    init(_ value: WallConfiguration) { self.value = value }
+
+    func loadExistingConfiguration() async throws -> WallConfiguration {
+        await withCheckedContinuation { continuation in
+            release = continuation
+            started = true
+            waiters.forEach { $0.resume() }
+            waiters.removeAll()
+        }
+        return value
+    }
+
+    func waitUntilStarted() async {
+        if !started { await withCheckedContinuation { waiters.append($0) } }
+    }
+    func resume() { release?.resume(); release = nil }
+}
+
 final class ACTAScopedSettingsReadActionTests: XCTestCase {
     private func fixture() -> WallConfiguration {
         var config = WallConfiguration()
         config.columns = 7
         config.staleAfterMilliseconds = 2400
+        config.detectionThreshold = 0.6
+        config.detectionFPS = 4
         config.apiPort = 12345
         config.rtspPort = 12346
         config.go2rtcPath = "/secret/exec"
@@ -73,9 +98,11 @@ final class ACTAScopedSettingsReadActionTests: XCTestCase {
                 argumentsJSON: #"{"section":"\#(section)"}"#, expectedThreadID: "fixture")
             XCTAssertTrue(result.success)
             let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.outputJSON.utf8)) as? [String: Any])
-            XCTAssertEqual(Set(object.keys), ["columns", "staleAfterMilliseconds"])
+            XCTAssertEqual(Set(object.keys), ["columns", "staleAfterMilliseconds", "detectionThreshold", "detectionFPS"])
             XCTAssertEqual(object["columns"] as? Int, 7)
             XCTAssertEqual(object["staleAfterMilliseconds"] as? Int, 2400)
+            XCTAssertEqual(object["detectionThreshold"] as? Double, 0.6)
+            XCTAssertEqual(object["detectionFPS"] as? Double, 4)
             let entireResult = String(decoding: try JSONEncoder().encode(result), as: UTF8.self)
             for forbidden in ["secret", "password", "token", "rtsp", "12345", "12346", "permission"] {
                 XCTAssertFalse(entireResult.contains(forbidden), forbidden)
@@ -134,6 +161,23 @@ final class ACTAScopedSettingsReadActionTests: XCTestCase {
             XCTAssertEqual(audit.events.last?.outcome, "failed")
             await broker.closeSession(session, operatorKey: key)
         }
+        var invalid = fixture()
+        invalid.columns = 0
+        let invalidProvider = SettingsFixture(invalid)
+        let invalidResult = try await ACTAScopedSettingsReadAction(provider: invalidProvider).execute(
+            parameters: ["section": "system"], context: ACTAActionContext())
+        XCTAssertFalse(invalidResult.success)
+        XCTAssertFalse(invalidResult.outputJSON.contains("columns"))
+        invalid = fixture()
+        invalid.detectionFPS = 2.5
+        let invalidFPS = try await ACTAScopedSettingsReadAction(provider: SettingsFixture(invalid)).execute(
+            parameters: ["section": "system"], context: ACTAActionContext())
+        XCTAssertFalse(invalidFPS.success)
+        invalid = fixture()
+        invalid.detectionThreshold = .nan
+        let invalidThreshold = try await ACTAScopedSettingsReadAction(provider: SettingsFixture(invalid)).execute(
+            parameters: ["section": "system"], context: ACTAActionContext())
+        XCTAssertFalse(invalidThreshold.success)
         let unavailable = try await ACTAScopedSettingsReadAction().execute(
             parameters: ["section": "general"], context: ACTAActionContext())
         XCTAssertFalse(unavailable.success)
@@ -149,5 +193,23 @@ final class ACTAScopedSettingsReadActionTests: XCTestCase {
             XCTAssertFalse(result.outputJSON.contains("columns"))
             await broker.closeSession(session, operatorKey: key)
         }
+    }
+
+    func testRevocationDuringReadNeverReleasesSnapshot() async throws {
+        let provider = SuspendedSettingsFixture(fixture())
+        let audit = SettingsAudit()
+        let (broker, key, session) = try await broker(ACTAScopedSettingsReadAction(provider: provider), audit: audit)
+        let request = Task {
+            await broker.request(session: session, actionID: "settings.get_section",
+                                 argumentsJSON: #"{"section":"general"}"#, expectedThreadID: "fixture")
+        }
+        await provider.waitUntilStarted()
+        XCTAssertTrue(session.invalidate(operatorKey: key))
+        await provider.resume()
+        let result = await request.value
+        XCTAssertFalse(result.success)
+        XCTAssertFalse(result.outputJSON.contains("columns"))
+        XCTAssertEqual(audit.events.last?.outcome, "failed")
+        await broker.closeSession(session, operatorKey: key)
     }
 }

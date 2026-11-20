@@ -43,11 +43,13 @@ public enum ACTANarrativeCloseJournalError: Error, Equatable {
 /// written. Pending input remains sensitive and has no retention policy yet.
 public final class ACTANarrativeCloseJournal: @unchecked Sendable {
     private let db: OpaquePointer
+    private let databaseURL: URL
     private let lock = NSLock()
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
     private static let maxInputBytes = 8 * 1024 * 1024
 
     public init(databaseURL: URL) throws {
+        self.databaseURL = databaseURL.standardizedFileURL
         var handle: OpaquePointer?
         let status = sqlite3_open_v2(databaseURL.path, &handle,
                                     SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil)
@@ -139,7 +141,9 @@ public final class ACTANarrativeCloseJournal: @unchecked Sendable {
     /// result after a retry. Operator edits are never overwritten.
     public func commit(chapterID: UUID, record: ACTANarrativeChapterRecord) throws -> ACTANarrativeChapterRecord {
         try lock.withLock {
-            try transaction {
+            try ACTANarrativeWriteCoordination.withLock(databaseURL: databaseURL) { fd in
+            try ACTANarrativeWriteCoordination.advance(fd)
+            return try transaction {
                 guard let row = try row(id: chapterID) else { throw ACTANarrativeCloseJournalError.missingReservation }
                 if let result = row.result {
                     let saved = try JSONDecoder().decode(ACTANarrativeChapterRecord.self, from: result)
@@ -191,6 +195,7 @@ public final class ACTANarrativeCloseJournal: @unchecked Sendable {
                 try stepDone(update)
                 guard sqlite3_changes(db) == 1 else { throw ACTANarrativeCloseJournalError.invalidResult }
                 return record
+            }
             }
         }
     }

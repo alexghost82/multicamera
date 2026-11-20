@@ -4,9 +4,9 @@ import SQLite3
 
 final class CameraFeatureStoreTests: XCTestCase {
     func testVersionSixJobsGainRevisionsAndRetryReceipts() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try IsolatedStoreTestDirectory()
+        defer { try? fixture.remove() }
+        let directory = fixture.url
         let url = directory.appendingPathComponent("features.sqlite3")
         let jobID = UUID()
         var db: OpaquePointer?
@@ -39,8 +39,9 @@ final class CameraFeatureStoreTests: XCTestCase {
     }
 
     func testVersionFiveMigrationPreservesJobsActionsAndLegacyAcknowledgements() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try IsolatedStoreTestDirectory()
+        defer { try? fixture.remove() }
+        let directory = fixture.url
         let url = directory.appendingPathComponent("features.sqlite3")
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let alertID = UUID()
@@ -287,7 +288,7 @@ final class CameraFeatureStoreTests: XCTestCase {
         XCTAssertThrowsError(try store.enqueue(featureID: .scheduledMissions, preferences: preferences))
 
         let fileAttributes = try FileManager.default.attributesOfItem(atPath: databaseURL.path)
-        let directoryAttributes = try FileManager.default.attributesOfItem(atPath: directory.path)
+        let directoryAttributes = try FileManager.default.attributesOfItem(atPath: databaseURL.deletingLastPathComponent().path)
         XCTAssertEqual((fileAttributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
         XCTAssertEqual((directoryAttributes[.posixPermissions] as? NSNumber)?.intValue, 0o700)
     }
@@ -447,9 +448,15 @@ final class CameraFeatureStoreTests: XCTestCase {
     }
 
     private func makeStore(pendingLimit: Int = 10) throws -> (CameraFeatureStore, URL, URL) {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let databaseURL = directory.appendingPathComponent("feature-jobs.sqlite3")
-        return (try CameraFeatureStore(url: databaseURL, pendingLimit: pendingLimit), directory, databaseURL)
+        let fixture = try IsolatedStoreTestDirectory()
+        let directory = fixture.url
+        let databaseURL = directory.appendingPathComponent("store", isDirectory: true)
+            .appendingPathComponent("feature-jobs.sqlite3")
+        do {
+            return (try CameraFeatureStore(url: databaseURL, pendingLimit: pendingLimit), directory, databaseURL)
+        } catch {
+            try? fixture.remove()
+            throw error
+        }
     }
 }

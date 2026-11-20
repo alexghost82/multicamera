@@ -92,6 +92,7 @@ final class InterfaceLocalization {
                 let captured = (text as NSString).substring(with: match.range(at: index + 1))
                 let isNestedError = template.key.localizedCaseInsensitiveContains("failed:")
                     || template.key.localizedCaseInsensitiveContains("error:")
+                    || template.key.hasPrefix("Evidence may have been deleted;")
                     || template.key.hasPrefix("Cannot load configuration.")
                 let isFallMetricBlock = position == 1 && (template.key.hasPrefix("Fall confirmed after ")
                     || template.key.hasPrefix("Person remained down on floor for "))

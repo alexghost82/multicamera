@@ -1,4 +1,5 @@
 import CameraCore
+import Darwin
 import Foundation
 import XCTest
 @testable import CameraWall
@@ -26,6 +27,15 @@ private struct ModelJSONProtectedAction: ACTAActionProtocol {
 }
 
 final class ACTAModelGeneratedRegistryJSONTests: XCTestCase {
+    private func fixtureDirectory() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(".acta-catalogue-\(UUID().uuidString)", isDirectory: true)
+        guard mkdir(url.path, 0o700) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        return url
+    }
+
     func testLiveLookKeepsSyntheticClipForGUI() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(".acta-live-clip-\(UUID().uuidString)", isDirectory: true)
@@ -53,8 +63,7 @@ final class ACTAModelGeneratedRegistryJSONTests: XCTestCase {
     }
 
     func testRequestCatalogueEnforcedForModelAndDirectCalls() async throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(".acta-catalogue-tests-\(UUID().uuidString)", isDirectory: true)
+        let root = try fixtureDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try LocalTrackingStore(url: root.appendingPathComponent("tracking.sqlite"))
         let coordinator = ACTAAnalyticsCoordinator(
@@ -67,10 +76,12 @@ final class ACTAModelGeneratedRegistryJSONTests: XCTestCase {
         let deniedProbe = ModelJSONMutationProbe()
         await registry.register(ModelJSONProtectedAction(probe: allowedProbe))
         await registry.register(ModelJSONProtectedAction(id: "test.unlisted", probe: deniedProbe))
+        await registry.register(ModelJSONProtectedAction(id: "camera.set_favorite", probe: deniedProbe))
         let tools = try await ACTAAnalyticsCoordinator.registryTools(registry: registry)
         let advertised = Set(tools.map(\.name))
         XCTAssertTrue(advertised.contains("acta__settings__update_permissions"))
         XCTAssertFalse(advertised.contains("acta__test__unlisted"))
+        XCTAssertFalse(advertised.contains("acta__camera__set_favorite"))
 
         for name in ["acta__test__unlisted", "settings.update_permissions", "acta__settings.update_permissions"] {
             let call = ACTAAgentFunctionCall(callID: name, name: name, argumentsJSON: #"{"value":1}"#)
@@ -78,24 +89,24 @@ final class ACTAModelGeneratedRegistryJSONTests: XCTestCase {
             let result = await coordinator.executeModelGeneratedAgentTool(call, threadID: "test",
                 requestToolNames: advertised.union([name]), registry: registry)
             let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.outputJSON.utf8)) as? [String: Any])
-            XCTAssertTrue((json["error"] as? String)?.hasPrefix("TOOL_NOT_ADVERTISED:") == true, name)
+            XCTAssertTrue((json["error"] as? String)?.hasPrefix("UNSUPPORTED: TOOL_NOT_ADVERTISED:") == true, name)
         }
         let allowed = ACTAAgentFunctionCall(callID: "allowed", name: "acta__settings__update_permissions",
                                              argumentsJSON: #"{"value":1}"#)
         let absent = await coordinator.executeModelGeneratedAgentTool(allowed, threadID: "test",
             requestToolNames: [], registry: registry)
-        XCTAssertTrue(absent.outputJSON.contains("TOOL_NOT_ADVERTISED:"))
+        XCTAssertTrue(absent.outputJSON.contains("UNSUPPORTED: TOOL_NOT_ADVERTISED:"))
         let legacy = ACTAAgentFunctionCall(callID: "legacy", name: "live_look", argumentsJSON: "{}")
         let absentLegacy = await coordinator.executeModelGeneratedAgentTool(legacy, threadID: "test",
             requestToolNames: advertised, registry: registry)
-        XCTAssertTrue(absentLegacy.outputJSON.contains("TOOL_NOT_ADVERTISED:"))
+        XCTAssertTrue(absentLegacy.outputJSON.contains("UNSUPPORTED: TOOL_NOT_ADVERTISED:"))
         let directDenied = await coordinator.executeAgentTool(toolName: "test.unlisted",
             arguments: ["value": "1"], threadID: "test", registry: registry)
-        XCTAssertTrue(directDenied.outputJSON.contains("TOOL_NOT_ADVERTISED:"))
+        XCTAssertTrue(directDenied.outputJSON.contains("UNSUPPORTED: TOOL_NOT_ADVERTISED:"))
         let deniedCount = await deniedProbe.count
         XCTAssertEqual(deniedCount, 0)
         let rejected = try store.executeReadOnlyACTASQL(
-            "SELECT COUNT(*) AS n FROM ghost_chat_tool_calls WHERE error LIKE 'TOOL_NOT_ADVERTISED:%' AND ok = 0 AND args_json = '{}'"
+            "SELECT COUNT(*) AS n FROM ghost_chat_tool_calls WHERE error LIKE 'UNSUPPORTED: TOOL_NOT_ADVERTISED:%' AND ok = 0 AND args_json = '{}'"
         )
         XCTAssertEqual(rejected.first?["n"], "6")
 
@@ -114,8 +125,7 @@ final class ACTAModelGeneratedRegistryJSONTests: XCTestCase {
     }
 
     func testCoordinatorAndLegacyReviewCannotUseAuthorizedRegistryWithoutBroker() async throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(".acta-broker-tests-\(UUID().uuidString)", isDirectory: true)
+        let root = try fixtureDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try LocalTrackingStore(url: root.appendingPathComponent("tracking.sqlite"))
         let coordinator = ACTAAnalyticsCoordinator(
@@ -139,7 +149,7 @@ final class ACTAModelGeneratedRegistryJSONTests: XCTestCase {
         let output = await coordinator.executeModelGeneratedAgentTool(call, threadID: "thread",
             requestToolNames: [call.name], registry: registry)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(output.outputJSON.utf8)) as? [String: Any])
-        XCTAssertTrue((json["error"] as? String)?.hasPrefix("TOOL_NOT_ADVERTISED:") == true)
+        XCTAssertTrue((json["error"] as? String)?.hasPrefix("UNSUPPORTED: TOOL_NOT_ADVERTISED:") == true)
         XCTAssertNil(json["confirmation_token"])
         XCTAssertTrue(try store.listACTAChatActions(threadID: "thread").isEmpty)
 

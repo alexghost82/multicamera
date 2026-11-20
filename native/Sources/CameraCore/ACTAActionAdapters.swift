@@ -18,16 +18,102 @@ public protocol ACTAVideoAnalyticsSettingsProvider: Sendable {
 }
 
 // Default file-based implementation for providers
+private final class ACTASystemSettingsFileState: @unchecked Sendable {
+    let lock = NSLock()
+    var reconciliationRequired = false
+}
+
 public struct DefaultACTASystemSettingsProvider: ACTASystemSettingsProvider {
     private let url: URL
-    public init(url: URL = ConfigurationStore.defaultURL) { self.url = url }
+    private let state = ACTASystemSettingsFileState()
+    private let saveSnapshot: @Sendable (WallConfiguration, CoordinatedCameraConfigurationStore.Snapshot, URL,
+        CoordinatedCameraConfigurationStore.WriterLease) throws -> CoordinatedCameraConfigurationStore.Snapshot?
+
+    public init(url: URL = ConfigurationStore.defaultURL) {
+        self.url = url
+        self.saveSnapshot = { configuration, expected, url, lease in
+            try CoordinatedCameraConfigurationStore.compareAndSave(configuration, expected: expected,
+                                                                   to: url, using: lease)
+        }
+    }
+
+    init(url: URL, saveSnapshot: @escaping @Sendable (WallConfiguration, CoordinatedCameraConfigurationStore.Snapshot,
+         URL, CoordinatedCameraConfigurationStore.WriterLease) throws -> CoordinatedCameraConfigurationStore.Snapshot?) {
+        self.url = url
+        self.saveSnapshot = saveSnapshot
+    }
+
     public func loadConfiguration() throws -> WallConfiguration {
-        guard FileManager.default.fileExists(atPath: url.path) else { return WallConfiguration() }
-        return try ConfigurationStore.load(from: url)
+        try captureConfiguration().configuration
     }
+
+    public func captureConfiguration() throws -> CoordinatedCameraConfigurationStore.Snapshot {
+        state.lock.lock()
+        defer { state.lock.unlock() }
+        if state.reconciliationRequired {
+            return try CoordinatedCameraConfigurationStore.withWriterLease(for: url) { _ in
+                let snapshot = try CoordinatedCameraConfigurationStore.snapshot(from: url)
+                state.reconciliationRequired = false
+                return snapshot
+            }
+        }
+        return try CoordinatedCameraConfigurationStore.snapshot(from: url)
+    }
+
     public func saveConfiguration(_ config: WallConfiguration) throws {
-        try ConfigurationStore.save(config, to: url)
+        try saveConfiguration(config, expected: nil)
     }
+
+    public func saveConfiguration(_ config: WallConfiguration,
+                                  expected: CoordinatedCameraConfigurationStore.Snapshot) throws {
+        try saveConfiguration(config, expected: Optional(expected))
+    }
+
+    private func saveConfiguration(_ config: WallConfiguration,
+                                   expected supplied: CoordinatedCameraConfigurationStore.Snapshot?) throws {
+        state.lock.lock()
+        defer { state.lock.unlock() }
+        guard !state.reconciliationRequired else {
+            throw ConfigurationError.invalid("Camera settings require a successful reload before retrying.")
+        }
+        try config.validate()
+        do {
+            try CoordinatedCameraConfigurationStore.withWriterLease(for: url) { lease in
+                let current = try CoordinatedCameraConfigurationStore.snapshot(from: url)
+                if let supplied, !supplied.matches(current) {
+                    throw ConfigurationError.invalid("Camera configuration changed while saving; reload and retry.")
+                }
+                let expected = supplied ?? current
+                guard try expected.isSemanticallyRoundTrippable() else {
+                    throw ConfigurationError.invalid("Camera configuration contains fields this version cannot safely preserve.")
+                }
+                let saved: CoordinatedCameraConfigurationStore.Snapshot
+                do {
+                    guard let result = try saveSnapshot(config, expected, url, lease) else {
+                        throw ProviderFailure.stale
+                    }
+                    saved = result
+                } catch ProviderFailure.stale {
+                    throw ConfigurationError.invalid("Camera configuration changed while saving; reload and retry.")
+                } catch {
+                    state.reconciliationRequired = true
+                    throw ConfigurationError.invalid("Camera settings outcome is unknown; reload before retrying.")
+                }
+                do {
+                    guard try CoordinatedCameraConfigurationStore.snapshot(from: url).matches(saved) else {
+                        throw ProviderFailure.stale
+                    }
+                } catch {
+                    state.reconciliationRequired = true
+                    throw ConfigurationError.invalid("Camera settings outcome is unknown; reload before retrying.")
+                }
+            }
+        } catch let error as POSIXError where error.code == .EAGAIN {
+            throw ConfigurationError.invalid("Camera configuration is in use by another process; retry after it stops.")
+        }
+    }
+
+    private enum ProviderFailure: Error { case stale }
 }
 
 public struct DefaultACTAFeaturePreferencesProvider: ACTAFeaturePreferencesProvider {
@@ -127,7 +213,17 @@ public struct SettingsUpdateSystemAction: ACTAActionProtocol {
 
     public func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
         try validate(parameters: parameters)
-        var config = try await settingsProvider.loadConfiguration()
+        let fileProvider = settingsProvider as? DefaultACTASystemSettingsProvider
+        let expected: CoordinatedCameraConfigurationStore.Snapshot?
+        var config: WallConfiguration
+        if let fileProvider {
+            let snapshot = try fileProvider.captureConfiguration()
+            expected = snapshot
+            config = snapshot.configuration
+        } else {
+            expected = nil
+            config = try await settingsProvider.loadConfiguration()
+        }
         var changed: [String] = []
 
         if let colsStr = parameters["columns"], let cols = Int(colsStr) {
@@ -147,7 +243,11 @@ public struct SettingsUpdateSystemAction: ACTAActionProtocol {
             changed.append("staleAfterMs=\(config.staleAfterMilliseconds)")
         }
         try config.validate()
-        try await settingsProvider.saveConfiguration(config)
+        if let fileProvider, let expected {
+            try fileProvider.saveConfiguration(config, expected: expected)
+        } else {
+            try await settingsProvider.saveConfiguration(config)
+        }
         let summary = "System settings updated: " + (changed.isEmpty ? "no changes" : changed.joined(separator: ", "))
         return ACTAActionResult(actionID: id, success: true, summary: summary, outputJSON: "{\"updated\": true}")
     }

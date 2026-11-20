@@ -4,7 +4,10 @@ import Foundation
 struct ACTACanvasSetPresentationAction: ACTAPreparedConfirmationAction {
     struct ConfirmationSnapshot: Sendable {
         let lifecycleRevision: UUID
+        let stateRevision: UUID
         let previousMode: String
+        let parameters: [String: String]
+        let threadID: String
     }
     let id = "canvas.set_presentation"
     let title = "Set camera presentation"
@@ -37,25 +40,33 @@ struct ACTACanvasSetPresentationAction: ACTAPreparedConfirmationAction {
             }
             let previous = state.presentation.rawValue
             return ACTAPreparedConfirmation(
-                snapshot: ConfirmationSnapshot(lifecycleRevision: bridge.lifecycleRevision, previousMode: previous),
+                snapshot: ConfirmationSnapshot(lifecycleRevision: bridge.lifecycleRevision,
+                                               stateRevision: state.reviewRevision, previousMode: previous,
+                                               parameters: parameters, threadID: context.threadID),
                 reviewSummary: "Unique active security center: change camera presentation from \(previous) to \(requested.rawValue).")
         }
     }
 
     func executeConfirmed(parameters: [String: String], context: ACTAActionContext,
                           snapshot: ConfirmationSnapshot) async throws -> ACTAActionResult {
-        let requested = try mode(parameters)
+        let value = try mode(parameters)
         return try await MainActor.run {
             try Task.checkCancellation()
+            bridge.clearPresentationWrite()
+            guard context.isConfirmed, parameters == snapshot.parameters, context.threadID == snapshot.threadID else {
+                return .failed(actionID: id, error: "CONFIRMATION_MISMATCH: Request or thread changed.")
+            }
             guard bridge.lifecycleRevision == snapshot.lifecycleRevision, let state = bridge.activeState,
-                  state.presentation.rawValue == snapshot.previousMode else {
+                  state.reviewRevision == snapshot.stateRevision, state.presentation.rawValue == snapshot.previousMode,
+                  let revision = state.commitReviewed(expectedRevision: snapshot.stateRevision, isValid: {
+                      !Task.isCancelled && bridge.lifecycleRevision == snapshot.lifecycleRevision && bridge.activeState === state
+                  }, update: { $0.presentation = value }),
+                  state.reviewRevision == revision, state.presentation == value,
+                  bridge.lifecycleRevision == snapshot.lifecycleRevision, bridge.activeState === state else {
+                try Task.checkCancellation()
                 return .failed(actionID: id, error: "STALE_REVIEW: Camera presentation or window changed.")
             }
-            state.presentation = requested
             bridge.recordPresentationWrite(to: state)
-            guard state.presentation == requested else {
-                return .failed(actionID: id, error: "Camera presentation state readback failed.")
-            }
             return ACTAActionResult(actionID: id, success: true,
                 summary: "Camera presentation state updated in this window; rendering was not verified.")
         }
@@ -65,10 +76,18 @@ struct ACTACanvasSetPresentationAction: ACTAPreparedConfirmationAction {
         let value = try mode(parameters)
         return try await MainActor.run {
             try Task.checkCancellation()
+            bridge.clearPresentationWrite()
             guard let state = bridge.activeState else {
                 return .failed(actionID: id, error: "UNAVAILABLE: No unique active security center.")
             }
-            state.presentation = value
+            let lifecycle = bridge.lifecycleRevision
+            guard state.commitReviewed(expectedRevision: state.reviewRevision, isValid: {
+                !Task.isCancelled && bridge.lifecycleRevision == lifecycle && bridge.activeState === state
+            }, update: { $0.presentation = value }) != nil else {
+                bridge.clearPresentationWrite()
+                try Task.checkCancellation()
+                return .failed(actionID: id, error: "STALE_REVIEW: Camera presentation or window changed.")
+            }
             bridge.recordPresentationWrite(to: state)
             guard state.presentation == value else {
                 return .failed(actionID: id, error: "Camera presentation state readback failed.")

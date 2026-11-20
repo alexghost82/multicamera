@@ -74,6 +74,37 @@ final class CameraMemoryStoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent(frame.fileName).path))
     }
 
+    func testInspectionDoesNotPruneExpiredFramesOrOrphans() throws {
+        let directory = fixtureURL()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = CameraMemoryStore(url: directory)
+        let captured = Date(timeIntervalSince1970: 2_000_000)
+        let expired = try store.save(Data("expired".utf8), cameraID: UUID(), cameraName: "Gate",
+                                     capturedAt: captured, summary: "", now: captured)
+        let orphan = directory.appendingPathComponent("orphan.jpg")
+        try Data("orphan".utf8).write(to: orphan)
+        let index = directory.appendingPathComponent("index.json")
+        let before = try Data(contentsOf: index)
+        let afterRetention = captured.addingTimeInterval(7 * 86_400 + 1)
+
+        XCTAssertTrue(try store.inspect(now: afterRetention).isEmpty)
+        XCTAssertEqual(try Data(contentsOf: index), before)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent(expired.fileName).path))
+        XCTAssertEqual(try Data(contentsOf: orphan), Data("orphan".utf8))
+    }
+
+    func testInspectionDoesNotCreateStorageAndFailsWithoutLock() throws {
+        let directory = fixtureURL()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = CameraMemoryStore(url: directory)
+        XCTAssertTrue(try store.inspect().isEmpty)
+        XCTAssertThrowsError(try store.inspect(now: Date(timeIntervalSinceReferenceDate: .nan)))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        XCTAssertThrowsError(try store.inspect())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent(".memory.lock").path))
+    }
+
     func testFrameSizeIsBoundedAndDeleteRemovesImage() throws {
         let directory = fixtureURL()
         defer { try? FileManager.default.removeItem(at: directory) }

@@ -2,6 +2,29 @@ import AppKit
 import SwiftUI
 import CameraCore
 
+struct SafetyIncidentEvidenceFrames {
+    let frames: [Data]
+    let snapshotError: String?
+    let clipError: String?
+
+    static func load(store: SafetyEvidenceStore, incidentID: UUID) -> Self {
+        var frames: [Data] = []
+        var snapshotError: String?
+        do {
+            if let snapshot = try store.loadSnapshotChecked(for: incidentID) { frames.append(snapshot) }
+        } catch {
+            snapshotError = error.localizedDescription
+        }
+        var clipError: String?
+        do {
+            frames.append(contentsOf: try store.loadClipFramesChecked(for: incidentID))
+        } catch {
+            clipError = error.localizedDescription
+        }
+        return Self(frames: frames, snapshotError: snapshotError, clipError: clipError)
+    }
+}
+
 struct SafetyIncidentDetailView: View {
     @ObservedObject var engine: LocalVideoAnalyticsEngine
     @ObservedObject var languageSettings: LanguageSettings
@@ -9,6 +32,9 @@ struct SafetyIncidentDetailView: View {
     @State private var note = ""
     @State private var images: [Data] = []
     @State private var frameIndex = 0
+    @State private var evidenceReadError: String?
+    @State private var clipReadError: String?
+    @State private var evidenceLoadID = UUID()
     @State private var confirmingFalseAlarm = false
     @State private var confirmingDeletion = false
 
@@ -40,6 +66,20 @@ struct SafetyIncidentDetailView: View {
                     Spacer()
                     Button(languageSettings.localized("Refresh evidence")) { Task { await loadEvidence() } }
                 }
+                if let error = engine.evidenceDeletionError, error.incidentID == incident.id {
+                    Label(languageSettings.localizedMessage(error.message), systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.red).textSelection(.enabled)
+                }
+                if let error = evidenceReadError {
+                    Label(languageSettings.localized("Cannot read evidence snapshot: %@",
+                        arguments: [languageSettings.localizedMessage(error)]), systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.red).textSelection(.enabled)
+                }
+                if let error = clipReadError {
+                    Label(languageSettings.localized("Cannot read evidence clip frames: %@",
+                        arguments: [languageSettings.localizedMessage(error)]), systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.red).textSelection(.enabled)
+                }
                 if images.indices.contains(frameIndex), let image = NSImage(data: images[frameIndex]) {
                     Image(nsImage: image).resizable().scaledToFit().frame(maxHeight: 280)
                         .accessibilityLabel("Incident evidence frame")
@@ -49,7 +89,7 @@ struct SafetyIncidentDetailView: View {
                             .monospacedDigit()
                         Button(languageSettings.localized("Next frame")) { frameIndex = min(images.count - 1, frameIndex + 1) }.disabled(frameIndex + 1 >= images.count)
                     }
-                } else {
+                } else if evidenceReadError == nil && clipReadError == nil {
                     Text(languageSettings.localized("No readable evidence frames are available.")).foregroundStyle(.secondary)
                 }
                 Divider()
@@ -83,7 +123,7 @@ struct SafetyIncidentDetailView: View {
             .padding(16)
         }
         .background(ACTATheme.surface)
-        .task(id: incident.clipID) { await loadEvidence() }
+        .task(id: incident.clipID ?? incident.id) { await loadEvidence() }
         .onAppear { note = incident.operatorNotes }
         .confirmationDialog(languageSettings.localized("Mark this incident as a false alarm?"), isPresented: $confirmingFalseAlarm) {
             Button(languageSettings.localized("Mark as false alarm"), role: .destructive) { transition(.falsePositive) }
@@ -102,16 +142,17 @@ struct SafetyIncidentDetailView: View {
     }
 
     private func loadEvidence() async {
+        let loadID = UUID()
+        evidenceLoadID = loadID
         let store = engine.evidenceStore
         let id = incident.clipID ?? incident.id
         let result = await Task.detached(priority: .utility) {
-            var frames: [Data] = []
-            if let snapshot = store.loadSnapshot(for: id) { frames.append(snapshot) }
-            frames.append(contentsOf: store.loadClipFrames(for: id))
-            return frames
+            SafetyIncidentEvidenceFrames.load(store: store, incidentID: id)
         }.value
-        guard !Task.isCancelled else { return }
-        images = result
+        guard !Task.isCancelled, evidenceLoadID == loadID else { return }
+        images = result.frames
+        evidenceReadError = result.snapshotError
+        clipReadError = result.clipError
         frameIndex = 0
     }
 }

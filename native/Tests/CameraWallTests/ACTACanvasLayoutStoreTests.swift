@@ -78,7 +78,7 @@ final class ACTACanvasLayoutStoreTests: XCTestCase {
         let snapshot = try store.read()
         let child = Process()
         child.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        child.arguments = ["-B", "-c",
+        child.arguments = ["-I", "-B", "-c",
             "import fcntl,sys; f=open(sys.argv[1], 'r+'); fcntl.flock(f, fcntl.LOCK_EX); print('ready', flush=True); sys.stdin.read(1)",
             url.appendingPathExtension("lock").path]
         let input = Pipe()

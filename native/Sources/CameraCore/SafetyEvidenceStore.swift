@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public struct SafetyEvidenceBundleManifest: Codable, Equatable, Sendable {
@@ -254,6 +255,70 @@ public final class SafetyEvidenceStore: @unchecked Sendable {
         return try? Data(contentsOf: file)
     }
 
+    /// Returns nil only when the evidence directory, bundle, or snapshot is absent.
+    public func loadSnapshotChecked(for incidentID: UUID) throws -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let bundle = try openEvidenceBundleUnlocked(for: incidentID) else { return nil }
+        defer { close(bundle) }
+
+        let snapshot = openat(bundle, "snapshot.jpg", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        if snapshot < 0 {
+            if errno == ENOENT { return nil }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { close(snapshot) }
+        var metadata = stat()
+        guard fstat(snapshot, &metadata) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        guard metadata.st_mode & S_IFMT == S_IFREG else {
+            throw ConfigurationError.invalid("Evidence snapshot path is not a regular file.")
+        }
+        return try FileHandle(fileDescriptor: snapshot, closeOnDealloc: false).readToEnd() ?? Data()
+    }
+
+    private func openEvidenceBundleUnlocked(for incidentID: UUID) throws -> Int32? {
+        guard baseDirectoryURL.isFileURL else { throw CocoaError(.fileReadUnsupportedScheme) }
+        let directory = open(baseDirectoryURL.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        if directory < 0 {
+            if errno == ENOENT {
+                try validateMissingEvidenceDirectory()
+                return nil
+            }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { close(directory) }
+
+        let bundle = openat(directory, incidentID.uuidString.lowercased(),
+                            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        if bundle < 0 {
+            if errno == ENOENT { return nil }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        return bundle
+    }
+
+    private func validateMissingEvidenceDirectory() throws {
+        var path = baseDirectoryURL
+        while true {
+            var metadata = stat()
+            if lstat(path.path, &metadata) == 0 {
+                if metadata.st_mode & S_IFMT == S_IFLNK {
+                    guard stat(path.path, &metadata) == 0 else {
+                        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                    }
+                }
+                guard metadata.st_mode & S_IFMT == S_IFDIR else { throw POSIXError(.ENOTDIR) }
+                return
+            }
+            guard errno == ENOENT else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            let parent = path.deletingLastPathComponent()
+            guard parent.path != path.path else { throw POSIXError(.ENOENT) }
+            path = parent
+        }
+    }
+
     public func loadClipFrames(for incidentID: UUID) -> [Data] {
         lock.lock()
         defer { lock.unlock() }
@@ -268,6 +333,55 @@ public final class SafetyEvidenceStore: @unchecked Sendable {
             .filter { $0.lastPathComponent.hasPrefix("post-") && $0.pathExtension == "jpg" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         return (preFiles + postFiles).compactMap { try? Data(contentsOf: $0) }
+    }
+
+    /// Returns an empty array for an absent bundle; invalid paths and read errors are reported.
+    public func loadClipFramesChecked(for incidentID: UUID) throws -> [Data] {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let bundle = try openEvidenceBundleUnlocked(for: incidentID) else { return [] }
+        defer { close(bundle) }
+        let enumerationFD = dup(bundle)
+        guard enumerationFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        guard let directory = fdopendir(enumerationFD) else {
+            let error = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            close(enumerationFD)
+            throw error
+        }
+        defer { closedir(directory) }
+
+        var preFiles: [String] = []
+        var postFiles: [String] = []
+        while true {
+            errno = 0
+            guard let entry = readdir(directory) else {
+                if errno != 0 { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                break
+            }
+            let name = withUnsafePointer(to: &entry.pointee.d_name) {
+                $0.withMemoryRebound(to: CChar.self, capacity: Int(entry.pointee.d_namlen) + 1) {
+                    String(validatingUTF8: $0)
+                }
+            }
+            guard let name else { throw ConfigurationError.invalid("Evidence directory contains an invalid filename.") }
+            guard name.hasSuffix(".jpg") else { continue }
+            if name.hasPrefix("pre-") { preFiles.append(name) }
+            else if name.hasPrefix("post-") { postFiles.append(name) }
+        }
+
+        return try (preFiles.sorted() + postFiles.sorted()).map { name in
+            let frame = openat(bundle, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+            guard frame >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            defer { close(frame) }
+            var metadata = stat()
+            guard fstat(frame, &metadata) == 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            guard metadata.st_mode & S_IFMT == S_IFREG else {
+                throw ConfigurationError.invalid("Evidence clip frame path is not a regular file.")
+            }
+            return try FileHandle(fileDescriptor: frame, closeOnDealloc: false).readToEnd() ?? Data()
+        }
     }
 
     public func loadManifest(for incidentID: UUID) -> SafetyEvidenceBundleManifest? {
@@ -286,12 +400,18 @@ public final class SafetyEvidenceStore: @unchecked Sendable {
         return FileManager.default.fileExists(atPath: bundleDirectoryURL(for: incidentID).path)
     }
 
+    public func hasEvidenceBundleChecked(for incidentID: UUID) throws -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return try bundleExistsUnlocked(for: incidentID)
+    }
+
     public func deleteEvidence(for incidentID: UUID) throws {
         lock.lock()
         defer { lock.unlock() }
         let dir = bundleDirectoryURL(for: incidentID)
         do {
-            if FileManager.default.fileExists(atPath: dir.path) { try FileManager.default.removeItem(at: dir) }
+            if try bundleExistsUnlocked(for: incidentID) { try FileManager.default.removeItem(at: dir) }
             pendingPostCaptures.removeValue(forKey: incidentID)
         } catch {
             persistenceError = "Cannot delete incident evidence: \(error.localizedDescription)"
@@ -307,6 +427,21 @@ public final class SafetyEvidenceStore: @unchecked Sendable {
 
     private func bundleDirectoryURL(for incidentID: UUID) -> URL {
         baseDirectoryURL.appendingPathComponent(incidentID.uuidString.lowercased(), isDirectory: true)
+    }
+
+    private func bundleExistsUnlocked(for incidentID: UUID) throws -> Bool {
+        var metadata = stat()
+        if lstat(bundleDirectoryURL(for: incidentID).path, &metadata) == 0 {
+            guard metadata.st_mode & S_IFMT == S_IFDIR else {
+                throw ConfigurationError.invalid("Evidence bundle path is not a directory.")
+            }
+            return true
+        }
+        if errno == ENOENT {
+            try validateMissingEvidenceDirectory()
+            return false
+        }
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
     }
 
     private func ensureDirectoryUnlocked(_ url: URL) throws {

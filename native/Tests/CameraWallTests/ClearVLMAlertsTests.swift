@@ -76,7 +76,7 @@ final class ClearVLMAlertsTests: XCTestCase {
                          alert: alert, otherClipID: otherClipID, frames: frames))
     }
 
-    func testFailedSavePreservesGUIClipsAndReviews() throws {
+    func testUnverifiableDiskPreservesGUIClipsAndReviews() throws {
         try withFixture { fixture in
             let model = fixture.model
             let reviews = model.operationsAlertReviews
@@ -89,17 +89,17 @@ final class ClearVLMAlertsTests: XCTestCase {
             XCTAssertTrue(model.actaVLMAlertsLoaded)
 
             let alertsURL = fixture.root.appendingPathComponent("vlm-alerts.json")
+            let confirmation = try XCTUnwrap(model.prepareVLMAlertsClear())
             let savedURL = fixture.root.appendingPathComponent("saved-alerts.json")
             try FileManager.default.moveItem(at: alertsURL, to: savedURL)
             try FileManager.default.createDirectory(at: alertsURL, withIntermediateDirectories: false)
-            model.clearVLMAlerts()
+            model.clearVLMAlerts(confirmed: confirmation)
 
             XCTAssertEqual(model.vlmAlerts, [fixture.alert])
             XCTAssertEqual(model.operationsAlertReviews, reviews)
             XCTAssertEqual(model.operationsAlertAcknowledgements, acknowledgements)
-            XCTAssertFalse(model.actaVLMAlertsLoaded)
             XCTAssertNotNil(model.error)
-            XCTAssertTrue(model.notice.contains("Could not clear local VLM alerts"))
+            XCTAssertTrue(model.notice.contains("Alerts changed or could not be verified"))
             XCTAssertEqual(try VLMStore.loadAlerts(from: savedURL), [fixture.alert])
             XCTAssertEqual(try fixture.clips.frames(for: fixture.alert.id), fixture.frames)
             XCTAssertEqual(try fixture.clips.frames(for: fixture.otherClipID), fixture.frames)
@@ -110,12 +110,31 @@ final class ClearVLMAlertsTests: XCTestCase {
         }
     }
 
+    func testStaleConfirmationPreservesNewAlertsAndOtherStores() throws {
+        try withFixture { fixture in
+            let model = fixture.model
+            let confirmation = try XCTUnwrap(model.prepareVLMAlertsClear())
+            let added = VLMAlert(cameraID: UUID(), cameraName: "Synthetic camera",
+                                 condition: "New condition", evidence: "New evidence")
+            model.vlmAlerts.append(added)
+            try VLMStore.save(model.vlmAlerts, to: model.vlmAlertsURL)
+
+            model.clearVLMAlerts(confirmed: confirmation)
+
+            XCTAssertEqual(model.vlmAlerts, [fixture.alert, added])
+            XCTAssertEqual(try VLMStore.loadAlerts(from: model.vlmAlertsURL), model.vlmAlerts)
+            XCTAssertEqual(try fixture.clips.frames(for: fixture.alert.id), fixture.frames)
+            XCTAssertNotNil(try fixture.coordinator.readOpenAlertState(includeExpired: true).reviews[fixture.alert.id])
+            XCTAssertTrue(model.notice.contains("Alerts changed or could not be verified"))
+        }
+    }
+
     func testSuccessfulGUIClearRemovesLinkedClipAndReviewState() throws {
         try withFixture { fixture in
             let model = fixture.model
             XCTAssertEqual(model.vlmAlerts, [fixture.alert])
             XCTAssertNotNil(model.operationsAlertReviews[fixture.alert.id])
-            model.clearVLMAlerts()
+            model.clearVLMAlerts(confirmed: try XCTUnwrap(model.prepareVLMAlertsClear()))
 
             XCTAssertTrue(model.vlmAlerts.isEmpty)
             XCTAssertTrue(model.operationsAlertReviews.isEmpty)
@@ -135,7 +154,7 @@ final class ClearVLMAlertsTests: XCTestCase {
     func testClipFailureReportsPartialClear() throws {
         try withFixture { fixture in
             try Data("{broken".utf8).write(to: fixture.root.appendingPathComponent("clips/index.json"))
-            fixture.model.clearVLMAlerts()
+            fixture.model.clearVLMAlerts(confirmed: try XCTUnwrap(fixture.model.prepareVLMAlertsClear()))
             XCTAssertTrue(fixture.model.vlmAlerts.isEmpty)
             XCTAssertTrue(fixture.model.notice.contains("some clips or review state"))
             XCTAssertNotNil(fixture.model.error)
@@ -150,7 +169,7 @@ final class ClearVLMAlertsTests: XCTestCase {
             let directory = fixture.root.appendingPathComponent("clips/\(fixture.alert.id.uuidString.lowercased())")
             try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: directory.path)
             defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path) }
-            fixture.model.clearVLMAlerts()
+            fixture.model.clearVLMAlerts(confirmed: try XCTUnwrap(fixture.model.prepareVLMAlertsClear()))
             XCTAssertTrue(fixture.model.vlmAlerts.isEmpty)
             XCTAssertTrue(fixture.model.notice.contains("some clips or review state"))
             XCTAssertNotNil(fixture.model.error)

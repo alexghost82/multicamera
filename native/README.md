@@ -22,6 +22,31 @@ remain until the relay restarts. After 64 attempts, restart the video wall
 before reconnecting again. Local-source reconnect follows its existing path.
 Agent reconnect is not available, and real-device behavior is unverified.
 
+## Reviewed camera frame export
+
+The tile and security-center snapshot controls capture the next delivered
+frame into independent storage. The operator chooses a new destination, reviews
+the image and complete JPEG bytes, then separately confirms creation. The
+preview can become stale; its frozen bytes are still the ones exported. Existing
+files are not replaced. Use a trusted directory not concurrently modified or
+renamed by untrusted processes; a failed write may require checking the
+destination. A separate prepared agent action accepts only `camera_id`; it is
+not yet registered in the production agent. Agent-provided destinations and
+bytes are not accepted. Source availability, inventory revision and review
+expiry are checked before publication, but these checks are not atomic with
+later session changes.
+The frame-copy guarantee assumes the producer keeps its delivered frame stable
+through its callback or decoder lease; real devices and interactive dialogs
+have not been validated by the isolated tests.
+
+To enable the agent route, add
+`ACTAAgentFrameExportAction(frames: ACTAWallSnapshotFrameProvider(model: self))`
+to `WallModel.askACTAAgent`'s `actions` before deriving `actionIDs`, and map
+`acta__camera__snapshot` to `camera.snapshot` in
+`ACTAAnalyticsCoordinator.brokerActionIDs`. Do not register the legacy
+`ACTASnapshotAction` or another action with the same ID. The broker catalogue
+then supplies the single-field tool schema.
+
 ## Sampled memory deletion and recovery
 
 The memory view confirms an exact snapshot of the indexed frames displayed in
@@ -49,6 +74,10 @@ subject to the legacy-process limitation.
 
 ## Agent camera canvas filters
 
+The filter, camera selection, presentation, arrange mode and analysis section
+actions are available to model-facing sessions through local operator review.
+They require a unique active security center and reject stale reviews.
+
 `canvas.set_filter` patches the active camera view's `search`, `status`
 (`all`, `live`, `offline`), `location`, `favorites_only`, and `events_only` fields.
 An empty search or location clears that filter; a nonempty location must match
@@ -59,6 +88,10 @@ the filter in the GUI. Events means stored VLM alerts or
 ISAPI events. The action fails when there is no unique active camera view;
 verification checks the shared in-memory filter state, not rendered results
 or camera connectivity.
+
+`canvas.select_cameras` selects all enabled cameras, none, or a supplied subset
+of enabled camera UUIDs. `canvas.set_arrange_mode` enables or disables the
+window's arrange mode; it does not move or persist individual tiles.
 
 `canvas.set_presentation` sets the camera view to `grid` or `list` in the
 unique attached security center, including when another section is visible.
@@ -71,6 +104,12 @@ Chat is rejected while dictation is starting or recording. Verification checks
 window state, not rendering.
 
 ## Interface Localization
+
+When an interface language instance is connected, `settings.update_system`
+exposes only the `language` field (`en` or `ru`) to the agent. The local
+operator must approve the change; the action checks the reviewed language and
+stored value again before applying it. Other system fields remain unavailable
+through this broker action. Changes made by other processes are not locked.
 
 The interface language switch applies English or Russian to app-owned labels,
 menus, editor dialogs, tooltips, accessibility text and known runtime messages.
@@ -167,7 +206,14 @@ verify automatic recovery, and verifies Disconnect cancels pending recovery.
 - Without working ONVIF profiles, discovery tests known Hikvision, Dahua,
   Reolink, common `/live/ch00_*`, Axis and `/live` RTSP paths on port 554.
   Guessed URLs are never saved unless they produce a video frame. Discovery
-  is cancellable and leaves the configuration unchanged on failure.
+  is cancellable and does not save a camera on failure. On a first run it may
+  create the initial default camera configuration before discovery starts.
+- Network-camera discovery accepts safely round-trippable formatted and older
+  camera JSON. Unknown fields, duplicate keys, numeric precision loss, or JSON
+  over 4,000,000 bytes or 128 nesting levels are rejected without rewriting
+  the file; unusually long numeric tokens are also rejected. Keep a
+  backup and reconcile such files before editing them. Other camera writers and
+  the GUI runtime are not yet fully coordinated across processes.
 - Some devices require ONVIF to be enabled and a separate ONVIF account.
   Arbitrary proprietary paths or disabled ONVIF cannot be inferred from an
   IP alone; use the RTSP list import for those devices. ONVIF fallback does
@@ -458,7 +504,7 @@ report or proof of factual accuracy.
 To smoke-test the History tab's model path with synthetic local data:
 
 ```sh
-CAMERAWALL_TEST_VLM_MODEL=/path/to/qwen3.5-9b swift test --package-path native --disable-automatic-resolution --filter LocalVLMClientTests/testInstalledQwenAnswersSyntheticSavedHistory
+CAMERAWALL_RUN_INSTALLED_MODEL_INTEGRATION=1 CAMERAWALL_TEST_VLM_MODEL=/path/to/qwen3.5-9b swift test --package-path native --disable-automatic-resolution --filter LocalVLMClientTests/testInstalledQwenAnswersSyntheticSavedHistory
 ```
 
 The Ask tab has a visible Send question command and Command-Return shortcut.
@@ -677,15 +723,52 @@ LAN phone push is excluded and has not been changed.
   discarded if the feature is disabled, the mission is deleted, the thread is
   cleared or the task is cancelled.
 
-Local deterministic verification, run from the workspace root:
+Operator audit JSON remains a bounded array in the existing format. Participating
+instances using the same audit path serialize reads and read/modify/writes with
+a persistent adjacent `.operator-audit-log.json.lock` sidecar (or the equivalent
+name for a custom path); do not remove or replace it while instances run.
+Older versions and external writers do not participate and must be stopped.
+Lock contention fails immediately rather than waiting on the calling thread;
+reads return the cached/pending view and report a persistence error.
+Failed writes remain pending in that instance's memory and are retried on its
+next record, merging with the latest disk history; a failed load remains sticky
+and prevents overwriting the history. Check `lastPersistenceError`. Pending
+records are not durable if the process exits, and retention can evict old
+records. Incident and audit persistence are separate, not one transaction.
+
+`IncidentAuditTransactionStore` is a new, **not yet integrated** storage
+primitive. Its `snapshot()` and `update` lock a common sidecar, recover a
+checksummed roll-forward journal, and read/write the two existing JSON arrays as
+bytes in one existing directory. Lock contention fails fast. Recovery refuses
+to overwrite either file if its bytes are neither the journal's old nor new
+version. An update error can have committed; reconcile with `snapshot()` before
+retrying. The caller must preserve unknown fields when editing JSON. Crash-left
+staging files may remain and can contain sensitive history. Do not remove or
+replace the transaction lock or journal while the store is in use or recovery
+is pending.
+
+The current `UnifiedIncidentManager`, `OperatorAuditLog` and
+`LocalVideoAnalyticsEngine` still use their previous stores and do not acquire
+this transaction lock. Integration must convert **all** incident and audit
+writers and readers, including recovery, evidence and settings/engine audit
+writes, eliminate stale in-memory snapshots, and handle busy/uncertain errors
+before enabling any agent mutation. Old versions and external editors must be
+stopped. The journal protocol uses file and directory `fsync`; power-loss,
+hardware durability, filesystem behavior and application-wide atomicity have
+not been established by the synthetic process-crash tests.
+
+The following focused store tests use exclusively created UUID directories in
+the current working directory, synthetic data and explicit store paths. Run
+from the workspace root with resolved dependencies already available:
 
 ```sh
-swift test --package-path native --skip-update --filter 'CameraCoreTests|TrackResearchTests|CameraMissionTests|YOLO26Tests|OperationsPreferencesTests|VLMPreferencesTests'
+swift test --package-path native --disable-automatic-resolution --filter '^(CameraCoreTests\.)?(ConfigurationTests|FeaturePreferencesTests|WorkerEventSpoolTests)/'
 ```
 
-These checks use temporary stores, generated images, mock VLM responses and
-the installed YOLO reference model. They do not use real cameras. Vision OCR
-is exercised on generated text. GUI accessibility, permissions, VLM quality
+This is not a safety audit of the full native suite: other tests may access
+the network, local services, installed models, user files or shared temporary
+directories. Do not run broad filters in a shared environment without auditing
+the selected tests and their dependencies. GUI accessibility, permissions, VLM quality
 and sustained resource use remain unverified. Full tracking/resolver parity,
 semantic multilingual retrieval, all action kinds, complete alert/mission
 workflows, plate-region detection and watcher/backup/share workflows remain

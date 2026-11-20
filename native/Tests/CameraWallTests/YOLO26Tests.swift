@@ -29,6 +29,9 @@ final class YOLO26Tests: XCTestCase {
     }
 
     func testOfficialModelRunsOnPixelBuffer() throws {
+        guard ProcessInfo.processInfo.environment["CAMERAWALL_RUN_INSTALLED_MODEL_INTEGRATION"] == "1" else {
+            throw XCTSkip("Set CAMERAWALL_RUN_INSTALLED_MODEL_INTEGRATION=1 to run installed model inference.")
+        }
         guard YOLO26Detector.defaultModelURL != nil else { throw XCTSkip("Run make -C native model for actual YOLO26 inference.") }
         var pixel: CVPixelBuffer?
         XCTAssertEqual(CVPixelBufferCreate(nil, 640, 640, kCVPixelFormatType_32BGRA,
@@ -43,6 +46,9 @@ final class YOLO26Tests: XCTestCase {
     }
 
     func testOfficialYOLO26DetectsObjectsInReferenceImage() throws {
+        guard ProcessInfo.processInfo.environment["CAMERAWALL_RUN_INSTALLED_MODEL_INTEGRATION"] == "1" else {
+            throw XCTSkip("Set CAMERAWALL_RUN_INSTALLED_MODEL_INTEGRATION=1 to run installed model inference.")
+        }
         let path = ProcessInfo.processInfo.environment["CAMERAWALL_YOLO_FIXTURE"]
             ?? YOLO26Detector.defaultModelURL?.deletingLastPathComponent().appendingPathComponent("bus.jpg").path ?? ""
         guard YOLO26Detector.defaultModelURL != nil, FileManager.default.fileExists(atPath: path) else {

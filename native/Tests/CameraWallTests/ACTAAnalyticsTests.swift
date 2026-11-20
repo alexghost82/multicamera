@@ -737,6 +737,47 @@ final class ACTAAnalyticsTests: XCTestCase {
         })
     }
 
+    func testChatHistoryInspectionDoesNotPruneMemoryFiles() async throws {
+        let root = try fixtureDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let tracking = try LocalTrackingStore(url: root.appendingPathComponent("tracking.sqlite"))
+        let memoryURL = root.appendingPathComponent("frames")
+        let memory = CameraMemoryStore(url: memoryURL)
+        let captured = Date(timeIntervalSince1970: 1_700_000_000)
+        let frame = try memory.save(Data("synthetic".utf8), cameraID: UUID(), cameraName: "Fixture",
+                                    capturedAt: captured, summary: "", now: captured)
+        let indexURL = memoryURL.appendingPathComponent("index.json")
+        let index = try Data(contentsOf: indexURL)
+        let script = AnalyticsAgentScript()
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .mlxInProcess), transport: { _ in
+            XCTFail("Unexpected network request")
+            throw URLError(.notConnectedToInternet)
+        }, keyProvider: { _ in XCTFail("Unexpected Keychain access"); return nil },
+            localAgentInference: { prompt, images in try await script.reply(prompt: prompt, images: images) })
+        let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: tracking, memoryFrameStore: memory)
+        let (broker, session) = try await makeInspectionTestSession(store: tracking, threadID: "fixture")
+        let inspectionTime = captured.addingTimeInterval(8 * 86_400)
+        let names = [frame.cameraID: "Fixture"]
+        let list = await coordinator.executeAgentTool(toolName: "list_memory_frames",
+            arguments: ["camera_id": frame.cameraID.uuidString], threadID: "fixture",
+            cameraNames: names, now: inspectionTime, broker: broker, brokerSession: session)
+        XCTAssertEqual(list.resultRows, 0)
+        XCTAssertTrue(list.outputJSON.contains("\"frames\""))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: memoryURL.appendingPathComponent(frame.fileName).path))
+        let view = await coordinator.executeAgentTool(toolName: "view_memory_frame",
+            arguments: ["frame_id": frame.id.uuidString], threadID: "fixture",
+            cameraNames: names, now: inspectionTime, broker: broker, brokerSession: session)
+        XCTAssertTrue(view.attachedImages.isEmpty)
+        XCTAssertTrue(view.outputJSON.contains("frame_not_found"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: memoryURL.appendingPathComponent(frame.fileName).path))
+        _ = await coordinator.askACTAChatAgent(question: "Summarize history", threadID: "fixture",
+            now: inspectionTime, broker: broker, brokerSession: session)
+        let prompts = await script.prompts
+        XCTAssertFalse(prompts.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: indexURL), index)
+        XCTAssertEqual(try Data(contentsOf: memoryURL.appendingPathComponent(frame.fileName)), Data("synthetic".utf8))
+    }
+
     func testMemoryGuardHysteresisAndStorageJanitorDegradeBeforeDelete() throws {
         // 1. Test ACTAMemoryGuard with 0.90 release hysteresis
         let guardWatchdog = ACTAMemoryGuard(softThresholdMB: 1000.0, hardThresholdMB: 1500.0, releaseHysteresis: 0.90)

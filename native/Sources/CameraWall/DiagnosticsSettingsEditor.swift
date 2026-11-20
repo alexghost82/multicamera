@@ -4,6 +4,7 @@ import CameraCore
 
 struct DiagnosticsSettingsEditor: View {
     @ObservedObject var model: WallModel
+    @Environment(\.locale) private var locale
     @State private var workerJSON = ""
     @State private var workerURL = WorkerNodeConfigurationStore.defaultURL
     @State private var error = ""
@@ -13,11 +14,22 @@ struct DiagnosticsSettingsEditor: View {
             VStack(alignment: .leading, spacing: 16) {
                 GroupBox("Diagnostics") {
                     HStack {
-                        Button("Export diagnostics") { model.exportDiagnostics() }
+                        Button("Export diagnostics") {
+                            ACTAOperationalExportUI.start(ACTAOperationalExports.diagnostics(model: model))
+                        }
                         Button("Check now") { model.runLocalOperationsMonitorCheck() }
                         Button("Retry model loading") { model.prepareModels() }
                     }
                     Text(model.localAnalyticsEngine.stateReason).textSelection(.enabled)
+                }
+                GroupBox(locale.appLanguage.localized("Mission reports")) {
+                    Button(locale.appLanguage.localized("Export reviewed mission PDF")) {
+                        ACTAOperationalExportUI.start(ACTAOperationalExports.missionPDF(model: model))
+                    }
+                    .disabled(model.cameraMissionRuns.isEmpty)
+                    Text(verbatim: locale.appLanguage.localized("Use this reviewed export. The older PDF button in the missions panel may replace an existing file without this review."))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
                 GroupBox("Worker node configuration") {
                     VStack(alignment: .leading, spacing: 12) {

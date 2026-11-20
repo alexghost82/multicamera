@@ -3,8 +3,7 @@ import XCTest
 
 final class CameraFeatureCoordinatorTests: XCTestCase {
     func testReadingDefaultsDoesNotCreateSidecarFiles() throws {
-        let paths = makePaths()
-        defer { try? FileManager.default.removeItem(at: paths.directory) }
+        let paths = try makePaths()
         let coordinator = makeCoordinator(paths)
 
         XCTAssertEqual(try coordinator.preferences(), CameraFeaturePreferences())
@@ -15,8 +14,7 @@ final class CameraFeatureCoordinatorTests: XCTestCase {
     }
 
     func testDisabledFeatureEnqueueDoesNotCreateDatabase() throws {
-        let paths = makePaths()
-        defer { try? FileManager.default.removeItem(at: paths.directory) }
+        let paths = try makePaths()
         let coordinator = makeCoordinator(paths)
 
         XCTAssertThrowsError(try coordinator.enqueue(featureID: .publicShowcase)) { error in
@@ -28,8 +26,7 @@ final class CameraFeatureCoordinatorTests: XCTestCase {
     }
 
     func testOptedInJobSurvivesCoordinatorShutdownAndReopen() throws {
-        let paths = makePaths()
-        defer { try? FileManager.default.removeItem(at: paths.directory) }
+        let paths = try makePaths()
         let preferences = CameraFeaturePreferences(enabledFeatures: [.historyResearch])
         let coordinator = makeCoordinator(paths)
         try coordinator.savePreferences(preferences)
@@ -45,8 +42,7 @@ final class CameraFeatureCoordinatorTests: XCTestCase {
     }
 
     func testDescriptionRetryRejectsChangedFeaturePolicy() throws {
-        let paths = makePaths()
-        defer { try? FileManager.default.removeItem(at: paths.directory) }
+        let paths = try makePaths()
         let coordinator = makeCoordinator(paths)
         try coordinator.savePreferences(CameraFeaturePreferences(enabledFeatures: [.visionDescriptions]))
         let job = try coordinator.enqueue(featureID: .visionDescriptions)
@@ -68,9 +64,10 @@ final class CameraFeatureCoordinatorTests: XCTestCase {
         )
     }
 
-    private func makePaths() -> Paths {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    private func makePaths() throws -> Paths {
+        let fixture = try IsolatedStoreTestDirectory()
+        addTeardownBlock { try fixture.remove() }
+        let directory = fixture.url.appendingPathComponent("store", isDirectory: true)
         return Paths(
             directory: directory,
             preferences: directory.appendingPathComponent("feature-preferences.json"),

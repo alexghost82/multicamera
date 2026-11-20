@@ -3,6 +3,10 @@ import SwiftUI
 import CameraCore
 
 struct CrossCameraIdentityView: View {
+    var followUpDomain: ACTAIdentityFollowUpDomain? = nil
+    init(followUpDomain: ACTAIdentityFollowUpDomain? = nil) {
+        self.followUpDomain = followUpDomain
+    }
     @Environment(\.locale) private var locale
     @State private var preferences = CameraFeaturePreferences()
     @State private var featureStore: CameraFeatureStore?
@@ -71,6 +75,10 @@ struct CrossCameraIdentityView: View {
                 OpenSettingsButton(section: .features)
             }
             .padding(ACTASpacing.section)
+
+            ACTAIdentityFollowUpSection(domain: followUpDomain)
+                .padding(.horizontal, ACTASpacing.section)
+                .padding(.bottom, ACTASpacing.regular)
 
             if !isEnabled {
                 ContentUnavailableView {

@@ -20,7 +20,7 @@ public struct ACTAConfigurationStoreSettingsReadProvider: ACTAExistingSystemSett
 public struct ACTAScopedSettingsReadAction: ACTAActionProtocol {
     public let id = "settings.get_section"
     public let title = "Get Safe Settings Section"
-    public let description = "Read only grid columns and stale timeout from general or system settings; no endpoints, paths, permissions, or health status."
+    public let description = "Read grid columns, stale timeout, detection threshold and detection FPS from general or system settings; no endpoints, paths, permissions, or health status."
     public let classification = ACTAActionClassification.inspect
     public let parameters = [
         ACTAActionParameterSchema(name: "section", type: "string",
@@ -37,6 +37,8 @@ public struct ACTAScopedSettingsReadAction: ACTAActionProtocol {
     private struct Payload: Encodable {
         let columns: Int
         let staleAfterMilliseconds: Int
+        let detectionThreshold: Double
+        let detectionFPS: Double
     }
 
     private struct InvalidArguments: LocalizedError {
@@ -63,10 +65,14 @@ public struct ACTAScopedSettingsReadAction: ACTAActionProtocol {
             try Task.checkCancellation()
             let config = try await provider.loadExistingConfiguration()
             try Task.checkCancellation()
-            guard (1...16).contains(config.columns), (200...30000).contains(config.staleAfterMilliseconds) else {
+            guard (1...16).contains(config.columns), (200...30000).contains(config.staleAfterMilliseconds),
+                  config.detectionThreshold.isFinite, (0.1...0.9).contains(config.detectionThreshold),
+                  config.detectionFPS.isFinite, (1...5).contains(config.detectionFPS),
+                  config.detectionFPS.rounded() == config.detectionFPS else {
                 return .failed(actionID: id, error: "STORAGE_ERROR: Settings read failed.")
             }
-            let payload = Payload(columns: config.columns, staleAfterMilliseconds: config.staleAfterMilliseconds)
+            let payload = Payload(columns: config.columns, staleAfterMilliseconds: config.staleAfterMilliseconds,
+                                  detectionThreshold: config.detectionThreshold, detectionFPS: config.detectionFPS)
             let output = String(decoding: try JSONEncoder().encode(payload), as: UTF8.self)
             return ACTAActionResult(actionID: id, success: true, summary: "Settings retrieved.",
                                     outputJSON: output)

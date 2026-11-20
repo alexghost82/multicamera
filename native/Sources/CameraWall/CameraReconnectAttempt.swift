@@ -53,6 +53,44 @@ extension ReconnectAttemptSession {
 }
 
 @MainActor
+private final class ReconnectDrainTracker {
+    static let shared = ReconnectDrainTracker()
+    private var tasks: [UUID: Task<Void, Error>] = [:]
+    private var failed = false
+
+    func track(_ task: Task<Void, Error>) {
+        let id = UUID()
+        tasks[id] = task
+        Task {
+            let result = await task.result
+            finish(id, result: result)
+        }
+    }
+
+    func markUncertain() {
+        failed = true
+    }
+
+    func wait() async throws {
+        while !tasks.isEmpty {
+            let current = tasks
+            for (id, task) in current {
+                let result = await task.result
+                finish(id, result: result)
+            }
+        }
+        if failed { throw DrainFailure() }
+    }
+
+    private func finish(_ id: UUID, result: Result<Void, Error>) {
+        guard tasks.removeValue(forKey: id) != nil else { return }
+        if case .failure = result { failed = true }
+    }
+
+    private struct DrainFailure: Error {}
+}
+
+@MainActor
 final class NetworkReconnectSession: ReconnectAttemptSession {
     let attemptID: UUID
     let session: CameraSession
@@ -61,6 +99,7 @@ final class NetworkReconnectSession: ReconnectAttemptSession {
     private let cancellation: ReconnectCancellationFlag
     private var registration: Task<Void, Never>?
     private var stopped = false
+    private var drainTracker: ReconnectDrainTracker?
     private(set) var failure: Error?
 
     init(attemptID: UUID, register: @escaping @MainActor () async throws -> String,
@@ -71,6 +110,12 @@ final class NetworkReconnectSession: ReconnectAttemptSession {
         self.register = register
         self.startDecoder = startDecoder
         self.cancellation = cancellation
+    }
+
+    fileprivate func attachDrainTracker(_ tracker: ReconnectDrainTracker) -> Bool {
+        guard !stopped, registration == nil, drainTracker == nil else { return false }
+        drainTracker = tracker
+        return true
     }
 
     func start() throws {
@@ -97,6 +142,14 @@ final class NetworkReconnectSession: ReconnectAttemptSession {
         stopped = true
         registration?.cancel()
         session.stop()
+        let pendingRegistration = registration
+        let pendingSession = session
+        let task = Task { @MainActor in
+            await pendingRegistration?.value
+            try await pendingSession.stopAndWait()
+        }
+        drainTracker?.track(task)
+        ReconnectDrainTracker.shared.track(task)
     }
 }
 
@@ -121,10 +174,21 @@ final class CameraReconnectAttempt {
     }
 
     private var active: Active?
+    private let drainTracker = ReconnectDrainTracker()
     private let clock = ContinuousClock()
     private let pollInterval: Duration = .milliseconds(20)
     private let maxFrameAge: Duration = .seconds(2)
     private let maxTimeout: Duration = .seconds(30)
+
+    /// Call after fencing all new reconnects and joining their owning tasks.
+    static func waitForStoppedSessions() async throws {
+        try await ReconnectDrainTracker.shared.wait()
+    }
+
+    /// Call after fencing and joining this instance's reconnect producers.
+    func waitForStoppedSessions() async throws {
+        try await drainTracker.wait()
+    }
 
     // The factory must be nonblocking, return an unstarted distinct session,
     // and clean up its own resources if it throws. The caller must take
@@ -143,6 +207,11 @@ final class CameraReconnectAttempt {
         defer {
             if active?.id == id { active = nil }
             if !transferred { session.stop() }
+        }
+        if let network = session as? NetworkReconnectSession,
+           !network.attachDrainTracker(drainTracker) {
+            drainTracker.markUncertain()
+            throw Failure.invalidSession
         }
         guard session.attemptID == id else { throw Failure.invalidSession }
         try Task.checkCancellation()

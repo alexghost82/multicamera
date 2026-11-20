@@ -13,16 +13,43 @@ private enum ReIDCalibrationPrecision {
     }
 }
 
+@propertyWrapper
+struct CalibrationPrecisionValue {
+    private let subject: CurrentValueSubject<Double, Never>
+    init(wrappedValue: Double) { subject = CurrentValueSubject(wrappedValue) }
+    var wrappedValue: Double {
+        get { subject.value }
+        nonmutating set { subject.send(newValue) }
+    }
+    var projectedValue: AnyPublisher<Double, Never> { subject.eraseToAnyPublisher() }
+}
+
 @MainActor
 final class ACTAReIDCalibrationViewState: ObservableObject {
-    @Published private(set) var targetPrecision = ReIDThresholdCalibrator.defaultTargetPrecision
+    // SwiftUI is notified before the write, but value subscribers see the
+    // committed value. @Published's will-set emission would permit a subscriber
+    // to detach the reviewed view before its setter nevertheless writes.
+    nonisolated(unsafe) let objectWillChange = ObservableObjectPublisher()
+    @CalibrationPrecisionValue private(set) var targetPrecision = ReIDThresholdCalibrator.defaultTargetPrecision
     private(set) var revision = UUID()
+    private var updating = false
+    private var reentered = false
 
     func setTargetPrecision(_ value: Double) -> Bool {
+        setTargetPrecision(value, while: { true })
+    }
+
+    fileprivate func setTargetPrecision(_ value: Double, while isCurrent: @MainActor () -> Bool) -> Bool {
+        guard !updating else { reentered = true; return false }
         guard let value = ReIDCalibrationPrecision.sliderValue(value) else { return false }
+        updating = true
+        reentered = false
+        defer { updating = false }
+        objectWillChange.send()
+        guard !reentered, isCurrent() else { return false }
         revision = UUID()
         targetPrecision = value
-        return true
+        return !reentered
     }
 }
 
@@ -34,22 +61,25 @@ final class ACTAReIDCalibrationViewBridge {
         weak var state: ACTAReIDCalibrationViewState?
     }
     private var entries: [Entry] = []
+    private(set) var lifecycleRevision = UUID()
     private weak var writtenState: ACTAReIDCalibrationViewState?
     private var writtenRevision: UUID?
     private var writtenValue: Double?
 
     func attach(_ state: ACTAReIDCalibrationViewState) {
+        lifecycleRevision = UUID()
         clearReceipt()
         entries.removeAll { $0.state == nil || $0.state === state }
         entries.append(Entry(state: state))
     }
 
     func detach(_ state: ACTAReIDCalibrationViewState) {
+        lifecycleRevision = UUID()
         clearReceipt()
         entries.removeAll { $0.state == nil || $0.state === state }
     }
 
-    private var activeState: ACTAReIDCalibrationViewState? {
+    fileprivate var activeState: ACTAReIDCalibrationViewState? {
         let states = entries.compactMap(\.state)
         return states.count == 1 ? states.first : nil
     }
@@ -73,6 +103,132 @@ final class ACTAReIDCalibrationViewBridge {
         writtenState = nil
         writtenRevision = nil
         writtenValue = nil
+    }
+}
+
+/// Broker-only action; the legacy shared-registry action retains its direct semantics.
+struct ACTAReviewedReIDCalibrationAction: ACTAPreparedConfirmationAction {
+    @MainActor final class Ticket {
+        weak var state: ACTAReIDCalibrationViewState?
+        weak var owner: Receipt?
+        var used = false
+        init(state: ACTAReIDCalibrationViewState, owner: Receipt) {
+            self.state = state
+            self.owner = owner
+        }
+    }
+    @MainActor final class Receipt {
+        var value: (ticket: Ticket, lifecycle: UUID, revision: UUID,
+                    parameters: [String: String], threadID: String)?
+    }
+    struct ConfirmationSnapshot: Sendable {
+        fileprivate let lifecycle: UUID
+        fileprivate let revision: UUID
+        fileprivate let before: Double
+        fileprivate let parameters: [String: String]
+        fileprivate let threadID: String
+        fileprivate let ticket: Ticket
+    }
+
+    let id = "settings.update_reid_calibration"
+    let title = "Set ReID calibration target precision"
+    let description = "Review the target precision in the unique attached calibration view. A changed target may trigger asynchronous validation metric recalculation; completion and rendering are not verified. No threshold is applied or saved."
+    let classification = ACTAActionClassification.reversible
+    let parameters = [
+        ACTAActionParameterSchema(name: "target_precision", type: "number",
+                                  description: "Target precision from 0.90 to 1.0 inclusive, in 0.005 steps", isRequired: true)
+    ]
+    private let bridge: ACTAReIDCalibrationViewBridge
+    private let receipt: Receipt
+
+    @MainActor init(bridge: ACTAReIDCalibrationViewBridge) {
+        self.bridge = bridge
+        self.receipt = Receipt()
+    }
+
+    private func target(_ parameters: [String: String]) throws -> Double {
+        guard Set(parameters.keys) == ["target_precision"],
+              let value = parameters["target_precision"].flatMap(Double.init),
+              let normalized = ReIDCalibrationPrecision.sliderValue(value) else {
+            throw ReIDCalibrationActionError.invalidSliderArgument
+        }
+        return normalized
+    }
+
+    func validate(parameters: [String: String]) throws { _ = try target(parameters) }
+
+    func prepareConfirmation(parameters: [String: String], context: ACTAActionContext) async throws
+        -> ACTAPreparedConfirmation<ConfirmationSnapshot> {
+        let value = try target(parameters)
+        return try await MainActor.run {
+            try Task.checkCancellation()
+            guard let state = bridge.activeState else { throw ReIDCalibrationActionError.unavailable }
+            let snapshot = ConfirmationSnapshot(lifecycle: bridge.lifecycleRevision,
+                                                revision: state.revision, before: state.targetPrecision,
+                                                parameters: parameters, threadID: context.threadID,
+                                                ticket: Ticket(state: state, owner: receipt))
+            return ACTAPreparedConfirmation(snapshot: snapshot,
+                reviewSummary: "Calibration view target precision: \(snapshot.before) -> \(value). A changed target may trigger asynchronous validation metric recalculation; completion, metrics and rendering are not verified. No threshold is saved or applied.")
+        }
+    }
+
+    func executeConfirmed(parameters: [String: String], context: ACTAActionContext,
+                          snapshot: ConfirmationSnapshot) async throws -> ACTAActionResult {
+        let value = try target(parameters)
+        return try await MainActor.run {
+            try Task.checkCancellation()
+            guard snapshot.ticket.owner === receipt, !snapshot.ticket.used else {
+                return .failed(actionID: id, error: "CONFIRMATION_CONSUMED: Review already used.")
+            }
+            snapshot.ticket.used = true
+            guard context.isConfirmed else {
+                return .failed(actionID: id, error: "CONFIRMATION_REQUIRED: Operator approval is required.")
+            }
+            guard parameters == snapshot.parameters, context.threadID == snapshot.threadID else {
+                return .failed(actionID: id, error: "CONFIRMATION_MISMATCH: Request changed.")
+            }
+            guard receipt.value == nil else {
+                return .failed(actionID: id, error: "ACTION_BUSY: A previous update awaits verification.")
+            }
+            guard let state = snapshot.ticket.state else {
+                return .failed(actionID: id, error: "STALE_REVIEW: Calibration view changed.")
+            }
+            @MainActor func current() -> Bool {
+                bridge.activeState === state && bridge.lifecycleRevision == snapshot.lifecycle
+            }
+            guard current(), state.revision == snapshot.revision,
+                  state.targetPrecision == snapshot.before else {
+                return .failed(actionID: id, error: "STALE_REVIEW: Calibration view changed.")
+            }
+            let changed = state.setTargetPrecision(value, while: {
+                !Task.isCancelled && current() && state.revision == snapshot.revision
+            })
+            // The final publication runs after the state changes. A subscriber may
+            // detach or attempt a nested write then; never claim that outcome verified.
+            guard changed, current(), state.targetPrecision == value else {
+                return .failed(actionID: id, error: "READBACK_FAILED: Calibration view may have changed.")
+            }
+            receipt.value = (snapshot.ticket, snapshot.lifecycle, state.revision, parameters, context.threadID)
+            return ACTAActionResult(actionID: id, success: true,
+                summary: "Calibration view state updated. A changed target may trigger asynchronous validation metric recalculation; completion, metrics and rendering were not verified. No threshold was saved or applied.")
+        }
+    }
+
+    func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
+        .failed(actionID: id, error: "CONFIRMATION_REQUIRED: Prepare and approve a review.")
+    }
+
+    func verify(parameters: [String: String], context: ACTAActionContext) async throws -> Bool {
+        await MainActor.run {
+            let written = receipt.value
+            receipt.value = nil
+            guard let written, let state = written.ticket.state,
+                  written.parameters == parameters, written.threadID == context.threadID,
+                  bridge.activeState === state, bridge.lifecycleRevision == written.lifecycle,
+                  state.revision == written.revision,
+                  let target = try? target(parameters) else { return false }
+            return state.targetPrecision == target
+        }
     }
 }
 

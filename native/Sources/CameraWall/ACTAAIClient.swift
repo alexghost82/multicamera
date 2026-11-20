@@ -774,6 +774,11 @@ public enum ACTAAgentError: LocalizedError, Equatable {
 }
 
 typealias ACTALocalAgentInference = @Sendable (_ prompt: String, _ images: [Data]) async throws -> String
+typealias ACTALocalAgentStreamInference = @Sendable (
+    _ prompt: String,
+    _ images: [Data],
+    _ onChunk: (@Sendable (String) -> Void)?
+) async throws -> String
 
 private enum ACTARequestAuthorizationError: Error {
     case revoked
@@ -795,6 +800,7 @@ public final class ACTAAIClient: @unchecked Sendable {
     private let backgroundLane = ACTAAsyncLaneLimiter(limit: ACTAAILane.background.maxConcurrentRequests)
     private let agentTrace: (@Sendable (String) -> Void)?
     private let localAgentInference: ACTALocalAgentInference?
+    private let localAgentStreamInference: ACTALocalAgentStreamInference?
     private let transport: ACTAHTTPTransport
     private let keyProvider: @Sendable (String) -> String?
 #if DEBUG
@@ -810,11 +816,13 @@ public final class ACTAAIClient: @unchecked Sendable {
         transport: ACTAHTTPTransport? = nil,
         keyProvider: @escaping @Sendable (String) -> String? = { ACTAKeychainStore.loadKey(account: $0) },
         agentTrace: (@Sendable (String) -> Void)? = nil,
-        localAgentInference: ACTALocalAgentInference? = nil
+        localAgentInference: ACTALocalAgentInference? = nil,
+        localAgentStreamInference: ACTALocalAgentStreamInference? = nil
     ) {
         self.config = config
         self.agentTrace = agentTrace
         self.localAgentInference = localAgentInference
+        self.localAgentStreamInference = localAgentStreamInference
         self.localVLM = localVLM
         self.cacheStore = cacheStore
         self.keyProvider = keyProvider
@@ -1292,7 +1300,8 @@ public final class ACTAAIClient: @unchecked Sendable {
         lane: ACTAAILane = .chat,
         request: ACTAAgentRequest,
         pinnedBackend: ACTAAgentBackend? = nil,
-        authorization: (@Sendable () -> Bool)? = nil
+        authorization: (@Sendable () -> Bool)? = nil,
+        onAnswerPreview: (@Sendable (String, Int) -> Void)? = nil
     ) async throws -> ACTAAgentTurnResult {
         guard authorization?() ?? true else { throw ACTARequestAuthorizationError.revoked }
         let (currentConfig, revision) = configurationSnapshot()
@@ -1304,7 +1313,8 @@ public final class ACTAAIClient: @unchecked Sendable {
             try Task.checkCancellation()
             guard authorization?() ?? true else { throw ACTARequestAuthorizationError.revoked }
             guard self.isCurrentConfiguration(revision) else { throw ACTAAgentError.noBackendAvailable }
-            let result = try await self.agentStepLocal(request: request, authorization: authorization)
+            let result = try await self.agentStepLocal(request: request, authorization: authorization,
+                                                       onAnswerPreview: onAnswerPreview)
             guard authorization?() ?? true else { throw ACTARequestAuthorizationError.revoked }
             return result
         }
@@ -1312,7 +1322,8 @@ public final class ACTAAIClient: @unchecked Sendable {
 
     private func agentStepLocal(
         request: ACTAAgentRequest,
-        authorization: (@Sendable () -> Bool)?
+        authorization: (@Sendable () -> Bool)?,
+        onAnswerPreview: (@Sendable (String, Int) -> Void)?
     ) async throws -> ACTAAgentTurnResult {
         let forceAnswer: Bool
         if case .function("present_answer") = request.toolChoice { forceAnswer = true } else { forceAnswer = false }
@@ -1344,12 +1355,38 @@ public final class ACTAAIClient: @unchecked Sendable {
         let recentImages = Array(images.suffix(4))
         let raw: String
         guard authorization?() ?? true else { throw ACTARequestAuthorizationError.revoked }
-        if let localAgentInference {
-            raw = try await localAgentInference(prompt, recentImages)
-        } else {
-            guard let localVLM else { throw ACTAAgentError.noBackendAvailable }
-            if recentImages.isEmpty { raw = try await localVLM.analyze(text: prompt, maxTokens: 2048, requestWorkload: .interactive) }
-            else { raw = try await localVLM.analyze(images: recentImages, prompt: prompt, maxTokens: 2048, requestWorkload: .interactive) }
+        let preview = onAnswerPreview.map { callback in
+            ACTALocalAnswerStream { text, revision in
+                guard !Task.isCancelled, authorization?() ?? true else { return }
+                callback(text, revision)
+            }
+        }
+        let onChunk: (@Sendable (String) -> Void)? = preview.map { stream in
+            { @Sendable chunk in
+                guard !Task.isCancelled, authorization?() ?? true else {
+                    stream.close()
+                    return
+                }
+                stream.append(chunk)
+            }
+        }
+        defer { preview?.close() }
+        raw = try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            let response: String
+            if let localAgentStreamInference {
+                response = try await localAgentStreamInference(prompt, recentImages, onChunk)
+            } else if let localAgentInference {
+                response = try await localAgentInference(prompt, recentImages)
+            } else {
+                guard let localVLM else { throw ACTAAgentError.noBackendAvailable }
+                if recentImages.isEmpty { response = try await localVLM.analyze(text: prompt, maxTokens: 2048, requestWorkload: .interactive, onChunk: onChunk) }
+                else { response = try await localVLM.analyze(images: recentImages, prompt: prompt, maxTokens: 2048, requestWorkload: .interactive, onChunk: onChunk) }
+            }
+            try Task.checkCancellation()
+            return response
+        } onCancel: {
+            preview?.close()
         }
         guard authorization?() ?? true else { throw ACTARequestAuthorizationError.revoked }
         agentTrace?("RESPONSE chars=\(raw.count) backend=mlx")

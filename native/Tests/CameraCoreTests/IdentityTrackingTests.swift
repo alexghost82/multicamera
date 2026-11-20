@@ -5,8 +5,9 @@ import SQLite3
 
 final class IdentityTrackingTests: XCTestCase {
     func testAutomaticScansPersistAcrossReopenAndShareExistingRetention() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try IsolatedStoreTestDirectory()
+        defer { try? fixture.remove() }
+        let directory = fixture.url
         let url = directory.appendingPathComponent("history.sqlite3")
         let now = Date(timeIntervalSince1970: 2_000_000_000)
         let record = CameraScanRecord(cameraID: UUID(), cameraName: "Synthetic entrance", observedAt: now, answer: "A vehicle is visible.")
@@ -27,8 +28,9 @@ final class IdentityTrackingTests: XCTestCase {
     }
 
     func testAutomaticScanPagesCoverRetainedHistoryAndRejectInvalidData() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try IsolatedStoreTestDirectory()
+        defer { try? fixture.remove() }
+        let directory = fixture.url
         let now = Date(timeIntervalSince1970: 2_000_000_000.125)
         let store = try LocalTrackingStore(url: directory.appendingPathComponent("history.sqlite3"), now: now)
         var inserted: [CameraScanRecord] = []
@@ -69,8 +71,9 @@ final class IdentityTrackingTests: XCTestCase {
     }
 
     func testVehicleTextEvidencePersistsAndFollowsTrackDeletionAndRetention() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try IsolatedStoreTestDirectory()
+        defer { try? fixture.remove() }
+        let directory = fixture.url
         let url = directory.appendingPathComponent("tracking.sqlite3")
         let now = Date(timeIntervalSince1970: 2_000_000_000)
         let store = try LocalTrackingStore(url: url, now: now)
@@ -93,8 +96,9 @@ final class IdentityTrackingTests: XCTestCase {
     }
 
     func testVehicleTextEvidenceRejectsPeopleMissingTracksAndMalformedDigest() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try IsolatedStoreTestDirectory()
+        defer { try? fixture.remove() }
+        let directory = fixture.url
         let store = try LocalTrackingStore(url: directory.appendingPathComponent("tracking.sqlite3"))
         let trackID = UUID()
         let evidence = VehicleTextEvidence(trackID: trackID, candidates: [], cropSHA256: String(repeating: "a", count: 64))
@@ -183,8 +187,9 @@ final class IdentityTrackingTests: XCTestCase {
     }
 
     func testRecentTrackPagesCoverHistoryInDeterministicOrder() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try IsolatedStoreTestDirectory()
+        defer { try? fixture.remove() }
+        let directory = fixture.url
         let store = try LocalTrackingStore(url: directory.appendingPathComponent("tracking.sqlite3"))
         let cameraID = UUID()
         let timestamp = Date(timeIntervalSince1970: 2_000_000)
@@ -209,8 +214,9 @@ final class IdentityTrackingTests: XCTestCase {
     }
 
     func testRecentTrackPageFailureClosesReadConnection() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try IsolatedStoreTestDirectory()
+        defer { try? fixture.remove() }
+        let directory = fixture.url
         let store = try LocalTrackingStore(url: directory.appendingPathComponent("tracking.sqlite3"))
         let object = DetectedObject(id: 0, label: "person", confidence: 0.8,
                         box: .zero, trackID: UUID())
@@ -223,8 +229,9 @@ final class IdentityTrackingTests: XCTestCase {
     }
 
     func testRecentTrackPagesDoNotBlockWritesOrIncludeLaterRows() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try IsolatedStoreTestDirectory()
+        defer { try? fixture.remove() }
+        let directory = fixture.url
         let store = try LocalTrackingStore(url: directory.appendingPathComponent("tracking.sqlite3"))
         let cameraID = UUID()
         let first = DetectedObject(id: 0, label: "person", confidence: 0.8,
@@ -266,9 +273,9 @@ final class IdentityTrackingTests: XCTestCase {
     }
 
     func testExistingTrackingDatabaseMigratesDescriptionColumns() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let fixture = try IsolatedStoreTestDirectory()
+        defer { try? fixture.remove() }
+        let directory = fixture.url
         let url = directory.appendingPathComponent("tracking.sqlite3")
         let trackID = UUID()
         let cameraID = UUID()
@@ -384,8 +391,9 @@ final class IdentityTrackingTests: XCTestCase {
     }
 
     func testStoreUpsertsTrackAndPurgesAfterThirtyDays() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try IsolatedStoreTestDirectory()
+        defer { try? fixture.remove() }
+        let directory = fixture.url
         let url = directory.appendingPathComponent("tracking.sqlite3")
         let now = Date(timeIntervalSince1970: 2_000_000)
         let store = try LocalTrackingStore(url: url, now: now)
@@ -463,8 +471,9 @@ final class IdentityTrackingTests: XCTestCase {
     }
 
     func testOperatorMergeCombinesGroupsAndDetachIsReversible() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try IsolatedStoreTestDirectory()
+        defer { try? fixture.remove() }
+        let directory = fixture.url
         let store = try LocalTrackingStore(url: directory.appendingPathComponent("tracking.sqlite3"))
         let cameraID = UUID()
         let box = CGRect(x: 0.1, y: 0.2, width: 0.3, height: 0.4)
@@ -491,8 +500,9 @@ final class IdentityTrackingTests: XCTestCase {
     }
 
     func testRetentionRemovesOperatorGroupLinks() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try IsolatedStoreTestDirectory()
+        defer { try? fixture.remove() }
+        let directory = fixture.url
         let now = Date(timeIntervalSince1970: 2_000_000)
         let store = try LocalTrackingStore(url: directory.appendingPathComponent("tracking.sqlite3"), now: now)
         let cameraID = UUID()
@@ -513,8 +523,9 @@ final class IdentityTrackingTests: XCTestCase {
     }
 
     func testValidationPairsNormalizeLabelsAndReplaceDifferentWithOperatorGroup() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try IsolatedStoreTestDirectory()
+        defer { try? fixture.remove() }
+        let directory = fixture.url
         let store = try LocalTrackingStore(url: directory.appendingPathComponent("tracking.sqlite3"))
         let first = UUID()
         let second = UUID()
@@ -540,8 +551,9 @@ final class IdentityTrackingTests: XCTestCase {
     }
 
     func testValidationLabelsRequireEmbeddingsAndAreRemovedOnDeleteAndRetention() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = try IsolatedStoreTestDirectory()
+        defer { try? fixture.remove() }
+        let directory = fixture.url
         let now = Date(timeIntervalSince1970: 2_000_000)
         let store = try LocalTrackingStore(url: directory.appendingPathComponent("tracking.sqlite3"), now: now)
         let oldA = UUID()

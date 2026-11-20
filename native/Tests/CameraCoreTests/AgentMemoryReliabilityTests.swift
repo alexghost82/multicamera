@@ -105,8 +105,19 @@ final class AgentMemoryReliabilityTests: XCTestCase {
 
     func testProcessDeathRollsBackAnApprovedAction() throws {
         let environmentKey = "ACTA_TEST_CRASH_RECOVERY_ROOT"
+        let tokenKey = "ACTA_TEST_CRASH_RECOVERY_TOKEN"
         if let path = ProcessInfo.processInfo.environment[environmentKey] {
-            let store = try LocalTrackingStore(url: URL(fileURLWithPath: path).appendingPathComponent("memory.sqlite3"))
+            let root = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath()
+            let temporaryRoot = FileManager.default.temporaryDirectory.standardizedFileURL.resolvingSymlinksInPath()
+            guard root.deletingLastPathComponent() == temporaryRoot,
+                  UUID(uuidString: root.lastPathComponent) != nil,
+                  let token = ProcessInfo.processInfo.environment[tokenKey],
+                  UUID(uuidString: token) != nil,
+                  try String(contentsOf: root.appendingPathComponent("fixture-token"), encoding: .utf8) == token else {
+                XCTFail("Crash-recovery child requires a verified temporary fixture.")
+                return
+            }
+            let store = try LocalTrackingStore(url: root.appendingPathComponent("memory.sqlite3"))
             let proposal = try XCTUnwrap(store.loadACTAChatAction(actionID: "crash"))
             _ = try store.applyACTAChatAction(proposal, confirmed: true) { database in
                 _ = try database.rebuildACTAIdentityDossier(identityID: "P-crash", displayName: "Uncommitted")
@@ -121,11 +132,14 @@ final class AgentMemoryReliabilityTests: XCTestCase {
         let store = try LocalTrackingStore(url: url)
         try store.saveACTAChatAction(ACTAChatActionRecord(actionID: "crash", threadID: "test",
             actionType: "rename_identity", title: "Crash fixture", parameters: [:]))
+        let token = UUID().uuidString
+        try Data(token.utf8).write(to: root.appendingPathComponent("fixture-token"), options: .withoutOverwriting)
         let child = Process()
         child.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
         child.arguments = ["-XCTest", "CameraCoreTests.AgentMemoryReliabilityTests/testProcessDeathRollsBackAnApprovedAction", Bundle(for: Self.self).bundlePath]
         var environment = ProcessInfo.processInfo.environment
         environment[environmentKey] = root.path
+        environment[tokenKey] = token
         child.environment = environment
         child.standardOutput = FileHandle.nullDevice
         child.standardError = FileHandle.nullDevice

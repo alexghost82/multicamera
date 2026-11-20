@@ -919,7 +919,7 @@ public enum ACTAPromptLibrary {
         previousChapterSummary: String?,
         language: ACTAPromptLanguage
     ) -> String {
-        let prevContext = previousChapterSummary.map { "Previous Chapter Summary (report ONLY new developments / delta): \($0)" } ?? "No previous chapter."
+        let prevContext = previousChapterSummary.map { "Previous Chapter Summary (report ONLY new developments / delta): \($0)" } ?? "No previous chapter summary is available. Do not infer prior events or changes."
         return """
         You are the ACTA Memory Temporal Narrative chronicler for camera "\(cameraName)".
         You are viewing a numbered NARRATIVE collage of \(frameCount) sequential frames (`[#1]`..`[#\(frameCount)]`).

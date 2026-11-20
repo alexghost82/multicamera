@@ -10,12 +10,15 @@ public final class ACTABrokerSession: @unchecked Sendable {
     private let owner: ACTABrokerOperator
     private let threadID: String
     private let inspectionIDs: Set<String>
+    private let historyCameraIDs: Set<UUID>
     private var revoked = false
 
-    fileprivate init(owner: ACTABrokerOperator, threadID: String, inspectionIDs: Set<String>) {
+    fileprivate init(owner: ACTABrokerOperator, threadID: String, inspectionIDs: Set<String>,
+                     historyCameraIDs: Set<UUID>) {
         self.owner = owner
         self.threadID = threadID
         self.inspectionIDs = inspectionIDs
+        self.historyCameraIDs = historyCameraIDs
     }
 
     public func permitsInspection(_ inspectionID: String, threadID: String) -> Bool {
@@ -24,6 +27,19 @@ public final class ACTABrokerSession: @unchecked Sendable {
 
     public func isActive(threadID: String) -> Bool {
         lock.withLock { !revoked && self.threadID == threadID }
+    }
+
+    /// Trusted-host check only. This does not perform an inspection or its required audit.
+    /// The result is a momentary check, not a permit across suspension or revocation.
+    /// An empty requested set is denied, even when the grant is empty.
+    public func permitsCameraHistoryInspection(
+        operatorKey: ACTABrokerOperator, inspectionID: String, threadID: String, cameraIDs: Set<UUID>
+    ) -> Bool {
+        lock.withLock {
+            owner === operatorKey && !revoked && self.threadID == threadID
+                && inspectionIDs.contains(inspectionID) && !cameraIDs.isEmpty
+                && cameraIDs.isSubset(of: historyCameraIDs)
+        }
     }
 
     public func withInspection<T>(
@@ -54,6 +70,7 @@ public enum ACTABrokerLocalInput: Sendable {
 /// The trusted UI must display every parameter and the complete title before approval.
 public struct ACTABrokerReview: Sendable {
     public let handle: ACTABrokerReviewHandle
+    public let operationID: UUID
     public let actionID: String
     public let threadID: String
     public let parameters: [String: String]
@@ -69,6 +86,21 @@ public struct ACTABrokerAuditEvent: Sendable {
     public let threadID: String
     public let approved: Bool?
     public let outcome: String?
+    public let operationID: UUID?
+
+    public var auditMetadataJSON: String {
+        operationID.map { "{\"operation_id\":\"\($0.uuidString)\"}" } ?? "{}"
+    }
+
+    init(phase: Phase, actionID: String, threadID: String, approved: Bool?, outcome: String?,
+         operationID: UUID? = nil) {
+        self.phase = phase
+        self.actionID = actionID
+        self.threadID = threadID
+        self.approved = approved
+        self.outcome = outcome
+        self.operationID = operationID
+    }
 }
 
 /// A separate opt-in broker. The host must keep its operator and session capabilities
@@ -106,26 +138,31 @@ public actor ACTALocalActionBroker {
     private let operatorKey: ACTABrokerOperator
     private let allowedActionIDs: Set<String>
     private let allowedInspectionIDs: Set<String>
+    private let actionTimeoutSeconds: TimeInterval?
     private let audit: Audit
     private var sessions: [ObjectIdentifier: SessionState] = [:]
     private var pending: [ObjectIdentifier: Pending] = [:]
 
     private init(
         registry: ACTAActionRegistry, authority: ACTALocalAuthority, operatorKey: ACTABrokerOperator,
-        allowedActionIDs: Set<String>, allowedInspectionIDs: Set<String>, audit: @escaping Audit
+        allowedActionIDs: Set<String>, allowedInspectionIDs: Set<String>,
+        actionTimeoutSeconds: TimeInterval?, audit: @escaping Audit
     ) {
         self.registry = registry
         self.authority = authority
         self.operatorKey = operatorKey
         self.allowedActionIDs = allowedActionIDs
         self.allowedInspectionIDs = allowedInspectionIDs
+        self.actionTimeoutSeconds = actionTimeoutSeconds
         self.audit = audit
     }
 
     /// Only explicitly registered, scoped actions can be used. No scheduler capability is issued.
     public nonisolated static func make(
         actions: [any ACTAActionProtocol], allowedActionIDs: Set<String>,
-        allowedInspectionIDs: Set<String> = [], audit: @escaping Audit
+        allowedInspectionIDs: Set<String> = [],
+        actionTimeoutSeconds: TimeInterval? = 30.0,
+        audit: @escaping Audit
     ) async -> (broker: ACTALocalActionBroker, operatorKey: ACTABrokerOperator)? {
         let ids = actions.map(\.id)
         guard (!allowedActionIDs.isEmpty || !allowedInspectionIDs.isEmpty), Set(ids).count == ids.count,
@@ -137,12 +174,15 @@ public actor ACTALocalActionBroker {
         let operatorKey = ACTABrokerOperator()
         return (ACTALocalActionBroker(registry: registry, authority: authority, operatorKey: operatorKey,
                                       allowedActionIDs: allowedActionIDs, allowedInspectionIDs: allowedInspectionIDs,
+                                      actionTimeoutSeconds: actionTimeoutSeconds,
                                       audit: audit), operatorKey)
     }
 
+    /// Camera grants are immutable, session-local and never inferred from inventory or input.
+    /// Trusted hosts must not expose the grant or capability to model/tool data.
     public func openSession(
         operatorKey: ACTABrokerOperator, input: ACTABrokerLocalInput, threadID: String, actionIDs: Set<String>,
-        inspectionIDs: Set<String> = []
+        inspectionIDs: Set<String> = [], historyCameraIDs: Set<UUID> = []
     ) async -> ACTABrokerSession? {
         guard self.operatorKey === operatorKey, !threadID.isEmpty, (!actionIDs.isEmpty || !inspectionIDs.isEmpty),
               actionIDs.isSubset(of: allowedActionIDs), inspectionIDs.isSubset(of: allowedInspectionIDs) else { return nil }
@@ -156,7 +196,8 @@ public actor ACTALocalActionBroker {
             requester = issuedRequester
             reviewer = issuedReviewer
         }
-        let session = ACTABrokerSession(owner: operatorKey, threadID: threadID, inspectionIDs: inspectionIDs)
+        let session = ACTABrokerSession(owner: operatorKey, threadID: threadID, inspectionIDs: inspectionIDs,
+                                        historyCameraIDs: historyCameraIDs)
         sessions[ObjectIdentifier(session)] = SessionState(session: session, requester: requester,
                                                            reviewer: reviewer, threadID: threadID, input: input,
                                                            actionIDs: actionIDs)
@@ -210,24 +251,26 @@ public actor ACTALocalActionBroker {
     /// Mutation results returned here never expose review tokens, titles, or parameters.
     public func request(
         session: ACTABrokerSession, actionID: String, argumentsJSON: String,
-        expectedThreadID: String? = nil
+        expectedThreadID: String? = nil,
+        idempotencyKey: String? = nil
     ) async -> ACTAActionResult {
         cleanupExpiredReviews()
+        let operationID = UUID()
         guard let state = sessionState(session), expectedThreadID == nil || state.threadID == expectedThreadID else {
             do {
                 try audit(ACTABrokerAuditEvent(phase: .request, actionID: "[unrecognized]",
-                                                threadID: "", approved: nil, outcome: nil))
+                                                threadID: "", approved: nil, outcome: nil, operationID: operationID))
             } catch { return auditFailed(actionID) }
-            return recordResult(denied("[unrecognized]"), threadID: "")
+            return recordResult(denied("[unrecognized]"), threadID: "", operationID: operationID)
         }
         let startedAt = Date()
         let auditedActionID = state.actionIDs.contains(actionID) ? actionID : "[unrecognized]"
         do {
             try audit(ACTABrokerAuditEvent(phase: .request, actionID: auditedActionID, threadID: state.threadID,
-                                            approved: nil, outcome: nil))
+                                            approved: nil, outcome: nil, operationID: operationID))
         } catch { return auditFailed(actionID) }
         guard state.actionIDs.contains(actionID), let requester = state.requester else {
-            return recordResult(denied(auditedActionID), threadID: state.threadID)
+            return recordResult(denied(auditedActionID), threadID: state.threadID, operationID: operationID)
         }
         let arguments = ValidatedArguments()
         let audit = self.audit
@@ -235,7 +278,9 @@ public actor ACTALocalActionBroker {
         do {
             result = try await registry.executeJSON(actionID: actionID, argumentsJSON: argumentsJSON,
                 context: ACTAActionContext(threadID: state.threadID,
-                                           initiator: state.input == .chat ? "text_chat" : "voice_asr"),
+                                           initiator: state.input == .chat ? "text_chat" : "voice_asr",
+                                           idempotencyKey: idempotencyKey,
+                                           timeoutSeconds: actionTimeoutSeconds),
                 principal: requester, beforeExecution: { parameters in
                     guard try JSONEncoder().encode(parameters).count <= ACTAActionRegistry.maxPreparedReviewSummaryUTF8Bytes else {
                         throw BrokerError.reviewTooLarge
@@ -243,42 +288,48 @@ public actor ACTALocalActionBroker {
                     guard Self.parametersAreDisplayable(parameters) else { throw BrokerError.undisplayable }
                     do {
                         try audit(ACTABrokerAuditEvent(phase: .validated, actionID: actionID,
-                                                       threadID: state.threadID, approved: nil, outcome: nil))
+                                                       threadID: state.threadID, approved: nil, outcome: nil,
+                                                       operationID: operationID))
                     } catch { throw BrokerError.auditFailed }
                     arguments.set(parameters)
                 })
         } catch is CancellationError {
             return recordResult(.failed(actionID: actionID, error: "ACTION_CANCELLED: Request did not complete."),
-                                threadID: state.threadID)
+                                threadID: state.threadID, operationID: operationID)
         } catch {
             return recordResult(.failed(actionID: actionID, error: "ACTION_FAILED: Request did not complete."),
-                                threadID: state.threadID)
+                                threadID: state.threadID, operationID: operationID)
         }
-        guard sessionState(session) != nil else { return recordResult(denied(actionID), threadID: state.threadID) }
+        guard sessionState(session) != nil else { return recordResult(denied(actionID), threadID: state.threadID, operationID: operationID) }
         guard result.requiresOperatorConfirmation else {
-            return recordResult(Self.safeModelResult(result), threadID: state.threadID)
+            let recorded = recordResult(Self.safeModelResult(result), threadID: state.threadID, operationID: operationID)
+            guard sessionState(session) != nil else {
+                return recordResult(denied(actionID), threadID: state.threadID, operationID: operationID)
+            }
+            return recorded
         }
         guard let token = result.confirmationToken, let parameters = arguments.get() else {
             return recordResult(.failed(actionID: actionID, error: "REVIEW_UNAVAILABLE: No validated review is available."),
-                                threadID: state.threadID)
+                                threadID: state.threadID, operationID: operationID)
         }
         guard result.summary.utf8.count <= 16 * 1024 else {
             return recordResult(.failed(actionID: actionID, error: "REVIEW_UNDISPLAYABLE: Review is too large."),
-                                threadID: state.threadID)
+                                threadID: state.threadID, operationID: operationID)
         }
         let expiresAt = startedAt.addingTimeInterval(300)
         guard expiresAt > Date() else {
             return recordResult(.failed(actionID: actionID, error: "REVIEW_EXPIRED: Prepare the request again."),
-                                threadID: state.threadID)
+                                threadID: state.threadID, operationID: operationID)
         }
         let handle = ACTABrokerReviewHandle()
-        let review = ACTABrokerReview(handle: handle, actionID: actionID, threadID: state.threadID,
+        let review = ACTABrokerReview(handle: handle, operationID: operationID, actionID: actionID, threadID: state.threadID,
                                       parameters: parameters, title: result.summary)
         let response = ACTAActionResult(actionID: actionID, success: false, summary: "Operator review required.",
                                         outputJSON: #"{"status":"confirmation_required"}"#,
                                         verified: false, requiresOperatorConfirmation: true)
-        let recorded = recordResult(response, threadID: state.threadID)
+        let recorded = recordResult(response, threadID: state.threadID, operationID: operationID)
         guard recorded.requiresOperatorConfirmation else { return recorded }
+        guard sessionState(session) != nil else { return recordResult(denied(actionID), threadID: state.threadID, operationID: operationID) }
         pending[ObjectIdentifier(handle)] = Pending(session: session, review: review, token: token, expiresAt: expiresAt)
         return recorded
     }
@@ -303,26 +354,31 @@ public actor ACTALocalActionBroker {
         }
         do {
             try audit(ACTABrokerAuditEvent(phase: .review, actionID: reviewed.actionID,
-                                            threadID: state.threadID, approved: approved, outcome: nil))
+                                            threadID: state.threadID, approved: approved, outcome: nil,
+                                            operationID: item.review.operationID))
         } catch { return auditFailed(reviewed.actionID) }
         pending.removeValue(forKey: ObjectIdentifier(reviewed.handle))
+        guard sessionState(session) != nil else {
+            return recordResult(denied(reviewed.actionID), threadID: state.threadID, operationID: item.review.operationID)
+        }
         do {
             let result = try await registry.confirmAndExecute(token: item.token, confirmed: approved,
                 expectedActionID: item.review.actionID, expectedParameters: item.review.parameters,
                 expectedThreadID: item.review.threadID, expectedReviewTitle: item.review.title,
                 principal: reviewer)
             guard sessionState(session) != nil else {
-                _ = recordResult(result, threadID: state.threadID)
+                _ = recordResult(result, threadID: state.threadID, operationID: item.review.operationID)
                 return .failed(actionID: reviewed.actionID,
                                error: "UNAUTHORIZED: Session closed; the action may have executed.")
             }
-            return recordResult(result, threadID: state.threadID)
+            return recordResult(result, threadID: state.threadID, operationID: item.review.operationID)
         } catch is CancellationError {
-            return recordResult(.failed(actionID: reviewed.actionID, error: "ACTION_CANCELLED: Review did not complete."),
-                                threadID: state.threadID)
+            return recordResult(.failed(actionID: reviewed.actionID,
+                                        error: "ACTION_CANCELLED: Review did not complete; the action may have executed."),
+                                threadID: state.threadID, operationID: item.review.operationID)
         } catch {
             return recordResult(.failed(actionID: reviewed.actionID, error: "CONFIRMATION_FAILED: Review did not complete."),
-                                threadID: state.threadID)
+                                threadID: state.threadID, operationID: item.review.operationID)
         }
     }
 
@@ -340,12 +396,12 @@ public actor ACTALocalActionBroker {
         .failed(actionID: actionID, error: "AUDIT_FAILED: Action was not executed.")
     }
 
-    private func recordResult(_ result: ACTAActionResult, threadID: String) -> ACTAActionResult {
+    private func recordResult(_ result: ACTAActionResult, threadID: String, operationID: UUID? = nil) -> ACTAActionResult {
         do {
             try audit(ACTABrokerAuditEvent(phase: .result, actionID: result.actionID, threadID: threadID,
                                             approved: nil,
                                             outcome: result.requiresOperatorConfirmation ? "confirmation_required"
-                                                : result.success ? "success" : "failed"))
+                                                : result.success ? "success" : "failed", operationID: operationID))
             return result
         } catch {
             return .failed(actionID: result.actionID,
@@ -384,14 +440,15 @@ public actor ACTALocalActionBroker {
         let prefix = result.error?.split(separator: ":", maxSplits: 1).first.map(String.init) ?? "ACTION_FAILED"
         let allowed = ["INVALID_ARGUMENT", "AUTHORIZATION_DENIED", "AUDIT_FAILED",
                        "REVIEW_UNDISPLAYABLE", "REVIEW_TOO_LARGE", "ACTION_BUSY",
-                       "CONFIRMATION_PREPARATION_FAILED", "CONFIRMATION_REVOKED"]
+                       "ACTION_TIMED_OUT", "CONFIRMATION_PREPARATION_FAILED", "CONFIRMATION_REVOKED"]
         return .failed(actionID: result.actionID,
                        error: "\(allowed.contains(prefix) ? prefix : "ACTION_FAILED"): Request failed.")
     }
 
     private static func sameReview(_ left: ACTABrokerReview, _ right: ACTABrokerReview) -> Bool {
         func same(_ a: String, _ b: String) -> Bool { a.utf8.elementsEqual(b.utf8) }
-        guard same(left.actionID, right.actionID), same(left.threadID, right.threadID),
+        guard left.operationID == right.operationID,
+              same(left.actionID, right.actionID), same(left.threadID, right.threadID),
               same(left.title, right.title), left.parameters.count == right.parameters.count else { return false }
         let lhs = left.parameters.sorted { $0.key.utf8.lexicographicallyPrecedes($1.key.utf8) }
         let rhs = right.parameters.sorted { $0.key.utf8.lexicographicallyPrecedes($1.key.utf8) }

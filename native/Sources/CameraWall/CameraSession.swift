@@ -32,26 +32,93 @@ private final class ScreenCaptureStream: ScreenCaptureLifecycleStream {
     }
 }
 
+final class CameraSessionDrainTracker: @unchecked Sendable {
+    static let shared = CameraSessionDrainTracker()
+    private let lock = NSLock()
+    private var tasks: [UUID: Task<Void, Error>] = [:]
+    private var failed = false
+
+    func stop(_ session: CameraSession) {
+        session.stop()
+        track(session)
+    }
+
+    fileprivate func track(_ session: CameraSession) {
+        let id = UUID()
+        lock.lock()
+        let task = Task { try await session.waitAfterStop() }
+        tasks[id] = task
+        lock.unlock()
+        Task {
+            let result = await task.result
+            finish(id, result: result)
+        }
+    }
+
+    func wait() async throws {
+        while true {
+            let (current, failure) = snapshot()
+            if current.isEmpty {
+                if failure { throw DrainFailure() }
+                return
+            }
+            for (id, task) in current {
+                let result = await task.result
+                finish(id, result: result)
+            }
+        }
+    }
+
+    private func snapshot() -> ([UUID: Task<Void, Error>], Bool) {
+        lock.lock(); defer { lock.unlock() }
+        return (tasks, failed)
+    }
+
+    private func finish(_ id: UUID, result: Result<Void, Error>) {
+        lock.lock(); defer { lock.unlock() }
+        guard tasks.removeValue(forKey: id) != nil else { return }
+        if case .failure = result { failed = true }
+    }
+
+    private struct DrainFailure: Error {}
+}
+
 final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
-    // Capture configuration and delegate callbacks are serialized on queue.
+    // Capture configuration and sample callbacks use queue; stream errors may not.
     private var capture: AVCaptureSession?
     private var captureDevice: AVCaptureDevice?
     private let screenLifecycle = ScreenCaptureLifecycle()
     private var fpsStarted: TimeInterval = 0
     private var fpsFrames = 0
     private let condition = NSCondition()
+    private let frameCapture: ACTAFrameCaptureGate
+    private let startupWork = CameraRuntimeWorkGroup()
+    private let retryWork = CameraRuntimeWorkGroup()
+    private let delegateWork = CameraRuntimeWorkGroup()
     private var decoder: OpaquePointer?
     private var stopped = false
     private var frame = SessionFrame()
     private let queue = DispatchQueue(label: "CameraWall.decoder", qos: .userInitiated)
+    private var captureRetryTimers: [UUID: any DispatchSourceTimer] = [:]
     let attemptID: UUID
 
-    init(attemptID: UUID = UUID()) {
+    init(attemptID: UUID = UUID(), frameCapture: ACTAFrameCaptureGate = ACTAFrameCaptureGate()) {
         self.attemptID = attemptID
+        self.frameCapture = frameCapture
         super.init()
     }
 
-    func start(url: String) { queue.async { [self] in run(url: url) } }
+    deinit {
+        for timer in captureRetryTimers.values { timer.cancel() }
+    }
+
+    func start(url: String) {
+        guard let ticket = startupWork.begin() else { return }
+        queue.async { [self] in
+            defer { ticket.finish() }
+            run(url: url)
+        }
+    }
 
     func start(fileURL: URL, accessAlreadyStarted: Bool = false) {
         guard fileURL.isFileURL else {
@@ -59,7 +126,12 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             setError("Select a local video file.")
             return
         }
+        guard let ticket = startupWork.begin() else {
+            if accessAlreadyStarted { fileURL.stopAccessingSecurityScopedResource() }
+            return
+        }
         queue.async { [self] in
+            defer { ticket.finish() }
             defer { if accessAlreadyStarted { fileURL.stopAccessingSecurityScopedResource() } }
             run(url: fileURL.path, filePlayback: true)
         }
@@ -71,6 +143,14 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         return frame
     }
 
+    /// Copies the next delivered frame while the producing callback or decoder
+    /// still owns it. This does not mutate or retain the producer's storage.
+    func captureNextOwnedFrame(timeout: Duration = .seconds(3)) async throws -> ACTAOwnedCameraFrame {
+        try await frameCapture.capture(timeout: timeout)
+    }
+
+    var hasPendingOwnedFrameCapture: Bool { frameCapture.isAwaitingFrame }
+
     var isStopped: Bool {
         condition.lock()
         defer { condition.unlock() }
@@ -79,17 +159,49 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
     func stop() {
         condition.lock()
+        guard !stopped else { condition.unlock(); return }
         stopped = true
+        startupWork.fence()
+        retryWork.fence()
+        delegateWork.fence()
+        frameCapture.stop()
         if let decoder { cw_stop(decoder) }
         frame = SessionFrame()
         condition.broadcast()
-        condition.unlock()
         screenLifecycle.stop()
         queue.async { [self] in
+            for timer in captureRetryTimers.values { timer.cancel() }
+            captureRetryTimers.removeAll()
             capture?.stopRunning()
             capture = nil
             captureDevice = nil
         }
+        CameraSessionDrainTracker.shared.track(self)
+        condition.unlock()
+    }
+
+    /// The caller must fence new starts before awaiting this method.
+    func stopAndWait() async throws {
+        stop()
+        try await waitAfterStop()
+    }
+
+    fileprivate func waitAfterStop() async throws {
+        await startupWork.wait()
+        var screenFailure: Error?
+        do { try await screenLifecycle.stopAndWait() }
+        catch { screenFailure = error }
+        await retryWork.wait()
+        await delegateWork.wait()
+        await withCheckedContinuation { continuation in
+            queue.async { continuation.resume() }
+        }
+        if let screenFailure { throw screenFailure }
+    }
+
+    /// Call after all new session starts and stops have been fenced and joined.
+    static func waitForStoppedSessions() async throws {
+        try await CameraSessionDrainTracker.shared.wait()
     }
 
     static func localDevices() -> [AVCaptureDevice] {
@@ -99,17 +211,25 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         ).devices
     }
 
-    func start(deviceID: String) {
+    func start(deviceID: String,
+               authorizationStatus: () -> AVAuthorizationStatus = { AVCaptureDevice.authorizationStatus(for: .video) },
+               requestAccess: (@escaping @Sendable (Bool) -> Void) -> Void = {
+                   AVCaptureDevice.requestAccess(for: .video, completionHandler: $0)
+               }) {
+        guard let ticket = startupWork.begin() else { return }
         setError("Requesting camera access")
-        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        switch authorizationStatus() {
         case .authorized:
-            queue.async { [self] in maintainCapture(deviceID: deviceID) }
+            cameraAccessResolved(allowed: true, deviceID: deviceID)
+            ticket.finish()
         case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .video) { [weak self] allowed in
+            requestAccess { [weak self] allowed in
+                defer { ticket.finish() }
                 self?.cameraAccessResolved(allowed: allowed, deviceID: deviceID)
             }
         default:
             setError("Allow CameraWall in System Settings → Privacy & Security → Camera.")
+            ticket.finish()
         }
     }
 
@@ -119,16 +239,34 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     }
 
     func startScreen(displayID: String) {
+        guard let ticket = startupWork.begin() else { return }
         guard let numericID = UInt32(displayID) else {
             setError("Select a valid display.")
+            ticket.finish()
             return
         }
         if !CGPreflightScreenCaptureAccess(), !CGRequestScreenCaptureAccess() {
             setError("Allow CameraWall in System Settings → Privacy & Security → Screen & System Audio Recording.")
+            ticket.finish()
             return
         }
-        queue.async { [self] in
-            Task { [weak self] in await self?.startScreenCapture(displayID: numericID) }
+        enqueueScreenStart(ticket) { [weak self] in
+            await self?.startScreenCapture(displayID: numericID)
+        }
+    }
+
+    func enqueueScreenStart(_ operation: @escaping @Sendable () async -> Void) {
+        guard let ticket = startupWork.begin() else { return }
+        enqueueScreenStart(ticket, operation: operation)
+    }
+
+    private func enqueueScreenStart(_ ticket: CameraRuntimeWorkGroup.Ticket,
+                                    operation: @escaping @Sendable () async -> Void) {
+        queue.async {
+            Task {
+                defer { ticket.finish() }
+                await operation()
+            }
         }
     }
 
@@ -231,8 +369,27 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     }
 
     private func scheduleCaptureRetry(_ deviceID: String) {
-        queue.asyncAfter(deadline: .now() + 2) { [weak self] in
+        scheduleCaptureRetry(after: .seconds(2)) { [weak self] in
             self?.maintainCapture(deviceID: deviceID)
+        }
+    }
+
+    func scheduleCaptureRetry(after delay: DispatchTimeInterval, operation: @escaping @Sendable () -> Void) {
+        guard let ticket = retryWork.begin() else { return }
+        queue.async { [self] in
+            guard !isStopped else { ticket.finish(); return }
+            let id = UUID()
+            let timer = DispatchSource.makeTimerSource(queue: queue)
+            timer.setCancelHandler { ticket.finish() }
+            timer.setEventHandler { [weak self] in
+                guard let self else { return }
+                self.captureRetryTimers.removeValue(forKey: id)?.cancel()
+                guard !self.isStopped else { return }
+                operation()
+            }
+            captureRetryTimers[id] = timer
+            timer.schedule(deadline: .now() + delay)
+            timer.resume()
         }
     }
 
@@ -252,24 +409,29 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
+        guard let ticket = delegateWork.begin() else { return }
+        defer { ticket.finish() }
         guard let pixel = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         publish(pixel, message: "Live · AVFoundation")
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
                 of outputType: SCStreamOutputType) {
+        guard let ticket = delegateWork.begin() else { return }
+        defer { ticket.finish() }
         guard outputType == .screen, let pixel = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         publish(pixel, message: "Live · ScreenCaptureKit")
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
+        guard let ticket = delegateWork.begin() else { return }
+        defer { ticket.finish() }
         setScreenMessage("Screen capture stopped. Check Screen Recording permission.")
     }
 
     func publish(_ pixel: CVPixelBuffer, message: String) {
         condition.lock()
-        defer { condition.unlock() }
-        guard !stopped else { return }
+        guard !stopped else { condition.unlock(); return }
         frame.pixel = pixel
         frame.serial &+= 1
         frame.frames &+= 1
@@ -286,6 +448,10 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             fpsStarted = frame.receivedAt
         }
         frame.message = message
+        let serial = frame.serial
+        let receivedAt = frame.receivedAt
+        condition.unlock()
+        frameCapture.offer(pixel, serial: serial, receivedAt: receivedAt)
     }
 
     private func run(url: String, filePlayback: Bool = false) {
@@ -324,7 +490,10 @@ final class CameraSession: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
                         windowStarted = frame.receivedAt
                     }
                     frame.message = "Live · VideoToolbox"
+                    let serial = frame.serial
+                    let receivedAt = frame.receivedAt
                     condition.unlock()
+                    frameCapture.offer(pixel, serial: serial, receivedAt: receivedAt)
                     failures = 0
                 }
             }

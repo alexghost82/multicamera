@@ -515,9 +515,11 @@ struct ReIDCalibrationView: View {
         .background(ACTATheme.background)
         .onAppear {
             ACTAReIDCalibrationViewBridge.shared.attach(calibrationState)
+            model.reidCalibrationViewBridge.attach(calibrationState)
             model.refreshReIDValidation(targetPrecision: targetPrecision, includeCandidates: true)
         }
         .onDisappear {
+            model.reidCalibrationViewBridge.detach(calibrationState)
             ACTAReIDCalibrationViewBridge.shared.detach(calibrationState)
         }
         .onChange(of: targetPrecision) { _, value in

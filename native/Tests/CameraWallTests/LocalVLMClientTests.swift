@@ -7,6 +7,7 @@ import CameraCore
 final class LocalVLMClientTests: XCTestCase {
     @MainActor
     func testInstalledQwenAnswersSyntheticSavedHistory() async throws {
+        try requireInstalledModelIntegration()
         guard let model = ProcessInfo.processInfo.environment["CAMERAWALL_TEST_VLM_MODEL"] else {
             throw XCTSkip("Set CAMERAWALL_TEST_VLM_MODEL to run the local history smoke test.")
         }
@@ -72,6 +73,7 @@ final class LocalVLMClientTests: XCTestCase {
     }
 
     func testInstalledQwenRepeatedSceneAssessmentsOnLocalFixture() async throws {
+        try requireInstalledModelIntegration()
         guard let model = ProcessInfo.processInfo.environment["CAMERAWALL_TEST_VLM_MODEL"] else {
             throw XCTSkip("Set CAMERAWALL_TEST_VLM_MODEL to run the local scene smoke test.")
         }
@@ -95,6 +97,7 @@ final class LocalVLMClientTests: XCTestCase {
     }
 
     func testInstalledQwenReturnsStructuredAnswersForSyntheticImage() async throws {
+        try requireInstalledModelIntegration()
         guard let model = ProcessInfo.processInfo.environment["CAMERAWALL_TEST_VLM_MODEL"] else {
             throw XCTSkip("Set CAMERAWALL_TEST_VLM_MODEL to a local Qwen 3.5 9B directory for this model smoke test.")
         }
@@ -124,6 +127,7 @@ final class LocalVLMClientTests: XCTestCase {
     }
 
     func testInstalledQwenPrioritizesInteractiveOverBackgroundGeneration() async throws {
+        try requireInstalledModelIntegration()
         guard let model = ProcessInfo.processInfo.environment["CAMERAWALL_TEST_VLM_MODEL"] else {
             throw XCTSkip("Set CAMERAWALL_TEST_VLM_MODEL to run the local model priority smoke test.")
         }
@@ -141,6 +145,12 @@ final class LocalVLMClientTests: XCTestCase {
             XCTFail("Active background generation should yield to the operator")
         } catch is CancellationError {}
         print("Interactive priority smoke took \(Date().timeIntervalSince(started))s")
+    }
+
+    private func requireInstalledModelIntegration() throws {
+        guard ProcessInfo.processInfo.environment["CAMERAWALL_RUN_INSTALLED_MODEL_INTEGRATION"] == "1" else {
+            throw XCTSkip("Set CAMERAWALL_RUN_INSTALLED_MODEL_INTEGRATION=1 to run installed model inference.")
+        }
     }
 
     func testBackgroundWorkLeavesAnInstanceForInteractiveRequests() async throws {

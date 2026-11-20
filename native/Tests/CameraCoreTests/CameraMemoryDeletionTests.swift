@@ -47,6 +47,9 @@ final class CameraMemoryDeletionTests: XCTestCase {
         XCTAssertTrue(try other.hasPendingDeletion())
         XCTAssertThrowsError(try other.verifyConfirmedDeletion(snapshot))
         XCTAssertThrowsError(try other.load(now: date))
+        XCTAssertThrowsError(try other.inspect(now: date)) {
+            guard case CameraMemoryStoreError.recoveryRequired = $0 else { return XCTFail("\($0)") }
+        }
         XCTAssertThrowsError(try save(other, at: date))
         XCTAssertThrowsError(try other.delete(a.id))
         XCTAssertTrue(try other.hasStoredImage(for: a) != other.hasStoredImage(for: b))
@@ -214,7 +217,7 @@ final class CameraMemoryDeletionTests: XCTestCase {
         _ = try store.deletionSnapshot()
         let child = Process()
         child.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        child.arguments = ["-I", "-c",
+        child.arguments = ["-I", "-B", "-c",
             "import fcntl, os, sys; f=open(sys.argv[1], 'r+'); fcntl.flock(f, fcntl.LOCK_EX); os.write(1, b'R'); sys.stdin.buffer.read(1)",
             root.appendingPathComponent(".memory.lock").path]
         let input = Pipe()

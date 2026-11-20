@@ -1,10 +1,73 @@
 import CameraCore
+import Combine
 import Foundation
 import XCTest
 @testable import CameraWall
 
 @MainActor
 final class ACTACanvasArrangeActionTests: XCTestCase {
+    func testArrangeStillPublishesBeforeItsStateChanges() {
+        let state = ACTACanvasFilterState()
+        var observed: [String] = []
+        let changes = state.objectWillChange.sink { observed.append("will:\(state.arrangeCameras)") }
+        state.arrangeCameras = true
+        XCTAssertEqual(observed, ["will:false"])
+        XCTAssertTrue(state.arrangeCameras)
+        withExtendedLifetime(changes) {}
+    }
+
+    func testReviewedArrangeCommitsAndRejectsReentrantABA() async throws {
+        for invalidate in [false, true] {
+            let bridge = ACTACanvasFilterBridge()
+            let state = ACTACanvasFilterState()
+            bridge.attach(state)
+            let action = ACTACanvasSetArrangeModeAction(bridge: bridge)
+            let parameters = ["enabled": "true"]
+            let context = ACTAActionContext(isConfirmed: true)
+            let review = try await action.prepareConfirmation(parameters: parameters, context: context)
+            var changed = false
+            let changes = state.objectWillChange.sink {
+                if invalidate && !changed {
+                    changed = true
+                    state.arrangeCameras = true
+                    state.arrangeCameras = false
+                }
+            }
+            let result = try await action.executeConfirmed(parameters: parameters, context: context, snapshot: review.snapshot)
+            XCTAssertEqual(result.success, !invalidate)
+            XCTAssertEqual(state.arrangeCameras, !invalidate)
+            let verified = try await action.verify(parameters: parameters, context: context)
+            XCTAssertEqual(verified, !invalidate)
+            withExtendedLifetime(changes) {}
+        }
+    }
+
+    func testReviewedArrangeRejectsChangedRequestAndReplay() async throws {
+        let bridge = ACTACanvasFilterBridge()
+        let state = ACTACanvasFilterState()
+        bridge.attach(state)
+        let action = ACTACanvasSetArrangeModeAction(bridge: bridge)
+        let context = ACTAActionContext(threadID: "one", isConfirmed: true)
+        let parameters = ["enabled": "true"]
+        let review = try await action.prepareConfirmation(parameters: parameters, context: context)
+        let changed = try await action.executeConfirmed(parameters: ["enabled": "false"], context: context,
+                                                        snapshot: review.snapshot)
+        XCTAssertFalse(changed.success)
+        let wrongThread = try await action.executeConfirmed(parameters: parameters,
+            context: ACTAActionContext(threadID: "two", isConfirmed: true), snapshot: review.snapshot)
+        XCTAssertFalse(wrongThread.success)
+        XCTAssertFalse(state.arrangeCameras)
+        let applied = try await action.executeConfirmed(parameters: parameters, context: context,
+                                                        snapshot: review.snapshot)
+        XCTAssertTrue(applied.success)
+        let replayed = try await action.executeConfirmed(parameters: parameters, context: context,
+                                                         snapshot: review.snapshot)
+        XCTAssertFalse(replayed.success)
+        XCTAssertTrue(state.arrangeCameras)
+        let verified = try await action.verify(parameters: parameters, context: context)
+        XCTAssertFalse(verified)
+    }
+
     func testTypedActionUpdatesGUIStateWithoutChangingFilters() async throws {
         let bridge = ACTACanvasFilterBridge()
         let state = ACTACanvasFilterState()

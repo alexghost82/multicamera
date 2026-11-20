@@ -88,7 +88,20 @@ struct SettingsHubView: View {
                     .background(ACTATheme.surface, in: RoundedRectangle(cornerRadius: 12))
             }
         }.padding(8).actaAppearance().accessibilityIdentifier("settings.hub")
-        .onAppear { selection = initialSection }
+        .onAppear {
+            selection = initialSection
+            model.navigationBridge.selectedSettingsSection = initialSection
+        }
+        .onChange(of: selection) { _, newValue in
+            if model.navigationBridge.selectedSettingsSection != newValue {
+                model.navigationBridge.selectedSettingsSection = newValue
+            }
+        }
+        .onReceive(model.navigationBridge.$selectedSettingsSection) { target in
+            if selection != target {
+                selection = target
+            }
+        }
     }
 
     @ViewBuilder private var selectedContent: some View {

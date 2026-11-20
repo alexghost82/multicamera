@@ -351,8 +351,8 @@ public struct CanvasSetColumnsAction: ACTAActionProtocol {
             return ACTAActionResult.failed(actionID: id, error: "Missing or invalid 'columns' integer.")
         }
         let clamped = min(16, max(1, cols))
-        await MainActor.run {
-            model.setGridColumns(clamped)
+        try await MainActor.run {
+            try model.setGridColumnsChecked(clamped)
         }
         return ACTAActionResult(actionID: id, success: true, summary: "Canvas layout updated to \(clamped) columns.", outputJSON: "{\"columns\": \(clamped)}")
     }
@@ -447,8 +447,6 @@ func registerAllWallActions(registry: ACTAActionRegistry, model: WallModel, lang
     await registry.register(CameraListAction(model: model))
     await registry.register(CameraGetAction(model: model))
     await registry.register(CameraSetEnabledAction(model: model))
-    await registry.register(ACTACameraSetFavoriteAction(storage: ACTAUserDefaultsCameraFavoritesStorage(),
-        resolve: { [unowned model] value in actaResolveCamera(value, model: model)?.id }))
     await registry.register(CameraRemoveAction(model: model))
     await registry.register(CameraReconnectAction(model: model))
     await registry.register(CameraToggleExpandAction(model: model))
@@ -461,11 +459,12 @@ func registerAllWallActions(registry: ACTAActionRegistry, model: WallModel, lang
                     ACTACanvasFilterState.locationGroup(camera.location)
                 })
             }
-        }))
+        }, inventoryRevision: { [weak model] in model?.cameraInventoryRevision }))
     await registry.register(ACTACanvasSetArrangeModeAction(bridge: model.canvasFilterBridge))
     await registry.register(ACTACanvasSetPresentationAction(bridge: model.canvasFilterBridge))
     await registry.register(ACTACanvasSelectCamerasAction(bridge: model.canvasFilterBridge,
-        enabledCameraIDs: { [weak model] in model?.config.cameras.filter(\.enabled).map(\.id) }))
+        enabledCameraIDs: { [weak model] in model?.config.cameras.filter(\.enabled).map(\.id) },
+        inventoryRevision: { [weak model] in model?.cameraInventoryRevision }))
 
     let settings = WallSystemSettingsProvider(model: model)
     let features = WallFeaturePreferencesProvider(model: model)
@@ -477,6 +476,11 @@ func registerAllWallActions(registry: ACTAActionRegistry, model: WallModel, lang
     }
     await registry.register(WallAIBudgetAction(model: model))
     await registry.register(WallAIConfigAction(model: model))
+    await registry.register(ACTASetAPIKeyAction())
+    await registry.register(ACTAClearAPIKeyAction())
+    await registry.register(ACTAToggleShowcaseAction(model: model))
+    await registry.register(ACTAUpdateModelsAction(model: model))
+    await registry.register(ACTAReloadModelsAction(model: model))
     if let languageSettings {
         await registry.register(ACTASystemLanguageAction(settingsProvider: settings, languageSettings: languageSettings))
     } else {
@@ -508,7 +512,7 @@ func registerAllWallActions(registry: ACTAActionRegistry, model: WallModel, lang
     await registry.register(ACTARetryModelLoadingAction(model: model))
     await registry.register(ACTAAnalysisSetSectionAction(bridge: model.canvasFilterBridge))
 
-    await registry.register(WallNarrativeAction(pin: true, model: model))
+    await registry.unregister(actionID: "memory.toggle_pin")
     await registry.register(WallNarrativeAction(pin: false, model: model))
 
     for kind in WallMissionAction.Kind.allCases {

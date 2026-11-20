@@ -61,11 +61,16 @@ final class CrossCameraIdentityReviewServiceTests: XCTestCase {
         let preferences = CameraFeaturePreferences(enabledFeatures: [.crossCameraIdentity])
 
         init() throws {
-            root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-                .appendingPathComponent(".identity-review-test-\(UUID().uuidString)")
-            tracking = try LocalTrackingStore(url: root.appendingPathComponent("tracks.sqlite"))
-            features = try CameraFeatureStore(url: root.appendingPathComponent("features.sqlite"))
-            service = CrossCameraIdentityReviewService(tracking: tracking, features: features)
+            let directory = try IsolatedStoreTestDirectory()
+            do {
+                root = directory.url
+                tracking = try LocalTrackingStore(url: root.appendingPathComponent("tracks.sqlite"))
+                features = try CameraFeatureStore(url: root.appendingPathComponent("features.sqlite"))
+                service = CrossCameraIdentityReviewService(tracking: tracking, features: features)
+            } catch {
+                try? directory.remove()
+                throw error
+            }
         }
 
         func track() throws -> TrackedObjectRecord {
@@ -269,6 +274,112 @@ final class CrossCameraIdentityReviewServiceTests: XCTestCase {
         XCTAssertEqual(try f.features.identityProposals(status: .accepted).count, 2)
         XCTAssertFalse(try f.features.crossCameraIdentityAudit().contains { $0.action == .undone })
         XCTAssertEqual(try f.features.crossCameraIdentityAssignments(), snapshot.assignments)
+    }
+
+    func testPreparedUndoRejectsChangedRecordInUnrelatedComponent() throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let a = try f.track(), b = try f.track(), c = try f.track(), d = try f.track()
+        let ab = try f.propose(a, b)
+        _ = try f.service.review(
+            f.service.prepareReview(proposalID: ab.id, accept: true, preferences: f.preferences),
+            preferences: f.preferences)
+        let cd = try f.propose(c, d)
+        _ = try f.service.review(
+            f.service.prepareReview(proposalID: cd.id, accept: true, preferences: f.preferences),
+            preferences: f.preferences)
+        let prepared = try f.service.prepareUndo(proposalID: ab.id, preferences: f.preferences)
+        XCTAssertEqual(Set(prepared.graphTrackIDs), Set([a.trackID, b.trackID, c.trackID, d.trackID]))
+        let before = try f.service.snapshot()
+        let object = DetectedObject(id: 0, label: "person", confidence: 0.9, box: c.box, trackID: c.trackID)
+        _ = try f.tracking.record(object, cameraID: c.cameraID, cameraName: c.cameraName)
+        XCTAssertThrowsError(try f.service.undo(prepared, preferences: f.preferences))
+        XCTAssertEqual(try f.features.crossCameraIdentityAssignments(), before.assignments)
+        XCTAssertFalse(try f.features.crossCameraIdentityAudit().contains { $0.action == .undone })
+    }
+
+    func testPreparedUndoRejectsPolicyABAAndSidecarChange() throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let url = f.root.appendingPathComponent("preferences.json")
+        try CameraFeaturePreferencesStore.save(f.preferences, to: url)
+        let policy = CrossCameraIdentityPolicyReviewService(tracking: f.tracking, features: f.features, preferencesURL: url)
+        let proposal = try f.propose(f.track(), f.track())
+        _ = try policy.review(policy.prepareReview(proposalID: proposal.id, accept: true))
+        let prepared = try policy.prepareUndo(proposalID: proposal.id)
+        var disabled = f.preferences
+        disabled.enabledFeatures.remove(.crossCameraIdentity)
+        try CameraFeaturePreferencesStore.save(disabled, to: url)
+        try CameraFeaturePreferencesStore.save(f.preferences, to: url)
+        XCTAssertThrowsError(try policy.undo(prepared))
+        let refreshed = try policy.prepareUndo(proposalID: proposal.id)
+        _ = try f.propose(f.track(), f.track())
+        XCTAssertThrowsError(try policy.undo(refreshed))
+        XCTAssertEqual(try f.features.identityProposals(status: .accepted).map(\.id), [proposal.id])
+        XCTAssertFalse(try f.features.crossCameraIdentityAudit().contains { $0.action == .undone })
+        try policy.undo(policy.prepareUndo(proposalID: proposal.id))
+        XCTAssertThrowsError(try policy.prepareUndo(proposalID: proposal.id))
+        XCTAssertEqual(try f.features.crossCameraIdentityAudit().filter { $0.action == .undone }.count, 1)
+    }
+
+    func testCompetingPreparedUndosCommitAtMostOnce() throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let proposal = try f.propose(f.track(), f.track())
+        _ = try f.service.review(
+            f.service.prepareReview(proposalID: proposal.id, accept: true, preferences: f.preferences),
+            preferences: f.preferences)
+        let other = CrossCameraIdentityReviewService(
+            tracking: try LocalTrackingStore(url: f.root.appendingPathComponent("tracks.sqlite")),
+            features: try CameraFeatureStore(url: f.root.appendingPathComponent("features.sqlite")))
+        let first = try f.service.prepareUndo(proposalID: proposal.id, preferences: f.preferences)
+        let second = try other.prepareUndo(proposalID: proposal.id, preferences: f.preferences)
+        let lock = NSLock()
+        let start = DispatchSemaphore(value: 0)
+        let group = DispatchGroup()
+        final class Counts: @unchecked Sendable { var succeeded = 0; var failed = 0 }
+        let counts = Counts()
+        for (service, prepared) in [(f.service, first), (other, second)] {
+            group.enter()
+            DispatchQueue.global().async {
+                defer { group.leave() }
+                start.wait()
+                let success: Bool
+                do { try service.undo(prepared, preferences: f.preferences); success = true }
+                catch { success = false }
+                lock.lock()
+                if success { counts.succeeded += 1 } else { counts.failed += 1 }
+                lock.unlock()
+            }
+        }
+        start.signal()
+        start.signal()
+        XCTAssertEqual(group.wait(timeout: .now() + 10), .success)
+        XCTAssertEqual(counts.succeeded, 1)
+        XCTAssertEqual(counts.failed, 1)
+        XCTAssertEqual(try f.features.crossCameraIdentityAudit().filter { $0.action == .undone }.count, 1)
+    }
+
+    func testPreparedUndoFailsClosedWhenAuditInsertFails() throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let proposal = try f.propose(f.track(), f.track())
+        _ = try f.service.review(
+            f.service.prepareReview(proposalID: proposal.id, accept: true, preferences: f.preferences),
+            preferences: f.preferences)
+        let before = try f.service.snapshot()
+        let prepared = try f.service.prepareUndo(proposalID: proposal.id, preferences: f.preferences)
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(f.root.appendingPathComponent("features.sqlite").path, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        XCTAssertEqual(sqlite3_exec(db, """
+            CREATE TRIGGER fail_prepared_undo_audit BEFORE INSERT ON cross_camera_identity_audit
+            WHEN NEW.action='undone' BEGIN SELECT RAISE(ABORT, 'injected failure'); END
+            """, nil, nil, nil), SQLITE_OK)
+        XCTAssertThrowsError(try f.service.undo(prepared, preferences: f.preferences))
+        XCTAssertEqual(try f.features.crossCameraIdentityAssignments(), before.assignments)
+        XCTAssertEqual(try f.features.identityProposals(status: .accepted).map(\.id), [proposal.id])
+        XCTAssertFalse(try f.features.crossCameraIdentityAudit().contains { $0.action == .undone })
     }
 
     func testUndoRejectsChangedAcceptedEdgeEvenWhenAssignmentsAreUnchanged() throws {

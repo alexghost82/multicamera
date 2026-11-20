@@ -19,6 +19,7 @@ struct CameraMissionsPanel: View {
     @State private var errorMessage = ""
     @State private var consultDrafts: [UUID: String] = [:]
     @State private var consultErrors: [UUID: String] = [:]
+    @State private var htmlExportInProgress = false
 
     private var enabled: Bool { model.featurePreferences.enabledFeatures.contains(.scheduledMissions) }
     private var availableCameras: [Camera] { model.config.cameras.filter(\.enabled) }
@@ -43,6 +44,12 @@ struct CameraMissionsPanel: View {
                 ))
                 .toggleStyle(.switch)
                 .accessibilityLabel("Enable scheduled local missions")
+            }
+
+            if let error = model.missionServiceError {
+                Text(error)
+                    .foregroundStyle(.red)
+                    .accessibilityLabel("Mission service unavailable: \(error)")
             }
 
             if enabled {
@@ -169,7 +176,8 @@ struct CameraMissionsPanel: View {
                         Spacer()
                         Button("Export HTML report", action: exportReport)
                             .font(.system(size: ACTAType.metadata, weight: .medium))
-                            .help("Save a local report with mission summaries only; no images are included")
+                            .disabled(htmlExportInProgress)
+                            .help("Review and create a local report with mission summaries; no images are included")
                         Button("Export PDF", action: exportPDFReport)
                             .font(.system(size: ACTAType.metadata, weight: .medium))
                             .help("Save a private PDF with mission summaries only; no images are included")
@@ -445,19 +453,41 @@ struct CameraMissionsPanel: View {
     }
 
     private func exportReport() {
-        let panel = NSSavePanel()
-        InterfaceLocalization.configure(panel, title: "Export HTML report", language: locale.appLanguage)
-        panel.allowedContentTypes = [.html]
-        panel.nameFieldStringValue = "camerawall-mission-report.html"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            let html = CameraMissionRun.CameraMissionReport.renderHTML(runs: model.cameraMissionRuns)
-            try Data(html.utf8).write(to: url, options: [.atomic])
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-            errorMessage = ""
-        } catch {
-            errorMessage = "Mission report could not be saved"
+        guard !htmlExportInProgress else { return }
+        htmlExportInProgress = true
+        let action = ACTAMissionHTMLExport.make(runs: model.cameraMissionRuns)
+        Task { @MainActor in
+            defer { htmlExportInProgress = false }
+            do {
+                let context = ACTAActionContext(threadID: "local-mission-export")
+                let prepared = try await action.prepareConfirmation(parameters: [:], context: context)
+                let alert = NSAlert()
+                alert.messageText = "Create reviewed mission report?"
+                alert.informativeText = prepared.reviewSummary
+                alert.addButton(withTitle: "Create new file")
+                alert.addButton(withTitle: "Cancel")
+                guard alert.runModal() == .alertFirstButtonReturn else { return }
+                let confirmed = ACTAActionContext(threadID: context.threadID, isConfirmed: true)
+                let result = try await action.executeConfirmed(parameters: [:], context: confirmed,
+                                                               snapshot: prepared.snapshot)
+                guard result.success, try await action.verify(parameters: [:], context: confirmed) else {
+                    showHTMLExportFailure()
+                    return
+                }
+                errorMessage = ""
+            } catch is CancellationError {
+                return
+            } catch {
+                showHTMLExportFailure()
+            }
         }
+    }
+
+    private func showHTMLExportFailure() {
+        let alert = NSAlert()
+        alert.messageText = "Mission report export failed"
+        alert.informativeText = "The destination may already exist or the result may be uncertain. Check it before retrying; no existing file was intentionally replaced."
+        alert.runModal()
     }
 
     private func exportPDFReport() {

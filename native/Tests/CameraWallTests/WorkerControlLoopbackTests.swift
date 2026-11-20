@@ -5,6 +5,9 @@ import CameraCore
 
 final class WorkerControlLoopbackTests: XCTestCase {
     func testMutualTLSCoordinatorAndWorkerExchangeStaticCameraLease() async throws {
+        guard ProcessInfo.processInfo.environment["CAMERAWALL_RUN_WORKER_CONTROL_INTEGRATION"] == "1" else {
+            throw XCTSkip("Set CAMERAWALL_RUN_WORKER_CONTROL_INTEGRATION=1 to run the OpenSSL and mutual TLS loopback integration test.")
+        }
         guard let openssl = ["/opt/homebrew/bin/openssl", "/usr/bin/openssl"]
             .first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
             throw XCTSkip("OpenSSL is required to generate ephemeral loopback test certificates.")
@@ -88,6 +91,82 @@ final class WorkerControlLoopbackTests: XCTestCase {
         )
         XCTAssertEqual(secondResponse.leases.first?.leaseID, firstResponse.leases.first?.leaseID)
         XCTAssertGreaterThan(secondResponse.leases.first!.expiresAt, firstResponse.leases.first!.expiresAt)
+    }
+
+    func testSyntheticWireExchangeRenewsLeaseAndRejectsReplay() async throws {
+        let coordinator = WorkerCoordinator(leaseDuration: 30, heartbeatTimeout: 10)
+        let workerID = UUID()
+        let cameraID = UUID()
+        let registration = WorkerRegistration(workerID: workerID, sessionID: UUID(), displayName: "synthetic",
+                                              cameraIDs: [cameraID], maximumCameraCount: 1,
+                                              modelIdentifiers: ["synthetic-pose"])
+        let start = Date(timeIntervalSince1970: 1_000)
+        let register = try wireRoundTrip(WorkerControlRequest(registration: registration))
+        try register.validate(supportedProtocolVersion: 1)
+        try await coordinator.register(try XCTUnwrap(register.registration),
+                                       authenticatedWorkerID: workerID, at: start)
+
+        let initial = WorkerHeartbeat(workerID: workerID, sessionID: registration.sessionID, sequence: 1,
+                                      activeCameraIDs: [], processedFramesPerSecond: 0, queueDepth: 0)
+        let first = try wireRoundTrip(WorkerControlRequest(heartbeat: initial))
+        try first.validate(supportedProtocolVersion: 1)
+        _ = try await coordinator.heartbeat(try XCTUnwrap(first.heartbeat),
+                                            authenticatedWorkerID: workerID, at: start)
+        let lease = try await coordinator.assign(cameraID: cameraID, to: workerID, at: start)
+
+        let heartbeat = WorkerHeartbeat(workerID: workerID, sessionID: registration.sessionID, sequence: 2,
+                                        activeCameraIDs: [cameraID], processedFramesPerSecond: 1, queueDepth: 0)
+        let next = try wireRoundTrip(WorkerControlRequest(heartbeat: heartbeat))
+        try next.validate(supportedProtocolVersion: 1)
+        let renewalTime = start.addingTimeInterval(5)
+        let renewed = try await coordinator.heartbeat(try XCTUnwrap(next.heartbeat),
+                                                      authenticatedWorkerID: workerID, at: renewalTime)
+        let response = WorkerControlResponse(requestID: next.requestID, accepted: true, leases: renewed)
+        let decodedResponse = try wireRoundTrip(response)
+        XCTAssertEqual(decodedResponse, response)
+        XCTAssertEqual(decodedResponse.leases.first?.leaseID, lease.leaseID)
+        XCTAssertEqual(decodedResponse.leases.first?.expiresAt, start.addingTimeInterval(35))
+
+        do {
+            _ = try await coordinator.heartbeat(try XCTUnwrap(next.heartbeat),
+                                                authenticatedWorkerID: workerID, at: renewalTime)
+            XCTFail("Expected replayed heartbeat to be rejected")
+        } catch let error as WorkerCoordinatorError {
+            XCTAssertEqual(error, .staleHeartbeat)
+        }
+        let currentLease = await coordinator.lease(for: cameraID, at: renewalTime)
+        XCTAssertEqual(currentLease, decodedResponse.leases.first)
+    }
+
+    func testSyntheticWireRejectsInconsistentAndUnsupportedRequests() throws {
+        let registration = WorkerRegistration(workerID: UUID(), sessionID: UUID(), displayName: "synthetic",
+                                              cameraIDs: [], maximumCameraCount: 1, modelIdentifiers: [])
+        let request = WorkerControlRequest(registration: registration)
+        let payload = Data(try WorkerWireCodec.encode(request).dropFirst(WorkerWireCodec.frameHeaderBytes))
+        let original = try XCTUnwrap(JSONSerialization.jsonObject(with: payload) as? [String: Any])
+
+        var wrongKind = original
+        wrongKind["kind"] = "heartbeat"
+        let inconsistent = try WorkerWireCodec.decode(JSONSerialization.data(withJSONObject: wrongKind),
+                                                       as: WorkerControlRequest.self)
+        XCTAssertThrowsError(try inconsistent.validate(supportedProtocolVersion: 1)) {
+            XCTAssertEqual($0 as? WorkerCoordinatorError, .invalidHeartbeat)
+        }
+
+        var wrongVersion = original
+        wrongVersion["protocolVersion"] = 2
+        let unsupported = try WorkerWireCodec.decode(JSONSerialization.data(withJSONObject: wrongVersion),
+                                                      as: WorkerControlRequest.self)
+        XCTAssertThrowsError(try unsupported.validate(supportedProtocolVersion: 1)) {
+            XCTAssertEqual($0 as? WorkerCoordinatorError, .unsupportedProtocolVersion)
+        }
+    }
+
+    private func wireRoundTrip<T: Codable>(_ value: T) throws -> T {
+        let frame = try WorkerWireCodec.encode(value)
+        let length = try WorkerWireCodec.payloadLength(from: Data(frame.prefix(WorkerWireCodec.frameHeaderBytes)))
+        XCTAssertEqual(length, frame.count - WorkerWireCodec.frameHeaderBytes)
+        return try WorkerWireCodec.decode(Data(frame.dropFirst(WorkerWireCodec.frameHeaderBytes)), as: T.self)
     }
 
     private func makeIdentity(name: String, directory: URL, rootCertificate: URL, rootKey: URL,

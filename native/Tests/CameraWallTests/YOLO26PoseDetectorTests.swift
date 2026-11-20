@@ -45,6 +45,9 @@ final class YOLO26PoseDetectorTests: XCTestCase {
     }
 
     func testSwiftCoreMLRuntimeMatchesKnownPersonCountOnBusFixture() throws {
+        guard ProcessInfo.processInfo.environment["CAMERAWALL_RUN_INSTALLED_MODEL_INTEGRATION"] == "1" else {
+            throw XCTSkip("Set CAMERAWALL_RUN_INSTALLED_MODEL_INTEGRATION=1 to run installed model inference.")
+        }
         let modelURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent(".build/models/yolo26s-pose.mlpackage", isDirectory: true)

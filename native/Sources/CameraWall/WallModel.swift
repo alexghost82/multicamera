@@ -6,6 +6,13 @@ import NaturalLanguage
 import UniformTypeIdentifiers
 import CameraCore
 
+struct ACTAVoiceAnswer: Equatable {
+    let id: UUID
+    let owner: UUID
+    let threadID: String
+    let text: String
+}
+
 struct VLMAnalysisReply: Decodable {
     let answer: String
     let matchedAlerts: [MatchedAlert]
@@ -307,41 +314,29 @@ enum VLMResponseValidator {
 }
 
 @MainActor
-final class TileState: ObservableObject, Identifiable {
-    let id: UUID
-    @Published var frame = SessionFrame()
-    @Published var stale = true
-    @Published var objects: [DetectedObject] = []
-    @Published var poseTracks: [TrackedPersonPose] = []
-    @Published var restrictedZones: [RestrictedZoneRegion] = []
-    @Published var hasCriticalSafetyIncident = false
-    var detectionAt: TimeInterval = 0
-    var detectionImageSize = CGSize.zero
-    var detectionSerial: UInt64 = 0
-    var inferenceMilliseconds: Double = 0
-    var inferenceCount = 0
-    var session: CameraSession?
-    init(id: UUID) { self.id = id }
-    func stop() {
-        session?.stop()
-        session = nil
-        frame = SessionFrame()
-        stale = true
-        objects = []
-        poseTracks = []
-        restrictedZones = []
-        hasCriticalSafetyIncident = false
-        detectionAt = 0
-        detectionSerial = 0
-        inferenceMilliseconds = 0
-        inferenceCount = 0
-    }
-}
-
-@MainActor
 final class WallModel: ObservableObject {
-    let canvasFilterBridge = ACTACanvasFilterBridge()
-    @Published var config = WallConfiguration()
+    struct MissionExecutionHooks {
+        let waitForNextFrame: @Sendable () async throws -> Void
+        let analyze: @Sendable (Data, String) async throws -> String
+        let didFinish: @MainActor () -> Void
+    }
+
+    static func modelFacingActionIDs(_ actions: [any ACTAActionProtocol]) -> Set<String> {
+        Set(actions.map(\.id))
+    }
+
+    let canvasFilterBridge = ACTACanvasFilterBridge(voiceInputAllowed: false)
+    let reidCalibrationViewBridge = ACTAReIDCalibrationViewBridge()
+    let navigationBridge = ACTANavigationBridge()
+    private(set) var cameraInventoryRevision = UUID()
+    @Published var config = WallConfiguration() {
+        willSet {
+            missionCameraTransitionDepth += 1
+            cameraInventoryRevision = UUID()
+            invalidateMissionsForCameraChanges(newValue.cameras)
+        }
+        didSet { missionCameraTransitionDepth -= 1 }
+    }
     @Published var tiles: [UUID: TileState] = [:]
     @Published var expanded: UUID?
     @Published var connecting = false
@@ -366,11 +361,21 @@ final class WallModel: ObservableObject {
     @Published var runtimePreferences = AdvancedRuntimePreferences()
     @Published var modelPreferences = ModelSelectionPreferences()
     @Published var vlmPreferences = VLMPreferences()
-    @Published var featurePreferences = CameraFeaturePreferences()
+    @Published var featurePreferences = CameraFeaturePreferences() {
+        willSet {
+            missionReviewRevision = UUID()
+            canvasFilterBridge.setVoiceInputAllowed(newValue.allowVoiceInput)
+        }
+        didSet { canvasFilterBridge.setVoiceInputAllowed(featurePreferences.allowVoiceInput) }
+    }
     @Published var operationsPreferences = OperationsPreferences()
-    @Published var cameraMissions: [CameraMission] = []
-    @Published var cameraMissionRuns: [CameraMissionRun] = []
-    @Published var cameraMissionConsultMessages: [CameraMissionConsultMessage] = []
+    @Published var cameraMissions: [CameraMission] = [] { willSet { missionReviewRevision = UUID() } }
+    @Published var cameraMissionRuns: [CameraMissionRun] = [] { willSet { missionReviewRevision = UUID() } }
+    @Published var cameraMissionConsultMessages: [CameraMissionConsultMessage] = [] { willSet { missionReviewRevision = UUID() } }
+    private(set) var missionReviewRevision = UUID()
+    @Published private(set) var missionServiceError: String?
+    private let missionServiceAccess: ACTAMissionServiceAccess?
+    private var missionStoreExisted = false
     @Published var vlmMessages: [VLMChatMessage] = []
     @Published var trackResearchMessages: [TrackResearchMessage] = []
     @Published var operatorActions: [CameraOperatorAction] = []
@@ -410,9 +415,12 @@ final class WallModel: ObservableObject {
     @Published var actaHealthStatus = ACTAHealthStatus()
     @Published var actaBudgetSnapshot = ACTABudgetSnapshot()
     @Published var actaNarrativeChapters: [ACTANarrativeChapterRecord] = []
+    @Published private(set) var narrativePresentation: ACTANarrativePresentationState?
+    @Published private(set) var identityFollowUpDomain: ACTAIdentityFollowUpDomain?
     @Published var actaChatThreads: [ACTAChatThreadRecord] = []
     @Published var activeACTAThreadID: String = "default"
     @Published var actaChatMessages: [ACTAChatMessageRecord] = []
+    @Published private(set) var actaVoiceAnswer: ACTAVoiceAnswer?
     @Published var actaThreadFocusEntries: [ACTAThreadFocusEntry] = []
     @Published var actaChatActions: [ACTAChatActionRecord] = []
     @Published private(set) var actaBrokerReviews: [ACTABrokerReviewController] = []
@@ -422,8 +430,11 @@ final class WallModel: ObservableObject {
     private var actaAgentWatchdog: Task<Void, Never>?
     var agentRequestDeadline: Duration = .seconds(120)
     private var actaAgentGeneration = UUID()
+    private var actaPreviewGeneration: UUID?
+    private var actaPreviewRevision = 0
     @Published var actaQuestionDraft = ""
     @Published private(set) var actaAgentBusy = false
+    @Published private(set) var actaAnswerPreview: String?
     @Published private(set) var actaAgentStatus = "Unified ACTA Agent ready"
     private(set) var actaAnalytics: ACTAAnalyticsCoordinator!
     private var lastACTAMaintenanceCheck: TimeInterval = -.infinity
@@ -448,6 +459,8 @@ final class WallModel: ObservableObject {
     private var relay: Go2RTC
     private let relayFactory: @MainActor () -> Go2RTC
     private let reconnectAttempt = CameraReconnectAttempt()
+    private let cameraNetworkLifecycle = CameraNetworkLifecycle()
+    private let tileSessionDrain = CameraSessionDrainTracker()
     private let reconnectDecoderStart: @MainActor (CameraSession, String) -> Void
     private let fileDecoderStart: @MainActor (CameraSession, URL, Bool) -> Void
     private var startup: Task<Void, Never>?
@@ -473,9 +486,15 @@ final class WallModel: ObservableObject {
     let cameraMemoryStore: CameraMemoryStore
     let operationsPreferencesURL: URL
     let operationsWatchURL: URL
+    private let interfaceLanguageSettings: LanguageSettings?
     let cameraCredentialStore: any CameraCredentialStore
+    private let cameraWriterGate = ACTACameraWriterGate()
+    private lazy var cameraBookmarkRefresh = ACTACameraBookmarkRefresh(gate: cameraWriterGate)
+    private lazy var cameraPreferenceWriter = ACTAGUICameraPreferenceWriter(gate: cameraWriterGate)
+    private lazy var cameraSettingsWriter = ACTAGUISettingsWriter(gate: cameraWriterGate)
     let missionStoreURL: URL
     private let missionConsultResponder: (@Sendable (String) async throws -> String)?
+    private let missionExecutionHooks: MissionExecutionHooks?
     private var crowdAlertEvaluator = CrowdAlertEvaluator()
     private var trackingStore: LocalTrackingStore?
     private var reidValidationGeneration = UUID()
@@ -483,8 +502,7 @@ final class WallModel: ObservableObject {
     private var trackHistorySearchGeneration = UUID()
     private var trackHistorySearchTask: Task<Void, Never>?
     private var trackAssigners: [UUID: ObjectTrackAssigner] = [:]
-    private var isapiEventMonitors: [UUID: ISAPIEventMonitor] = [:]
-    private var isapiEventTasks: [UUID: Task<Void, Never>] = [:]
+    private let isapiMonitorLifecycle = ISAPIMonitorLifecycle()
     private var detectionGeneration = UUID()
     private var detectionCursor = 0
     private var lastDetectionSubmission: TimeInterval = 0
@@ -501,9 +519,22 @@ final class WallModel: ObservableObject {
     private var lastFeatureQueueRecovery: TimeInterval = 0
     private var activeFeatureDescriptionJobIDs: Set<UUID> = []
     private var lastMissionCheck: TimeInterval = 0
-    private var activeMissionID: UUID?
+    private var missionCameraRevision = UUID()
+    private var missionCameraTransitionDepth = 0
+    private var activeMissionID: UUID? { willSet { missionReviewRevision = UUID() } }
+    private var activeMissionToken: UUID?
     private var activeMissionConsultID: UUID?
-    private var forcedMissionID: UUID?
+    private var forcedMissionID: UUID? {
+        willSet { missionReviewRevision = UUID() }
+        didSet {
+            if forcedMissionID == nil {
+                forcedMissionSession = nil
+                forcedMissionReconnects = nil
+            }
+        }
+    }
+    private var forcedMissionSession: CameraSession?
+    private var forcedMissionReconnects: Int?
     private var memorySampleAt: [UUID: TimeInterval] = [:]
     private var memorySampleTask: Task<Void, Never>?
     private var memoryGeneration = UUID()
@@ -513,6 +544,7 @@ final class WallModel: ObservableObject {
     private var localShowcaseGeneration = UUID()
     private let imageContext = CIContext(options: [.cacheIntermediates: false])
     private let alertClipStore: CriticalAlertClipStore
+    var actaAlertClipStore: CriticalAlertClipStore { alertClipStore }
     private var alertLookbackBuffer = AlertLookbackBuffer()
     private var alertLookbackLastSubmittedAt: [UUID: TimeInterval] = [:]
     private var alertLookbackLastSerial: [UUID: UInt64] = [:]
@@ -540,6 +572,7 @@ final class WallModel: ObservableObject {
          operationsWatchURL: URL = OperationsWatchStore.defaultURL,
          missionStoreURL: URL = CameraMissionStore.defaultURL,
          missionConsultResponder: (@Sendable (String) async throws -> String)? = nil,
+         missionExecutionHooks: MissionExecutionHooks? = nil,
          cameraCredentialStore: any CameraCredentialStore = SystemCameraCredentialStore(),
          reconnectDecoderStart: @escaping @MainActor (CameraSession, String) -> Void = { $0.start(url: $1) },
          fileDecoderStart: @escaping @MainActor (CameraSession, URL, Bool) -> Void = {
@@ -551,13 +584,34 @@ final class WallModel: ObservableObject {
          monitorHistoryURL: URL = LocalOperationsMonitorStore.defaultURL,
          analyticsModelDiscovery: AnalyticsModelDiscovery = .production) {
         self.monitorHistoryURL = monitorHistoryURL
+        self.interfaceLanguageSettings = languageSettings
         self.alertClipStore = alertClipStore
         self.operationsPreferencesURL = operationsPreferencesURL
         self.cameraCredentialStore = cameraCredentialStore
         self.reconnectDecoderStart = reconnectDecoderStart
         self.fileDecoderStart = fileDecoderStart
         self.missionConsultResponder = missionConsultResponder
+        self.missionExecutionHooks = missionExecutionHooks
         self.missionStoreURL = missionStoreURL
+        let missionAccess: ACTAMissionServiceAccess?
+        let missionAccessError: String?
+        do {
+            try FileManager.default.createDirectory(at: missionStoreURL.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true,
+                                                    attributes: [.posixPermissions: 0o700])
+            if let lease = try ACTAMissionServiceLease.acquire(storeURL: missionStoreURL) {
+                missionAccess = ACTAMissionServiceAccess(lease: lease)
+                missionAccessError = nil
+            } else {
+                missionAccess = nil
+                missionAccessError = "Mission service is in use by another application instance. Close older versions as well."
+            }
+        } catch {
+            missionAccess = nil
+            missionAccessError = "Mission service could not acquire its exclusive lock."
+        }
+        self.missionServiceAccess = missionAccess
+        self.missionServiceError = missionAccessError
         self.cameraMemoryStore = cameraMemoryStore
         self.operationsWatchURL = operationsWatchURL
         self.workerMode = workerMode
@@ -617,14 +671,19 @@ final class WallModel: ObservableObject {
                 notice = "Local monitor history could not be loaded"
             }
         }
-        if featurePreferences.enabledFeatures.contains(.scheduledMissions) {
+        if let missionAccess {
             do {
+                missionStoreExisted = try ACTAMissionServiceLease.storeExistsAndIsRegular(missionStoreURL)
                 let document = try CameraMissionStore.loadDocument(from: missionStoreURL)
                 cameraMissions = document.missions
                 cameraMissionRuns = document.runs
                 cameraMissionConsultMessages = document.consults
+                missionAccess.loaded()
             }
-            catch { notice = "Local scheduled missions could not be loaded" }
+            catch {
+                missionAccess.invalidate()
+                missionServiceError = "Local scheduled missions could not be loaded; no mission writes are allowed."
+            }
         }
         do { operationsPreferences = try OperationsPreferencesStore.load(from: operationsPreferencesURL) }
         catch { notice = "Local operations settings could not be loaded; safe defaults are active" }
@@ -692,6 +751,20 @@ final class WallModel: ObservableObject {
         )
         self.actaAnalytics.configureRuntime(runtimePreferences)
         self.actaNarrativeChapters = (try? trackingStore?.loadACTANarrativeChapterRecords(limit: 50)) ?? []
+        if let trackingStore {
+            do {
+                let presentation = try ACTANarrativePresentationState(trackingStore: trackingStore)
+                self.narrativePresentation = presentation
+                try presentation.refresh()
+            } catch {
+                notice = "Narrative pin controls are unavailable. Refresh chapters or restart the application."
+            }
+            do {
+                self.identityFollowUpDomain = try ACTAIdentityFollowUpDomain(trackingStore: trackingStore)
+            } catch {
+                notice = "Identity follow-up is unavailable. Restart or contact the operator."
+            }
+        }
         self.actaChatThreads = (try? trackingStore?.listACTAChatThreads(limit: 50)) ?? []
         self.actaChatMessages = (try? trackingStore?.loadACTAChatMessages(threadID: activeACTAThreadID)) ?? []
         self.actaThreadFocusEntries = (try? trackingStore?.loadACTAThreadFocusEntries(threadID: activeACTAThreadID, limit: 6)) ?? []
@@ -817,8 +890,11 @@ final class WallModel: ObservableObject {
         applicationServicesStarted = true
         localAnalyticsEngine.recoverInterruptedVerifications()
         prepareModels()
-        localAnalyticsEngine.startIfEnabled(activeCameraCount: config.cameras.filter(\.enabled).count)
-        if error == nil { start() }
+        if error == nil {
+            start()
+        } else {
+            localAnalyticsEngine.startIfEnabled(activeCameraCount: config.cameras.filter(\.enabled).count)
+        }
     }
 
     func startWorker() {
@@ -870,14 +946,25 @@ final class WallModel: ObservableObject {
 
     private func launch(recovering: Bool) {
         stop()
-        let relay = relayFactory()
-        self.relay = relay
         connecting = true
         running = true
-        if !workerMode { localAnalyticsEngine.startIfEnabled(activeCameraCount: 0) }
         startup = Task { [weak self] in
             guard let self else { return }
+            var startedRelay: Go2RTC?
             do {
+                try await self.cameraNetworkLifecycle.prepareStart()
+                guard let ticket = self.cameraNetworkLifecycle.begin() else { throw CancellationError() }
+                defer { ticket.finish() }
+                try Task.checkCancellation()
+                try self.localAnalyticsEngine.resumeAfterDrain()
+                try Task.checkCancellation()
+                if !self.workerMode { self.localAnalyticsEngine.startIfEnabled(activeCameraCount: 0) }
+                try Task.checkCancellation()
+                guard self.isapiMonitorLifecycle.activate() else { throw CancellationError() }
+                let relay = self.relayFactory()
+                startedRelay = relay
+                self.relay = relay
+                try Task.checkCancellation()
                 try self.config.validate()
                 if self.config.cameras.contains(where: {
                     $0.enabled && $0.localDeviceID == nil && $0.screenDisplayID == nil && $0.fileURL == nil
@@ -890,14 +977,15 @@ final class WallModel: ObservableObject {
                     try await self.connect(camera, expanded: self.expanded == camera.id)
                     try await Task.sleep(nanoseconds: 80_000_000)
                 }
+                try Task.checkCancellation()
                 self.startISAPIEventMonitors()
                 self.connecting = false
                 self.stableSince = ProcessInfo.processInfo.systemUptime
                 self.notice = recovering ? "Video wall restored" : "Connected"
             } catch is CancellationError {
-                relay.stop()
+                startedRelay?.stop()
             } catch {
-                if Task.isCancelled { relay.stop(); return }
+                if Task.isCancelled { startedRelay?.stop(); return }
                 if recovering { self.scheduleRecovery() }
                 else { self.stop(); self.error = self.safeMessage(error) }
             }
@@ -905,8 +993,15 @@ final class WallModel: ObservableObject {
     }
 
     func stop() {
+        stop(resumeAnalyticsAfterDrain: true)
+    }
+
+    private func stop(resumeAnalyticsAfterDrain: Bool) {
+        missionCameraTransitionDepth += 1
+        defer { missionCameraTransitionDepth -= 1 }
+        cameraNetworkLifecycle.fence()
         reconnectAttempt.cancel()
-        localAnalyticsEngine.stopEngine()
+        localAnalyticsEngine.fenceForDrain()
         analyticsStreamSessions.removeAll()
         analyticsStreamReconnects.removeAll()
         if let request = manualQuestionQueue.take() {
@@ -916,10 +1011,7 @@ final class WallModel: ObservableObject {
         }
         detectionGeneration = UUID()
         trackAssigners.removeAll()
-        for monitor in isapiEventMonitors.values { monitor.cancel() }
-        for task in isapiEventTasks.values { task.cancel() }
-        isapiEventMonitors.removeAll()
-        isapiEventTasks.removeAll()
+        isapiMonitorLifecycle.fence()
         isapiMonitorStatus.removeAll()
         vlmGeneration = UUID()
         vlmTask?.cancel()
@@ -929,6 +1021,7 @@ final class WallModel: ObservableObject {
         manualVLMTask = nil
         manualVLMBusy = false
         activeMissionID = nil
+        activeMissionToken = nil
         forcedMissionID = nil
         describingTrackIDs.removeAll()
         recovery?.cancel()
@@ -937,11 +1030,45 @@ final class WallModel: ObservableObject {
         startup = nil
         switchTask?.cancel()
         switchTask = nil
-        for tile in tiles.values { tile.stop() }
+        for tile in tiles.values { tile.stop(tracking: tileSessionDrain) }
         relay.stop()
+        let stoppedRelay = relay
+        let stoppedReconnectAttempt = reconnectAttempt
+        let stoppedTileSessions = tileSessionDrain
+        let stoppedISAPIMonitors = isapiMonitorLifecycle
+        let stoppedAnalytics = localAnalyticsEngine
+        cameraNetworkLifecycle.join {
+            try await stoppedAnalytics.stopAndDrain()
+            try await stoppedISAPIMonitors.waitForStop()
+            try await stoppedReconnectAttempt.waitForStoppedSessions()
+            try await stoppedRelay.waitForStopped()
+            try await stoppedTileSessions.wait()
+        }
         running = false
         connecting = false
         stableSince = nil
+        if resumeAnalyticsAfterDrain && !workerMode {
+            let revision = cameraNetworkLifecycle.stoppedRevision()
+            cameraNetworkLifecycle.afterStop(revision, onFailure: { [weak self] error in
+                self?.notice = "Camera shutdown did not finish: \(error.localizedDescription)"
+            }) { [weak self] in
+                guard let self, !self.running, !self.connecting else { return }
+                do { try self.localAnalyticsEngine.resumeAfterDrain() }
+                catch { self.notice = "Local analytics could not resume after camera shutdown" }
+            }
+        }
+    }
+
+    /// Leaves analytics fenced for a caller coordinating shutdown. This is not a full runtime drain.
+    func stopAndWaitForCameraNetwork() async throws {
+        stop(resumeAnalyticsAfterDrain: false)
+        try await waitForCameraNetworkStop()
+    }
+
+    func waitForCameraNetworkStop() async throws {
+        let revision = cameraNetworkLifecycle.stoppedRevision()
+        try await cameraNetworkLifecycle.waitForStop(revision)
+        try cameraNetworkLifecycle.checkStopped(revision)
     }
 
     private func scheduleRecovery() {
@@ -969,6 +1096,7 @@ final class WallModel: ObservableObject {
     }
 
     func shutdown() {
+        missionServiceAccess?.invalidate()
         modelRuntime.cancel()
         trackResearchGeneration = UUID()
         trackResearchTask?.cancel()
@@ -977,13 +1105,17 @@ final class WallModel: ObservableObject {
         missionConsultGeneration = UUID()
         missionConsultTask?.cancel()
         missionConsultTask = nil
+        activeMissionConsultID = nil
+        missionConsultBusy = false
         actaAgentTask?.cancel()
         actaAgentWatchdog?.cancel()
         closeACTAReviewSession()
         actaAgentGeneration = UUID()
+        actaPreviewGeneration = nil
+        actaAnswerPreview = nil
         actaAgentBusy = false
         actaAgentTask = nil
-        stop()
+        stop(resumeAnalyticsAfterDrain: false)
         timer?.invalidate()
     }
 
@@ -997,32 +1129,42 @@ final class WallModel: ObservableObject {
         if let deviceID = camera.localDeviceID {
             try Task.checkCancellation()
             guard running, let tile = tiles[camera.id] else { return nil }
-            tile.stop()
-            let session = CameraSession()
-            tile.session = session
-            session.start(deviceID: deviceID)
-            return session
+            return withMissionCameraTransition {
+                invalidateMissionCamera(camera.id)
+                tile.stop(tracking: tileSessionDrain)
+                let session = CameraSession()
+                tile.session = session
+                session.start(deviceID: deviceID)
+                return session
+            }
         }
         if let displayID = camera.screenDisplayID {
             try Task.checkCancellation()
             guard running, let tile = tiles[camera.id] else { return nil }
-            tile.stop()
-            let session = CameraSession()
-            tile.session = session
-            session.startScreen(displayID: displayID)
-            return session
+            return withMissionCameraTransition {
+                invalidateMissionCamera(camera.id)
+                tile.stop(tracking: tileSessionDrain)
+                let session = CameraSession()
+                tile.session = session
+                session.startScreen(displayID: displayID)
+                return session
+            }
         }
         let url = try await relay.register(camera: camera, expanded: expanded)
         try Task.checkCancellation()
         guard running, let tile = tiles[camera.id] else { return nil }
-        tile.stop()
-        let session = CameraSession()
-        tile.session = session
-        session.start(url: url)
-        return session
+        return withMissionCameraTransition {
+            invalidateMissionCamera(camera.id)
+            tile.stop(tracking: tileSessionDrain)
+            let session = CameraSession()
+            tile.session = session
+            session.start(url: url)
+            return session
+        }
     }
 
     private func resetCameraAnalytics(_ cameraID: UUID) {
+        invalidateMissionCamera(cameraID)
         localAnalyticsEngine.removeCamera(cameraID)
         analyticsStreamSessions.removeValue(forKey: cameraID)
         analyticsStreamReconnects.removeValue(forKey: cameraID)
@@ -1041,21 +1183,22 @@ final class WallModel: ObservableObject {
             throw ConfigurationError.invalid("The selected video file is unavailable.")
         }
         try Task.checkCancellation()
-        if refreshBookmark, resolution.wasStale, let index = config.cameras.firstIndex(where: { $0.id == camera.id }) {
-            var refreshed = config
-            refreshed.cameras[index].fileURL = resolution.url.standardizedFileURL
-            refreshed.cameras[index].fileBookmarkData = resolution.bookmarkData
-            try ConfigurationStore.save(refreshed, to: configURL)
-            config = refreshed
+        if refreshBookmark, resolution.wasStale {
+            try cameraBookmarkRefresh.persist(camera: camera, resolvedURL: resolution.url,
+                bookmarkData: resolution.bookmarkData, configURL: configURL,
+                readMemory: { self.config }, installMemory: { self.config = $0 })
         }
         try Task.checkCancellation()
         resetCameraAnalytics(camera.id)
-        tile.stop()
-        let session = CameraSession()
-        tile.session = session
-        fileDecoderStart(session, resolution.url, startedAccessing)
-        handedOffAccess = true
-        return session
+        return withMissionCameraTransition {
+            invalidateMissionCamera(camera.id)
+            tile.stop(tracking: tileSessionDrain)
+            let session = CameraSession()
+            tile.session = session
+            fileDecoderStart(session, resolution.url, startedAccessing)
+            handedOffAccess = true
+            return session
+        }
     }
 
     func reconnectFileScheduled(_ camera: Camera) throws -> (CameraSession, Camera) {
@@ -1070,13 +1213,12 @@ final class WallModel: ObservableObject {
             throw CameraReconnectAttempt.Failure.superseded
         }
         if Task.isCancelled {
-            if tiles[camera.id] === tile, tile.session === session { tile.stop() }
-            else { session.stop() }
+            discardFileReconnect(session, cameraID: camera.id)
             throw CancellationError()
         }
         guard running, !connecting, tiles[camera.id] === tile, tile.session === session,
               session !== original else {
-            session.stop()
+            tileSessionDrain.stop(session)
             throw CameraReconnectAttempt.Failure.superseded
         }
         guard let current = config.cameras.first(where: { $0.id == camera.id }) else {
@@ -1087,8 +1229,13 @@ final class WallModel: ObservableObject {
     }
 
     func discardFileReconnect(_ session: CameraSession, cameraID: UUID) {
-        if let tile = tiles[cameraID], tile.session === session { tile.stop() }
-        else { session.stop() }
+        if let tile = tiles[cameraID], tile.session === session {
+            withMissionCameraTransition {
+                invalidateMissionCamera(cameraID)
+                tile.stop(tracking: tileSessionDrain)
+            }
+        }
+        else { tileSessionDrain.stop(session) }
     }
 
     func toggleExpanded(_ camera: Camera) {
@@ -1098,14 +1245,16 @@ final class WallModel: ObservableObject {
         expanded = previous == camera.id ? nil : camera.id
         guard running else { return }
         switchTask?.cancel()
+        guard let ticket = cameraNetworkLifecycle.begin() else { return }
         switchTask = Task {
+            defer { ticket.finish() }
             do {
                 if let previous, let old = config.cameras.first(where: { $0.id == previous }), old.mainstream != nil {
                     try await connect(old, expanded: false)
                 }
                 if expanded == camera.id, camera.mainstream != nil { try await connect(camera, expanded: true) }
             } catch is CancellationError {
-            } catch { self.error = safeMessage(error) }
+            } catch { if !Task.isCancelled { self.error = safeMessage(error) } }
         }
     }
 
@@ -1113,7 +1262,9 @@ final class WallModel: ObservableObject {
         guard running, !connecting else { return }
         switchTask?.cancel()
         reconnectAttempt.cancel()
+        guard let ticket = cameraNetworkLifecycle.begin() else { return }
         switchTask = Task {
+            defer { ticket.finish() }
             do {
                 guard let current = config.cameras.first(where: { $0.id == camera.id }), current.enabled else { return }
                 if current.fileURL == nil, current.localDeviceID == nil, current.screenDisplayID == nil {
@@ -1122,13 +1273,15 @@ final class WallModel: ObservableObject {
                     try await connect(current, expanded: expanded == current.id)
                 }
             }
-            catch is CancellationError {} catch { self.error = safeMessage(error) }
+            catch is CancellationError {} catch { if !Task.isCancelled { self.error = safeMessage(error) } }
         }
     }
 
     @discardableResult
     func reconnectNetworkVerified(_ camera: Camera, timeout: Duration = .seconds(10)) async throws -> CameraSession {
         try Task.checkCancellation()
+        guard let ticket = cameraNetworkLifecycle.begin() else { throw CancellationError() }
+        defer { ticket.finish() }
         guard running, !connecting, camera.enabled,
               camera.fileURL == nil, camera.localDeviceID == nil, camera.screenDisplayID == nil,
               config.cameras.contains(camera), let tile = tiles[camera.id] else {
@@ -1166,13 +1319,16 @@ final class WallModel: ObservableObject {
                 throw CameraReconnectAttempt.Failure.superseded
             }
             guard !cancellation.isCancelled() else { throw CancellationError() }
-            localAnalyticsEngine.removeCamera(camera.id)
-            analyticsStreamSessions.removeValue(forKey: camera.id)
-            analyticsStreamReconnects.removeValue(forKey: camera.id)
-            trackAssigners.removeValue(forKey: camera.id)
-            fallDetectors.removeValue(forKey: camera.id)
-            tile.stop()
-            tile.session = candidate.session
+            withMissionCameraTransition {
+                invalidateMissionCamera(camera.id)
+                localAnalyticsEngine.removeCamera(camera.id)
+                analyticsStreamSessions.removeValue(forKey: camera.id)
+                analyticsStreamReconnects.removeValue(forKey: camera.id)
+                trackAssigners.removeValue(forKey: camera.id)
+                fallDetectors.removeValue(forKey: camera.id)
+                tile.stop(tracking: tileSessionDrain)
+                tile.session = candidate.session
+            }
             installed = true
             return candidate.session
         } onCancel: {
@@ -1180,31 +1336,37 @@ final class WallModel: ObservableObject {
         }
     }
 
-    func save(ip: String, credentials: Credentials, original: Camera, progress: (String) -> Void) async throws {
+    func save(ip: String, credentials: Credentials, original: Camera, progress: @escaping (String) -> Void) async throws {
         let address = try CameraAddress(ip)
-        let existing = config.cameras.first(where: { $0.id == original.id })
-        let detected = try await CameraDiscovery.detect(ip: ip, credentials: credentials,
-                                                       config: config, preferred: existing, progress: progress)
-        try Task.checkCancellation()
-        var camera = original
-        camera.substream = detected.substream
-        camera.mainstream = detected.mainstream
-        if existing == nil { camera.name = "Camera \(address.host)"; camera.enabled = true }
-        try save(camera: camera, credentials: credentials)
+        let configuration = config
+        let revision = cameraInventoryRevision
+        let existing = configuration.cameras.first(where: { $0.id == original.id })
+        try await ACTACameraDiscoveryTransaction.run(url: configURL, configuration: configuration,
+            revision: revision, readConfiguration: { self.config }, readRevision: { self.cameraInventoryRevision },
+            discover: { lease in
+                try await CameraDiscovery.detect(ip: ip, credentials: credentials, config: configuration,
+                                                  preferred: existing, cameraLease: lease, progress: progress)
+            }, commit: { detected, writerLease, snapshot in
+                var camera = original
+                camera.substream = detected.substream
+                camera.mainstream = detected.mainstream
+                if existing == nil { camera.name = "Camera \(address.host)"; camera.enabled = true }
+                try self.save(camera: camera, credentials: credentials, writerLease: writerLease,
+                              expectedSnapshot: snapshot)
+            })
         start()
     }
 
     func cameraConfigurationChecked() throws -> WallConfiguration {
-        if !FileManager.default.fileExists(atPath: configURL.path), config == WallConfiguration() { return config }
-        let saved = try ConfigurationStore.load(from: configURL)
-        guard saved == config else {
-            throw ConfigurationError.invalid("Camera configuration changed on disk; reload it before making changes.")
-        }
-        return saved
+        try cameraWriterGate.capture {
+            try CoordinatedCameraConfigurationStore.checkedConfiguration(matching: config, from: configURL)
+        }.value
     }
 
     /// Shared configuration service. Agent additions stay disabled; GUI defaults still start sources.
-    func saveCameraConfigurationChecked(_ camera: Camera, startAfterSave: Bool = false, resumeRunning: Bool = true) throws {
+    func saveCameraConfigurationChecked(_ camera: Camera, startAfterSave: Bool = false, resumeRunning: Bool = true,
+                                        writerLease: CoordinatedCameraConfigurationStore.WriterLease? = nil,
+                                        expectedSnapshot: CoordinatedCameraConfigurationStore.Snapshot? = nil) throws {
         _ = try cameraConfigurationChecked()
         try camera.validate()
         var next = config
@@ -1215,10 +1377,15 @@ final class WallModel: ObservableObject {
         if let index = next.cameras.firstIndex(where: { $0.id == camera.id }) { next.cameras[index] = camera }
         else { next.cameras.append(camera) }
         let resume = (resumeRunning && running) || startAfterSave
-        try apply(next)
+        try apply(next, writerLease: writerLease, expectedSnapshot: expectedSnapshot)
         if resume { start() }
-        guard try ConfigurationStore.load(from: configURL) == next, config == next else {
-            throw ConfigurationError.invalid("Camera configuration persistence verification failed.")
+        do {
+            guard try ConfigurationStore.load(from: configURL) == next, config == next else {
+                throw ACTAGUISettingsWriter.Failure.reconciliationRequired
+            }
+        } catch {
+            try cameraWriterGate.writeForReconciliation { cameraWriterGate.requireReconciliation() }
+            throw ACTAGUISettingsWriter.Failure.reconciliationRequired
         }
     }
 
@@ -1296,12 +1463,13 @@ final class WallModel: ObservableObject {
     }
 
     private func setYOLOEnabledForAll(_ enabled: Bool) {
-        var next = config
-        for index in next.cameras.indices { next.cameras[index].yoloEnabled = enabled }
-        guard next != config else { return }
+        guard config.cameras.contains(where: { $0.yoloEnabled != enabled }) else { return }
         do {
-            try ConfigurationStore.save(next, to: configURL)
-            config = next
+            let changed = try cameraPreferenceWriter.update(url: configURL, readMemory: { self.config },
+                installMemory: { self.config = $0 }, change: { next in
+                    for index in next.cameras.indices { next.cameras[index].yoloEnabled = enabled }
+                })
+            guard changed else { return }
             detectionGeneration = UUID()
             for tile in tiles.values {
                 tile.objects = []
@@ -1315,18 +1483,12 @@ final class WallModel: ObservableObject {
 
     @discardableResult
     private func updateCameraPreference(_ cameraID: UUID, change: (inout Camera) -> Void) -> Bool {
-        do { _ = try cameraConfigurationChecked() }
-        catch { self.error = safeMessage(error); return false }
-        var next = config
-        guard let index = next.cameras.firstIndex(where: { $0.id == cameraID }) else { return false }
-        var camera = next.cameras[index]
-        change(&camera)
-        guard camera != next.cameras[index] else { return false }
-        next.cameras[index] = camera
         do {
-            try ConfigurationStore.save(next, to: configURL)
-            config = next
-            return true
+            return try cameraPreferenceWriter.update(url: configURL, readMemory: { self.config },
+                installMemory: { self.config = $0 }, change: { next in
+                    guard let index = next.cameras.firstIndex(where: { $0.id == cameraID }) else { return }
+                    change(&next.cameras[index])
+                })
         } catch {
             self.error = safeMessage(error)
             return false
@@ -1334,18 +1496,21 @@ final class WallModel: ObservableObject {
     }
 
     func save(camera: Camera, credentials: Credentials) throws {
-        _ = try cameraConfigurationChecked()
-        try camera.validate()
-        let previous = try cameraCredentialStore.read(camera.id)
-        try cameraCredentialStore.save(credentials, for: camera.id)
-        do { try saveCameraConfigurationChecked(camera, resumeRunning: false) }
-        catch {
-            let failure = error
-            do {
-                if let previous { try cameraCredentialStore.save(previous, for: camera.id) }
-                else { try cameraCredentialStore.remove(camera.id) }
-            } catch { throw ConfigurationError.invalid("Camera save failed and credential rollback failed.") }
-            throw failure
+        try save(camera: camera, credentials: credentials, writerLease: nil, expectedSnapshot: nil)
+    }
+
+    private func save(camera: Camera, credentials: Credentials,
+                      writerLease: CoordinatedCameraConfigurationStore.WriterLease?,
+                      expectedSnapshot: CoordinatedCameraConfigurationStore.Snapshot?) throws {
+        try withMissionCameraTransition {
+            _ = try cameraConfigurationChecked()
+            try camera.validate()
+            try ACTACameraCredentialedSave.run(cameraID: camera.id, credentials: credentials,
+                store: cameraCredentialStore, beforeWrite: { invalidateMissionCamera(camera.id) },
+                commit: {
+                    try saveCameraConfigurationChecked(camera, resumeRunning: false, writerLease: writerLease,
+                                                       expectedSnapshot: expectedSnapshot)
+                })
         }
     }
 
@@ -1355,55 +1520,81 @@ final class WallModel: ObservableObject {
     }
 
     func removeCameraChecked(_ cameraID: UUID) throws {
-        _ = try cameraConfigurationChecked()
-        guard config.cameras.contains(where: { $0.id == cameraID }) else { throw ConfigurationError.invalid("Camera does not exist.") }
-        let previous = try cameraCredentialStore.read(cameraID)
-        try cameraCredentialStore.remove(cameraID)
-        guard try cameraCredentialStore.read(cameraID) == nil else {
-            throw ConfigurationError.invalid("Camera credential deletion verification failed.")
-        }
-        var next = config
-        next.cameras.removeAll { $0.id == cameraID }
-        do { try apply(next) }
-        catch {
-            let failure = error
-            do { if let previous { try cameraCredentialStore.save(previous, for: cameraID) } }
-            catch { throw ConfigurationError.invalid("Camera removal failed and credential rollback failed.") }
-            throw failure
-        }
-        guard try ConfigurationStore.load(from: configURL) == next, config == next else {
-            throw ConfigurationError.invalid("Camera configuration persistence verification failed.")
+        try withMissionCameraTransition {
+            _ = try cameraConfigurationChecked()
+            guard config.cameras.contains(where: { $0.id == cameraID }) else { throw ConfigurationError.invalid("Camera does not exist.") }
+            let previous = try cameraCredentialStore.read(cameraID)
+            invalidateMissionCamera(cameraID)
+            try cameraCredentialStore.remove(cameraID)
+            guard try cameraCredentialStore.read(cameraID) == nil else {
+                throw ConfigurationError.invalid("Camera credential deletion verification failed.")
+            }
+            var next = config
+            next.cameras.removeAll { $0.id == cameraID }
+            do { try apply(next) }
+            catch ACTAGUISettingsWriter.Failure.reconciliationRequired {
+                throw ConfigurationError.invalid("Camera configuration and credentials may have changed; reconcile both before retrying.")
+            }
+            catch {
+                let failure = error
+                do { if let previous { try cameraCredentialStore.save(previous, for: cameraID) } }
+                catch { throw ConfigurationError.invalid("Camera removal failed and credential rollback failed.") }
+                throw failure
+            }
+            do {
+                guard try ConfigurationStore.load(from: configURL) == next, config == next else {
+                    throw ACTAGUISettingsWriter.Failure.reconciliationRequired
+                }
+            } catch {
+                try cameraWriterGate.writeForReconciliation { cameraWriterGate.requireReconciliation() }
+                throw ACTAGUISettingsWriter.Failure.reconciliationRequired
+            }
         }
     }
 
-    func apply(_ next: WallConfiguration) throws {
-        try ConfigurationStore.save(next, to: configURL)
-        stop()
-        expanded = nil
-        config = next
-        rebuildTiles()
-        notice = "Configuration saved"
+    func apply(_ next: WallConfiguration,
+               writerLease: CoordinatedCameraConfigurationStore.WriterLease? = nil,
+               expectedSnapshot: CoordinatedCameraConfigurationStore.Snapshot? = nil) throws {
+        try withMissionCameraTransition {
+            try cameraSettingsWriter.replaceConfiguration(next, to: configURL, using: writerLease,
+                expectedSnapshot: expectedSnapshot,
+                readMemory: { self.config },
+                installMemory: { saved in
+                stop()
+                expanded = nil
+                config = saved
+                rebuildTiles()
+                notice = "Configuration saved"
+            }, afterCommit: { _, _ in })
+        }
     }
 
     func applySettings(_ draft: WallConfiguration) throws {
-        let next = try config.applyingSettings(from: draft)
-        let restartRelay = running && next.go2rtcPath != config.go2rtcPath
-        try ConfigurationStore.save(next, to: configURL)
-        config = next
-        detectionGeneration = UUID()
-        for tile in tiles.values {
-            tile.objects = tile.objects.filter { $0.confidence >= next.detectionThreshold }
-            tile.detectionAt = 0
+        try cameraSettingsWriter.save(draft, includingPorts: false, to: configURL,
+                                      readMemory: { self.config }, installMemory: { self.config = $0 }) { previous, next in
+            let restartRelay = self.running && next.go2rtcPath != previous.go2rtcPath
+            detectionGeneration = UUID()
+            for tile in tiles.values {
+                tile.objects = tile.objects.filter { $0.confidence >= next.detectionThreshold }
+                tile.detectionAt = 0
+            }
+            if restartRelay { start() }
+            notice = "Configuration saved"
         }
-        if restartRelay { start() }
-        notice = "Configuration saved"
+    }
+
+    func setGridColumnsChecked(_ columns: Int) throws {
+        guard (1...16).contains(columns) else {
+            throw ConfigurationError.invalid("Grid columns must be between 1 and 16.")
+        }
+        var draft = config
+        draft.columns = columns
+        try applySettings(draft)
     }
 
     func setGridColumns(_ columns: Int) {
         guard (1...16).contains(columns) else { return }
-        var draft = config
-        draft.columns = columns
-        do { try applySettings(draft) }
+        do { try setGridColumnsChecked(columns) }
         catch { self.error = safeMessage(error) }
     }
 
@@ -1436,6 +1627,8 @@ final class WallModel: ObservableObject {
             do {
                 for (id, login) in credentials { try CameraKeychain.save(login, for: id) }
                 try apply(next)
+            } catch ACTAGUISettingsWriter.Failure.reconciliationRequired {
+                throw ConfigurationError.invalid("Imported configuration and credentials may have changed; reconcile both before retrying.")
             } catch {
                 for (id, _) in credentials { CameraKeychain.remove(id) }
                 throw error
@@ -1479,13 +1672,23 @@ final class WallModel: ObservableObject {
     var isapiEventsURL: URL { configURL.deletingLastPathComponent().appendingPathComponent("isapi-events.json") }
     var trackResearchURL: URL { configURL.deletingLastPathComponent().appendingPathComponent("track-research.json") }
 
+    var actaTrackingStore: LocalTrackingStore? { trackingStore }
+    var actaFeatureCoordinator: CameraFeatureCoordinator { featureCoordinator }
+
+    func actaCrossCameraIdentityReviewService() throws -> CrossCameraIdentityPolicyReviewService {
+        guard let trackingStore else {
+            throw ConfigurationError.invalid("UNAVAILABLE: Tracking store is not connected.")
+        }
+        return try featureCoordinator.makeCrossCameraIdentityReviewService(tracking: trackingStore)
+    }
+
     func actaReadOpenAlertState() throws -> OperationsAlertReadState {
         try featureCoordinator.readOpenAlertState(includeExpired: true)
     }
 
     private func startISAPIEventMonitors() {
         for camera in config.cameras where camera.enabled && camera.localDeviceID == nil && camera.isapiEventsEnabled {
-            guard isapiEventTasks[camera.id] == nil else { continue }
+            guard isapiMonitorLifecycle.canStart(cameraID: camera.id) else { continue }
             let credentials: Credentials
             do {
                 credentials = try cameraCredentialStore.read(camera.id) ?? Credentials(username: "", password: "")
@@ -1494,11 +1697,14 @@ final class WallModel: ObservableObject {
                 continue
             }
             let monitor = ISAPIEventMonitor(camera: camera, credentials: credentials)
-            isapiEventMonitors[camera.id] = monitor
-            isapiEventTasks[camera.id] = Task { [weak self] in
-                await monitor.run(onState: { [weak self] status in
+            if !isapiMonitorLifecycle.start(cameraID: camera.id, cancel: { monitor.cancel() },
+                run: { onState, onEvent in
+                    await monitor.run(onState: onState, onEvent: onEvent)
+                    try await monitor.waitForShutdown()
+                }, onState: { [weak self] status in
                     self?.isapiMonitorStatus[camera.id] = status
-                }, onEvent: { [weak self] event in self?.recordISAPIEvent(event) })
+                }, onEvent: { [weak self] event in self?.recordISAPIEvent(event) }) {
+                monitor.cancel()
             }
         }
     }
@@ -1515,12 +1721,54 @@ final class WallModel: ObservableObject {
         }
     }
 
+    /// Records a direct GUI operator mutation into the shared action audit log with `initiator: "ui_direct"`,
+    /// stripping any potentially sensitive parameter keys or URL credentials.
+    func recordDirectGUIAction(
+        actionID: String,
+        parameters: [String: String] = [:],
+        ok: Bool = true,
+        error: String? = nil,
+        now: Date = Date()
+    ) {
+        guard let store = trackingStore else { return }
+        var safePayload: [String: Any] = ["initiator": "ui_direct"]
+        let blockedKeySubstrings = ["password", "secret", "credential", "token", "key", "url"]
+        for (k, v) in parameters {
+            let lowerKey = k.lowercased()
+            if blockedKeySubstrings.contains(where: { lowerKey.contains($0) }) || v.contains("://") {
+                safePayload[k] = "[redacted]"
+            } else {
+                safePayload[k] = String(v.prefix(200))
+            }
+        }
+        let argsJSON: String
+        if let data = try? JSONSerialization.data(withJSONObject: safePayload, options: [.sortedKeys]) {
+            argsJSON = String(decoding: data, as: UTF8.self)
+        } else {
+            argsJSON = "{\"initiator\":\"ui_direct\"}"
+        }
+        try? store.recordACTAToolCallAudit(ACTAToolCallAuditRecord(
+            threadID: "ui_direct",
+            toolName: actionID,
+            argsJSON: argsJSON,
+            resultRows: ok ? 1 : 0,
+            durationMs: 0,
+            ok: ok,
+            error: error,
+            createdAt: now
+        ))
+    }
+
     func clearISAPIEvents() {
         isapiEvents = []
-        do { try ISAPIEventStore.save([], to: isapiEventsURL) }
+        do {
+            try ISAPIEventStore.save([], to: isapiEventsURL)
+            recordDirectGUIAction(actionID: "monitor.clear_isapi_events", ok: true)
+        }
         catch {
             actaISAPIEventsLoaded = false
             notice = "ISAPI events could not be cleared"
+            recordDirectGUIAction(actionID: "monitor.clear_isapi_events", ok: false, error: error.localizedDescription)
         }
     }
 
@@ -1587,19 +1835,21 @@ final class WallModel: ObservableObject {
     }
 
     func saveSystemSettings(_ draft: WallConfiguration) throws {
-        var next = try config.applyingSettings(from: draft)
-        next.apiPort = draft.apiPort
-        next.rtspPort = draft.rtspPort
-        try next.validate()
-        let restart = running && (next.apiPort != config.apiPort || next.rtspPort != config.rtspPort || next.go2rtcPath != config.go2rtcPath)
-        try ConfigurationStore.save(next, to: configURL)
-        config = next
-        detectionGeneration = UUID()
-        for tile in tiles.values { tile.detectionAt = 0; tile.objects = tile.objects.filter { $0.confidence >= next.detectionThreshold } }
-        if restart { start() }
+        try cameraSettingsWriter.save(draft, includingPorts: true, to: configURL,
+                                      readMemory: { self.config }, installMemory: { self.config = $0 }) { previous, next in
+            let restart = self.running && (next.apiPort != previous.apiPort || next.rtspPort != previous.rtspPort || next.go2rtcPath != previous.go2rtcPath)
+            detectionGeneration = UUID()
+            for tile in tiles.values { tile.detectionAt = 0; tile.objects = tile.objects.filter { $0.confidence >= next.detectionThreshold } }
+            if restart { start() }
+            recordDirectGUIAction(actionID: "settings.update_system", parameters: [
+                "columns": String(next.columns),
+                "stale_after_ms": String(next.staleAfterMilliseconds)
+            ], ok: true)
+        }
     }
 
     func saveFeaturePolicy(_ preferences: CameraFeaturePreferences) throws {
+        try requireMissionServiceForFeatureWrite()
         _ = try featurePolicySnapshotChecked()
         // Feature lifecycle changes go through setFeatureEnabled; this method changes only permissions and retention.
         var next = preferences
@@ -1654,11 +1904,26 @@ final class WallModel: ObservableObject {
     }
 
     func setFeatureEnabled(_ featureID: CameraFeatureID, enabled: Bool) throws {
+        try requireMissionServiceForFeatureWrite()
+        if featureID == .scheduledMissions {
+            guard let missionServiceAccess else {
+                throw ConfigurationError.invalid(missionServiceError ?? "Mission service is unavailable.")
+            }
+            try missionServiceAccess.withMutation {
+                try setFeatureEnabledImpl(featureID, enabled: enabled)
+            }
+        } else {
+            try setFeatureEnabledImpl(featureID, enabled: enabled)
+        }
+    }
+
+    private func setFeatureEnabledImpl(_ featureID: CameraFeatureID, enabled: Bool) throws {
         _ = try featurePolicySnapshotChecked()
         var preferences = featurePreferences
         if enabled { preferences.enabledFeatures.insert(featureID) }
         else { preferences.enabledFeatures.remove(featureID) }
         try featureCoordinator.savePreferences(preferences)
+        if !enabled, featureID == .scheduledMissions { forcedMissionID = nil }
         featurePreferences = preferences
         actaAnalytics?.aiClient.updateConfiguration(
             Self.makeACTAAIConfiguration(from: vlmPreferences, featurePreferences: preferences)
@@ -1729,6 +1994,7 @@ final class WallModel: ObservableObject {
         }
         if enabled, featureID == .scheduledMissions {
             do {
+                missionStoreExisted = try ACTAMissionServiceLease.storeExistsAndIsRegular(missionStoreURL)
                 let document = try CameraMissionStore.loadDocument(from: missionStoreURL)
                 cameraMissions = document.missions
                 cameraMissionRuns = document.runs
@@ -1742,18 +2008,19 @@ final class WallModel: ObservableObject {
         if !enabled, featureID == .visionDescriptions, !activeFeatureDescriptionJobIDs.isEmpty {
             vlmTask?.cancel()
         }
-        if !enabled, featureID == .scheduledMissions, activeMissionID != nil {
-            forcedMissionID = nil
-            vlmTask?.cancel()
-        }
+        if !enabled, featureID == .scheduledMissions, activeMissionID != nil { vlmTask?.cancel() }
         if !enabled, featureID == .scheduledMissions {
+            missionConsultGeneration = UUID()
             missionConsultTask?.cancel()
-            cameraMissionConsultMessages = []
+            missionConsultTask = nil
+            activeMissionConsultID = nil
+            missionConsultBusy = false
         }
         notice = enabled ? "Feature enabled" : "Feature disabled; queued data remains local"
     }
 
     func setMemoryFrameRetentionEnabled(_ enabled: Bool) throws {
+        try requireMissionServiceForFeatureWrite()
         _ = try featurePolicySnapshotChecked()
         var preferences = featurePreferences
         preferences.retainFullFrames = enabled
@@ -1907,7 +2174,67 @@ final class WallModel: ObservableObject {
         return reply.answer
     }
 
+    private func withMissionCameraTransition<T>(_ body: () throws -> T) rethrows -> T {
+        missionCameraTransitionDepth += 1
+        defer { missionCameraTransitionDepth -= 1 }
+        return try body()
+    }
+
+    private func invalidateMissionsForCameraChanges(_ incoming: [Camera]) {
+        let relevantIDs = Set(cameraMissions.filter {
+            $0.id == forcedMissionID || $0.id == activeMissionID
+        }.map(\.cameraID))
+        for id in relevantIDs where config.cameras.filter({ $0.id == id }) != incoming.filter({ $0.id == id }) {
+            invalidateMissionCamera(id)
+        }
+    }
+
+    private func invalidateMissionCamera(_ cameraID: UUID) {
+        cameraInventoryRevision = UUID()
+        let queued = cameraMissions.contains { $0.id == forcedMissionID && $0.cameraID == cameraID }
+        let active = cameraMissions.contains { $0.id == activeMissionID && $0.cameraID == cameraID }
+        guard queued || active else { return }
+        missionCameraRevision = UUID()
+        if queued { forcedMissionID = nil }
+        if active { vlmTask?.cancel() }
+    }
+
+    @discardableResult
+    private func invalidateStaleQueuedMissionSource() -> Bool {
+        guard let id = forcedMissionID,
+              let mission = cameraMissions.first(where: { $0.id == id }) else { return false }
+        let session = tiles[mission.cameraID]?.session
+        guard session !== forcedMissionSession || session?.snapshot().reconnects != forcedMissionReconnects else {
+            return false
+        }
+        invalidateMissionCamera(mission.cameraID)
+        return true
+    }
+
     func missionDocumentChecked() throws -> CameraMissionStoreDocument {
+        guard let missionServiceAccess else {
+            throw ConfigurationError.invalid(missionServiceError ?? "Mission service is unavailable.")
+        }
+
+        try missionServiceAccess.requireRead()
+        return try missionDocumentCheckedForMutation()
+    }
+
+    private func requireMissionServiceForFeatureWrite() throws {
+        guard let missionServiceAccess else {
+            throw ConfigurationError.invalid(missionServiceError ?? "Mission service is unavailable.")
+        }
+        try missionServiceAccess.requireRead()
+    }
+
+    private func missionDocumentCheckedForMutation() throws -> CameraMissionStoreDocument {
+        guard missionCameraTransitionDepth == 0 else {
+            throw ConfigurationError.invalid("Camera configuration is changing; mission operations are unavailable.")
+        }
+        let exists = try ACTAMissionServiceLease.storeExistsAndIsRegular(missionStoreURL)
+        guard exists || !missionStoreExisted else {
+            throw ConfigurationError.invalid("Mission storage disappeared; no mission changes are allowed.")
+        }
         let document = try CameraMissionStore.loadDocument(from: missionStoreURL)
         let runtime = CameraMissionStoreDocument(schemaVersion: CameraMissionStore.schemaVersion,
             missions: cameraMissions, runs: cameraMissionRuns, consults: cameraMissionConsultMessages)
@@ -1926,8 +2253,76 @@ final class WallModel: ObservableObject {
         return document
     }
 
+    private func requireMissionStorageSafeToRewrite(_ document: CameraMissionStoreDocument) throws {
+        guard FileManager.default.fileExists(atPath: missionStoreURL.path) else { return }
+        guard document.schemaVersion == CameraMissionStore.schemaVersion else {
+            throw ConfigurationError.invalid("Legacy mission data requires explicit migration before writing.")
+        }
+        let original = try JSONSerialization.jsonObject(with: Data(contentsOf: missionStoreURL))
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let encoded = try encoder.encode(document)
+        let roundTrip = try JSONSerialization.jsonObject(with: encoded)
+        guard let lhs = original as? NSDictionary, let rhs = roundTrip as? NSDictionary,
+              lhs.isEqual(rhs) else {
+            throw ConfigurationError.invalid("Mission data cannot be rewritten without loss; no changes were saved.")
+        }
+    }
+
+    private func missionStorageWrite<T>(_ operation: () throws -> T) throws -> T {
+        do {
+            let result = try operation()
+            missionStoreExisted = true
+            return result
+        }
+        catch {
+            missionServiceAccess?.invalidate()
+            missionServiceError = "Mission storage write failed; restart after inspecting the saved data."
+            throw error
+        }
+    }
+
     func saveCameraMission(_ mission: CameraMission) throws {
-        _ = try missionDocumentChecked()
+        guard let access = missionServiceAccess else {
+            throw ConfigurationError.invalid(missionServiceError ?? "Mission service is unavailable.")
+        }
+        try access.withMutation {
+            var committed = false
+            do {
+                _ = try cameraWriterGate.capture {
+                    let cameraRevision = cameraInventoryRevision
+                    try featureCoordinator.withLockedPreferencesSnapshot { policy in
+                        try CoordinatedCameraConfigurationStore.withLockedSnapshot(from: configURL) { cameras in
+                            guard policy.preferences == featurePreferences,
+                                  policy.preferences.enabledFeatures.contains(.scheduledMissions),
+                                  !cameras.isMissing, cameras.configuration == config,
+                                  config.cameras.contains(where: { $0.id == mission.cameraID }),
+                                  cameraInventoryRevision == cameraRevision else {
+                                throw ConfigurationError.invalid("Mission settings or camera inventory changed; reload before saving.")
+                            }
+                            try access.requireActiveMutation()
+                            try saveCameraMissionLocked(mission)
+                            committed = true
+                            guard cameraInventoryRevision == cameraRevision,
+                                  policy.preferences == featurePreferences, cameras.configuration == config else {
+                                throw ConfigurationError.invalid("Mission save requires reconciliation after a concurrent change.")
+                            }
+                        }
+                    }
+                }
+            } catch {
+                if committed {
+                    access.invalidate()
+                    missionServiceError = "Mission save outcome requires reconciliation; restart after inspecting the saved data."
+                }
+                throw error
+            }
+        }
+    }
+
+    private func saveCameraMissionLocked(_ mission: CameraMission) throws {
+        let document = try missionDocumentCheckedForMutation()
+        try requireMissionStorageSafeToRewrite(document)
         guard featurePreferences.enabledFeatures.contains(.scheduledMissions) else {
             throw CameraFeatureStoreError.featureDisabled(.scheduledMissions)
         }
@@ -1946,10 +2341,12 @@ final class WallModel: ObservableObject {
         }
         let validMissionIDs = Set(updated.map(\.id))
         let consults = cameraMissionConsultMessages.filter { validMissionIDs.contains($0.missionID) }
-        try CameraMissionStore.save(updated, runs: cameraMissionRuns, consults: consults, to: missionStoreURL)
+        try missionStorageWrite {
+            try CameraMissionStore.save(updated, runs: cameraMissionRuns, consults: consults, to: missionStoreURL)
+        }
+        if forcedMissionID == mission.id, requestChanged || !mission.enabled { forcedMissionID = nil }
         cameraMissions = updated
         cameraMissionConsultMessages = consults
-        if !mission.enabled, forcedMissionID == mission.id { forcedMissionID = nil }
         if activeMissionID == mission.id, requestChanged {
             // Edited execution inputs invalidate an in-flight request, not historical metadata.
             vlmTask?.cancel()
@@ -1962,14 +2359,24 @@ final class WallModel: ObservableObject {
     }
 
     func deleteCameraMissionChecked(_ missionID: UUID) throws {
-        _ = try missionDocumentChecked()
+        guard let access = missionServiceAccess else {
+            throw ConfigurationError.invalid(missionServiceError ?? "Mission service is unavailable.")
+        }
+        try access.withMutation { try deleteCameraMissionLocked(missionID) }
+    }
+
+    private func deleteCameraMissionLocked(_ missionID: UUID) throws {
+        let document = try missionDocumentCheckedForMutation()
+        try requireMissionStorageSafeToRewrite(document)
         guard featurePreferences.enabledFeatures.contains(.scheduledMissions),
               cameraMissions.contains(where: { $0.id == missionID }) else {
             throw ConfigurationError.invalid("Enable scheduled missions and select an existing mission.")
         }
         let updated = cameraMissions.filter { $0.id != missionID }
         let consults = cameraMissionConsultMessages.filter { $0.missionID != missionID }
-        try CameraMissionStore.save(updated, runs: cameraMissionRuns, consults: consults, to: missionStoreURL)
+        try missionStorageWrite {
+            try CameraMissionStore.save(updated, runs: cameraMissionRuns, consults: consults, to: missionStoreURL)
+        }
         cameraMissions = updated
         cameraMissionConsultMessages = consults
         if forcedMissionID == missionID { forcedMissionID = nil }
@@ -1978,13 +2385,23 @@ final class WallModel: ObservableObject {
     }
 
     func missionExecutionStatus(_ missionID: UUID) -> String {
+        invalidateStaleQueuedMissionSource()
         if activeMissionID == missionID { return "running" }
         if forcedMissionID == missionID { return "queued" }
         return "idle"
     }
 
     func requestMissionRunChecked(_ missionID: UUID) throws -> String {
-        _ = try missionDocumentChecked()
+        guard let access = missionServiceAccess else {
+            throw ConfigurationError.invalid(missionServiceError ?? "Mission service is unavailable.")
+        }
+        return try access.withMutation { try requestMissionRunLocked(missionID) }
+    }
+
+    private func requestMissionRunLocked(_ missionID: UUID) throws -> String {
+        let document = try missionDocumentCheckedForMutation()
+        try requireMissionStorageSafeToRewrite(document)
+        invalidateStaleQueuedMissionSource()
         guard featurePreferences.enabledFeatures.contains(.scheduledMissions),
               let mission = cameraMissions.first(where: { $0.id == missionID && $0.enabled }),
               config.cameras.contains(where: { $0.id == mission.cameraID && $0.enabled }) else {
@@ -1995,10 +2412,11 @@ final class WallModel: ObservableObject {
         guard forcedMissionID == nil, activeMissionID == nil else {
             throw ConfigurationError.invalid("Another mission is already queued or running.")
         }
+        forcedMissionSession = tiles[mission.cameraID]?.session
+        forcedMissionReconnects = forcedMissionSession?.snapshot().reconnects
         forcedMissionID = missionID
         lastMissionCheck = -.infinity
         // The scheduler may wait for fresh frames or an idle model. This is not a completion receipt.
-        scheduleMissions(now: ProcessInfo.processInfo.systemUptime)
         return missionExecutionStatus(missionID)
     }
 
@@ -2009,7 +2427,15 @@ final class WallModel: ObservableObject {
 
     @discardableResult
     func askMissionConsult(missionID: UUID, question: String) throws -> UUID {
-        _ = try missionDocumentChecked()
+        guard let access = missionServiceAccess else {
+            throw ConfigurationError.invalid(missionServiceError ?? "Mission service is unavailable.")
+        }
+        return try access.withMutation { try askMissionConsultLocked(missionID: missionID, question: question) }
+    }
+
+    private func askMissionConsultLocked(missionID: UUID, question: String) throws -> UUID {
+        let document = try missionDocumentCheckedForMutation()
+        try requireMissionStorageSafeToRewrite(document)
         guard featurePreferences.enabledFeatures.contains(.scheduledMissions) else {
             throw CameraFeatureStoreError.featureDisabled(.scheduledMissions)
         }
@@ -2018,17 +2444,19 @@ final class WallModel: ObservableObject {
         }
         let prior = cameraMissionConsultMessages.filter { $0.missionID == missionID }
         let operatorMessage = try CameraMissionConsultMessage(missionID: missionID, role: .operatorMessage, text: question)
-        let updated = try CameraMissionStore.appendConsult(
-            operatorMessage, missions: cameraMissions, runs: cameraMissionRuns,
-            existingConsults: cameraMissionConsultMessages, to: missionStoreURL
-        )
+        let updated = try missionStorageWrite {
+            try CameraMissionStore.appendConsult(operatorMessage, missions: cameraMissions, runs: cameraMissionRuns,
+                                                 existingConsults: cameraMissionConsultMessages, to: missionStoreURL)
+        }
         cameraMissionConsultMessages = updated
+        try missionServiceAccess?.requireActiveMutation()
         let generation = UUID()
         missionConsultGeneration = generation
         let client = LocalVLMClient(model: vlmPreferences.model, workload: .interactive)
         activeMissionConsultID = missionID
         missionConsultBusy = true
         missionConsultStatus = "Consulting local mission history…"
+        try missionServiceAccess?.requireActiveMutation()
         missionConsultTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
@@ -2061,11 +2489,7 @@ final class WallModel: ObservableObject {
                 let assistantMessage = try CameraMissionConsultMessage(
                     missionID: missionID, role: .assistant, text: answer
                 )
-                _ = try self.missionDocumentChecked()
-                self.cameraMissionConsultMessages = try CameraMissionStore.appendConsult(
-                    assistantMessage, missions: self.cameraMissions, runs: self.cameraMissionRuns,
-                    existingConsults: self.cameraMissionConsultMessages, to: self.missionStoreURL
-                )
+                try self.commitMissionConsult(assistantMessage, generation: generation, questionID: operatorMessage.id)
                 self.missionConsultStatus = "Local mission history answer received"
             } catch is CancellationError {
             } catch {
@@ -2076,14 +2500,42 @@ final class WallModel: ObservableObject {
         return operatorMessage.id
     }
 
+    private func commitMissionConsult(_ message: CameraMissionConsultMessage, generation: UUID, questionID: UUID) throws {
+        guard let access = missionServiceAccess else { throw ACTAMissionServiceAccess.AccessError.unavailable }
+        try access.withMutation {
+            try Task.checkCancellation()
+            guard missionConsultGeneration == generation,
+                  featurePreferences.enabledFeatures.contains(.scheduledMissions),
+                  cameraMissions.contains(where: { $0.id == message.missionID }),
+                  cameraMissionConsultMessages.contains(where: { $0.id == questionID }) else { throw CancellationError() }
+            let document = try missionDocumentCheckedForMutation()
+            try requireMissionStorageSafeToRewrite(document)
+            let updated = try missionStorageWrite {
+                try CameraMissionStore.appendConsult(message, missions: cameraMissions, runs: cameraMissionRuns,
+                                                     existingConsults: cameraMissionConsultMessages, to: missionStoreURL)
+            }
+            cameraMissionConsultMessages = updated
+        }
+    }
+
     func clearMissionConsult(missionID: UUID) throws {
-        _ = try missionDocumentChecked()
+        guard let access = missionServiceAccess else {
+            throw ConfigurationError.invalid(missionServiceError ?? "Mission service is unavailable.")
+        }
+        try access.withMutation { try clearMissionConsultLocked(missionID: missionID) }
+    }
+
+    private func clearMissionConsultLocked(missionID: UUID) throws {
+        let document = try missionDocumentCheckedForMutation()
+        try requireMissionStorageSafeToRewrite(document)
         guard featurePreferences.enabledFeatures.contains(.scheduledMissions),
               cameraMissions.contains(where: { $0.id == missionID }) else {
             throw CameraFeatureStoreError.featureDisabled(.scheduledMissions)
         }
         let updated = cameraMissionConsultMessages.filter { $0.missionID != missionID }
-        try CameraMissionStore.save(cameraMissions, runs: cameraMissionRuns, consults: updated, to: missionStoreURL)
+        try missionStorageWrite {
+            try CameraMissionStore.save(cameraMissions, runs: cameraMissionRuns, consults: updated, to: missionStoreURL)
+        }
         cameraMissionConsultMessages = updated
         if activeMissionConsultID == missionID { missionConsultTask?.cancel() }
     }
@@ -2276,7 +2728,26 @@ final class WallModel: ObservableObject {
         catch { notice = "Local research response was not saved" }
     }
 
-    func clearVLMAlerts() {
+    func prepareVLMAlertsClear() throws -> VLMAlertClearConfirmation? {
+        guard actaVLMAlertsLoaded else { return nil }
+        return try VLMAlertClearConfirmation.capture(visible: vlmAlerts, from: vlmAlertsURL)
+    }
+
+    func clearVLMAlerts(confirmed confirmation: VLMAlertClearConfirmation) {
+        do {
+            guard actaVLMAlertsLoaded,
+                  try confirmation.isCurrent(visible: vlmAlerts, from: vlmAlertsURL) else {
+                let message = "Alerts changed or could not be verified. Review them again before clearing."
+                notice = message
+                self.error = message
+                return
+            }
+        } catch {
+            let message = "Alerts changed or could not be verified. Review them again before clearing."
+            notice = message
+            self.error = message
+            return
+        }
         let clipIDs = vlmAlerts.compactMap(\.clipID)
         do { try VLMStore.save([], to: vlmAlertsURL) }
         catch {
@@ -3047,9 +3518,19 @@ final class WallModel: ObservableObject {
     }
 
     private func scheduleMissions(now: TimeInterval) {
+        guard let access = missionServiceAccess else { return }
+        do { try access.withMutation { try scheduleMissionsLocked(now: now, access: access) } }
+        catch { return }
+    }
+
+    private func scheduleMissionsLocked(now: TimeInterval, access: ACTAMissionServiceAccess) throws {
         guard !actaAgentBusy else { return }
           guard now - lastMissionCheck >= 5 else { return }
         lastMissionCheck = now
+        guard featurePreferences.enabledFeatures.contains(.scheduledMissions) else { return }
+        let document = try missionDocumentCheckedForMutation()
+        try requireMissionStorageSafeToRewrite(document)
+        guard !invalidateStaleQueuedMissionSource() else { return }
         guard let mission = CameraMissionScheduler.next(
             cameraMissions,
             now: Date(),
@@ -3072,27 +3553,62 @@ final class WallModel: ObservableObject {
               ) else { return }
 
         let generation = vlmGeneration
-        let client = LocalVLMClient(model: vlmPreferences.model)
+        let cameraRevision = cameraInventoryRevision
+        let missionCameraRevision = missionCameraRevision
+        let token = UUID()
+        let client = missionExecutionHooks == nil ? LocalVLMClient(model: vlmPreferences.model) : nil
         activeMissionID = mission.id
+        activeMissionToken = token
+        var started = false
+        defer {
+            if !started, activeMissionToken == token {
+                activeMissionToken = nil
+                activeMissionID = nil
+                vlmBusy = false
+            } else if !started, vlmGeneration != generation, !running,
+                      vlmTask == nil, memorySampleTask == nil {
+                // A synchronous will-set observer may stop the wall before the
+                // outer vlmBusy = true assignment finishes.
+                vlmBusy = false
+            }
+        }
         vlmBusy = true
+        guard (try? access.requireActiveMutation()) != nil,
+              vlmGeneration == generation, activeMissionToken == token,
+              cameraInventoryRevision == cameraRevision, self.missionCameraRevision == missionCameraRevision,
+              featurePreferences.enabledFeatures.contains(.scheduledMissions), running, !connecting else { return }
         vlmStatus = "Running local mission: \(mission.name)"
+        guard (try? access.requireActiveMutation()) != nil,
+              vlmGeneration == generation, activeMissionToken == token,
+              cameraInventoryRevision == cameraRevision, self.missionCameraRevision == missionCameraRevision,
+              featurePreferences.enabledFeatures.contains(.scheduledMissions), running, !connecting else { return }
+        started = true
         vlmTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
-                if self.activeMissionID == mission.id { self.activeMissionID = nil }
-                if self.vlmGeneration == generation {
-                    self.vlmBusy = false
-                    self.vlmTask = nil
+                if self.activeMissionToken == token {
+                    self.activeMissionToken = nil
+                    self.activeMissionID = nil
+                    if self.vlmGeneration == generation {
+                        self.vlmBusy = false
+                        self.vlmTask = nil
+                    }
                 }
+                self.missionExecutionHooks?.didFinish()
             }
             do {
                 var window = [try await VLMFrameEncoder.jpegData(from: pixel, maxDimension: 640, quality: 0.35)]
                 var lastSampleSerial = frame.serial
                 var lastSampleReceivedAt = frame.receivedAt
                 for _ in 1..<CameraMissionFrameWindow.maximumFrames {
-                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                    if let wait = self.missionExecutionHooks?.waitForNextFrame {
+                        try await wait()
+                    } else {
+                        try await Task.sleep(nanoseconds: 1_000_000_000)
+                    }
                     try Task.checkCancellation()
                     guard self.vlmGeneration == generation,
+                          self.missionCameraRevision == missionCameraRevision,
                           self.featurePreferences.enabledFeatures.contains(.scheduledMissions),
                           self.cameraMissions.first(where: { $0.id == mission.id })?.enabled == true,
                           self.tiles[camera.id]?.session === session else {
@@ -3115,23 +3631,27 @@ final class WallModel: ObservableObject {
                 let collage = try CameraMissionCollage.make(window)
                 let answer = try await CameraMissionAnalysis.answer(expectedLanguage: mission.brief) {
                     guard self.vlmGeneration == generation,
+                          self.missionCameraRevision == missionCameraRevision,
                           self.featurePreferences.enabledFeatures.contains(.scheduledMissions),
                           self.cameraMissions.first(where: { $0.id == mission.id })?.enabled == true,
                           self.tiles[camera.id]?.session === session,
                           session.snapshot().reconnects == frame.reconnects else {
                         throw CancellationError()
                     }
-                    return try await client.analyze(
-                        image: collage,
-                        prompt: Self.missionPrompt(mission.brief, frameCount: window.count, changeScore: changeScore)
-                    )
+                    let prompt = Self.missionPrompt(mission.brief, frameCount: window.count, changeScore: changeScore)
+                    if let analyze = self.missionExecutionHooks?.analyze {
+                        return try await analyze(collage, prompt)
+                    }
+                    guard let client else { throw CancellationError() }
+                    return try await client.analyze(image: collage, prompt: prompt)
                 }
                 let currentFrame = session.snapshot()
                 let missionStillEnabled = self.cameraMissions.first(where: { $0.id == mission.id })?.enabled == true
                 guard CameraMissionScheduler.shouldCommit(
                     featureEnabled: self.featurePreferences.enabledFeatures.contains(.scheduledMissions),
                     missionStillEnabled: missionStillEnabled,
-                    generationMatches: self.vlmGeneration == generation,
+                    generationMatches: self.vlmGeneration == generation
+                        && self.missionCameraRevision == missionCameraRevision,
                     sessionMatches: self.tiles[camera.id]?.session === session
                         && currentFrame.reconnects == frame.reconnects,
                     frameAge: ProcessInfo.processInfo.systemUptime - lastSampleReceivedAt
@@ -3142,8 +3662,11 @@ final class WallModel: ObservableObject {
                 self.vlmStatus = "Local mission complete: \(mission.name)"
             } catch is CancellationError {
             } catch {
-                guard self.vlmGeneration == generation,
-                      self.featurePreferences.enabledFeatures.contains(.scheduledMissions) else { return }
+                guard !Task.isCancelled, self.vlmGeneration == generation,
+                      self.missionCameraRevision == missionCameraRevision,
+                      self.featurePreferences.enabledFeatures.contains(.scheduledMissions),
+                      self.tiles[camera.id]?.session === session,
+                      session.snapshot().reconnects == frame.reconnects else { return }
                 try? self.finishMission(mission, result: "Local mission failed", completedAt: Date())
                 self.vlmStatus = "Local mission failed: \(mission.name)"
             }
@@ -3153,7 +3676,18 @@ final class WallModel: ObservableObject {
     private func finishMission(
         _ mission: CameraMission, result: String, completedAt: Date, sceneChangeScore: Double? = nil
     ) throws {
-        _ = try missionDocumentChecked()
+        guard let access = missionServiceAccess else { throw ACTAMissionServiceAccess.AccessError.unavailable }
+        try access.withMutation {
+            try Task.checkCancellation()
+            try finishMissionLocked(mission, result: result, completedAt: completedAt, sceneChangeScore: sceneChangeScore)
+        }
+    }
+
+    private func finishMissionLocked(
+        _ mission: CameraMission, result: String, completedAt: Date, sceneChangeScore: Double?
+    ) throws {
+        let document = try missionDocumentCheckedForMutation()
+        try requireMissionStorageSafeToRewrite(document)
         guard featurePreferences.enabledFeatures.contains(.scheduledMissions),
                             let current = cameraMissions.first(where: { $0.id == mission.id }),
                             current.enabled, current.hasSameExecutionRequest(as: mission) else { throw CancellationError() }
@@ -3174,11 +3708,10 @@ final class WallModel: ObservableObject {
             summary: result,
             sceneChangeScore: sceneChangeScore
         )
-        let updatedRuns = try CameraMissionStore.appendRun(
-            run,
-            missions: updated,
-            existingRuns: cameraMissionRuns, to: missionStoreURL
-        )
+        let updatedRuns = try missionStorageWrite {
+            try CameraMissionStore.appendRun(run, missions: updated,
+                                             existingRuns: cameraMissionRuns, to: missionStoreURL)
+        }
         cameraMissions = updated
         cameraMissionRuns = updatedRuns
         if forcedMissionID == mission.id { forcedMissionID = nil }
@@ -3334,7 +3867,7 @@ final class WallModel: ObservableObject {
     }
 
     private func processFallDetection(_ people: [PosePerson], camera: Camera, frameWidth: Int, frameHeight: Int,
-                                      timestamp: TimeInterval) {
+                                      timestamp: TimeInterval, workTicket: CameraRuntimeWorkGroup.Ticket) {
         let events = localAnalyticsEngine.processExternalPoseResult(
             people: people,
             camera: camera,
@@ -3345,10 +3878,10 @@ final class WallModel: ObservableObject {
         if let tile = tiles[camera.id] {
             tile.poseTracks = localAnalyticsEngine.trackedPosesByCamera[camera.id] ?? []
         }
-        for event in events { handleFallEvent(event, camera: camera) }
+        for event in events { handleFallEvent(event, camera: camera, workTicket: workTicket) }
     }
 
-    private func handleFallEvent(_ event: FallEvent, camera: Camera) {
+    private func handleFallEvent(_ event: FallEvent, camera: Camera, workTicket: CameraRuntimeWorkGroup.Ticket) {
         let occurredAt = Date(timeIntervalSinceNow: event.occurredAt - ProcessInfo.processInfo.systemUptime)
         if workerMode, workerEventSpool == nil { notice = "Worker event spool is unavailable; fall event was not queued" }
         if let spool = workerEventSpool, let lease = workerLeases[camera.id], lease.expiresAt > Date() {
@@ -3361,7 +3894,9 @@ final class WallModel: ObservableObject {
                     leaseGeneration: lease.generation, eventType: FallEvent.eventType, occurredAt: occurredAt,
                     payloadJSON: payload
                 )
+                let spoolTicket = workTicket.makeChild()
                 Task { @MainActor [weak self] in
+                    defer { spoolTicket.finish() }
                     do { try await spool.append(envelope) }
                     catch { self?.notice = "Fall event could not be queued for the coordinator" }
                 }
@@ -3732,6 +4267,8 @@ final class WallModel: ObservableObject {
                     self?.notice = ACTANarrativeFlushOutcome.backpressureNotice
                 } else if outcome == .staleFrame {
                     self?.notice = ACTANarrativeFlushOutcome.staleFrameNotice
+                } else if let warning = ghost.takeNarrativeOrderWarning() {
+                    self?.notice = warning
                 }
             }
             if descriptionsEnabled {
@@ -3761,27 +4298,14 @@ final class WallModel: ObservableObject {
         }
     }
 
-    func toggleACTANarrativePin(_ chapter: ACTANarrativeChapterRecord) {
-        do { _ = try setACTANarrativePinChecked(chapterID: chapter.chapterID, pinned: !chapter.pinned) }
-        catch { notice = "Could not save narrative pin: \(error.localizedDescription)" }
-    }
-
     func saveACTANarrativeOperatorText(_ chapter: ACTANarrativeChapterRecord, text: String?) {
         do { _ = try setACTANarrativeTextChecked(chapterID: chapter.chapterID, text: text) }
         catch { notice = "Could not save narrative text: \(error.localizedDescription)" }
     }
 
-    func setACTANarrativePinChecked(chapterID: String, pinned: Bool) throws -> ACTANarrativeChapterRecord {
-        guard let store = trackingStore, let before = try store.loadACTANarrativeChapterRecord(chapterID: chapterID) else {
-            throw ConfigurationError.invalid("Narrative chapter or memory store does not exist.")
-        }
-        try store.setACTANarrativePinned(chapterID: chapterID, pinned: pinned)
-        guard let saved = try store.loadACTANarrativeChapterRecord(chapterID: chapterID), saved.pinned == pinned,
-              saved.aiSummary == before.aiSummary, saved.operatorText == before.operatorText else {
-            throw ConfigurationError.invalid("Narrative pin persistence verification failed.")
-        }
-        actaNarrativeChapters = try store.loadACTANarrativeChapterRecords(limit: 50)
-        return saved
+    func makeNarrativePinAction() -> ACTAPreparedNarrativePinAction? {
+        guard let narrativePresentation, narrativePresentation.canToggle else { return nil }
+        return narrativePresentation.makePinAction()
     }
 
     func setACTANarrativeTextChecked(chapterID: String, text: String?) throws -> ACTANarrativeChapterRecord {
@@ -3820,6 +4344,8 @@ final class WallModel: ObservableObject {
             }
             if saved == nil {
                 self.notice = ACTANarrativeFlushOutcome.notVerifiedNotice
+            } else if let warning = ghost.takeNarrativeOrderWarning() {
+                self.notice = warning
             }
         }
     }
@@ -3905,6 +4431,8 @@ final class WallModel: ObservableObject {
     func cancelACTAAgent(reason: String = "Request cancelled") {
         guard actaAgentBusy else { return }
         actaAgentGeneration = UUID()
+        actaPreviewGeneration = nil
+        actaAnswerPreview = nil
         actaAgentTask?.cancel(); actaAgentTask = nil
         actaAgentWatchdog?.cancel(); actaAgentWatchdog = nil
         closeACTAReviewSession()
@@ -3919,9 +4447,175 @@ final class WallModel: ObservableObject {
         }
     }
 
+    /// Builds the complete set of model-facing production broker actions.
+    func buildProductionBrokerActions() -> [any ACTAActionProtocol] {
+        let presentationAction = ACTACanvasSetPresentationAction(bridge: self.canvasFilterBridge)
+        let canvasStateAction = ACTAScopedCanvasStateAction(bridge: self.canvasFilterBridge)
+        let filterAction = ACTACanvasSetFilterAction(bridge: self.canvasFilterBridge,
+            locationGroups: { [weak self] in
+                self.map { model in
+                    Set(model.config.cameras.filter(\.enabled).map {
+                        ACTACanvasFilterState.locationGroup($0.location)
+                    })
+                }
+            }, inventoryRevision: { [weak self] in self?.cameraInventoryRevision })
+        let arrangeAction = ACTACanvasSetArrangeModeAction(bridge: self.canvasFilterBridge)
+        let selectionAction = ACTACanvasSelectCamerasAction(bridge: self.canvasFilterBridge,
+            enabledCameraIDs: { [weak self] in self.map { $0.config.cameras.filter(\.enabled).map(\.id) } },
+            inventoryRevision: { [weak self] in self?.cameraInventoryRevision })
+        let analysisAction = ACTAAnalysisSetSectionAction(bridge: self.canvasFilterBridge)
+        let cameraListAction = ACTAScopedCameraListAction(model: self)
+        let cameraGetAction = ACTAScopedCameraGetAction(snapshot: { [weak self] in
+            guard let self else { throw ConfigurationError.invalid("UNAVAILABLE: Camera settings provider is not connected.") }
+            return self.config.cameras
+        })
+        let incidentAction = ACTAScopedIncidentGetAction(
+            domainAction: ACTAIncidentGetAction(provider: ACTAEngineIncidentReadProvider(engine: self.localAnalyticsEngine)))
+        let incidentListAction = ACTAScopedIncidentListAction(
+            provider: ACTAEngineIncidentListReadProvider(engine: self.localAnalyticsEngine))
+        let settingsAction = WallSettingsAction(kind: .get, model: self)
+        let analyticsSettingsAction = WallAnalyticsAction(kind: .get, model: self)
+        let analyticsMutationDomain = ACTAEngineAnalyticsMutationDomain(engine: self.localAnalyticsEngine)
+        let analyticsCameraInventory = ACTAWallAnalyticsCameraInventory(model: self)
+        let analyticsMutations: [any ACTAActionProtocol] = ACTAPreparedAnalyticsSettingsAction.Kind.productionCases.map {
+            ACTAPreparedAnalyticsSettingsAction(kind: $0, domain: analyticsMutationDomain) as any ACTAActionProtocol
+        } + [
+            ACTAPreparedAnalyticsSettingsAction(kind: .cameraOverride, domain: analyticsMutationDomain,
+                                                cameraInventory: analyticsCameraInventory),
+            ACTAPreparedAnalyticsSettingsAction(kind: .removeCameraOverride, domain: analyticsMutationDomain,
+                                                cameraInventory: analyticsCameraInventory),
+            WallAnalyticsAction(kind: .zone, model: self),
+            WallAnalyticsAction(kind: .editZone, model: self),
+            WallAnalyticsAction(kind: .removeZone, model: self)
+        ]
+        let watchAction = ACTAScopedWatchListAction(provider: ACTAOperationsWatchReadProvider(model: self))
+        let alertListAction = ACTAScopedAlertListAction(provider: ACTAWallAlertReadProvider(model: self))
+        let alertMutationProvider = ACTAWallAlertMutationProvider(model: self)
+        let isapiAction = ACTAScopedISAPIReadAction(provider: ACTAWallISAPIReadProvider(model: self))
+        let missionAction = ACTAScopedMissionListAction(model: self)
+        let missionHistoryAction = ACTAScopedMissionHistoryAction(model: self)
+        let missionRunAction = ACTAReviewedMissionRunAction(model: self, allowCoordinatedLocalExecution: true)
+        let calibrationAction = ACTAReIDCalibrationAction(provider: ACTAWallReIDCalibrationProvider(model: self))
+        let calibrationUpdate = ACTAReviewedReIDCalibrationAction(bridge: self.reidCalibrationViewBridge)
+        let featureProvider = WallFeaturePreferencesProvider(model: self)
+        let favoriteDomain = ACTALocalFavoriteReviewDomain(model: self)
+        let tileFrameState = ACTACanvasTileFrameActionState(transaction: ACTACanvasTileFrameProvider(model: self))
+        let descriptionJobService = ACTADescriptionJobService(backend: ACTAWallDescriptionJobBackend(coordinator: self.featureCoordinator))
+        var actions: [any ACTAActionProtocol] = [
+            presentationAction, canvasStateAction, filterAction, arrangeAction, selectionAction, analysisAction,
+            CanvasSetColumnsAction(model: self),
+            CanvasResetLayoutAction(model: self),
+            ACTACanvasSetTileFrameAction(state: tileFrameState),
+            cameraListAction, cameraGetAction,
+            ACTABrokerCameraNetworkAddAction(model: self),
+            WallCameraConfigurationAction(kind: .local, model: self),
+            WallCameraConfigurationAction(kind: .screen, model: self),
+            WallCameraConfigurationAction(kind: .file, model: self),
+            ACTABrokerCameraEditAction(model: self),
+            WallCameraConfigurationAction(kind: .processing, model: self),
+            CameraSetEnabledAction(model: self),
+            CameraRemoveAction(model: self),
+            CameraReconnectAction(model: self),
+            CameraToggleExpandAction(model: self),
+            ACTAPreparedCameraFavoriteAction(domain: favoriteDomain),
+            ACTACameraSetAllRunningAction(model: self),
+            ACTACameraImportSourcesAction(model: self),
+            incidentAction, incidentListAction,
+            WallOperationalAction(specification: IncidentTransitionStatusAction(), model: self),
+            WallOperationalAction(specification: IncidentUpdateNoteAction(), model: self),
+            WallOperationalAction(specification: IncidentDeleteEvidenceAction(), model: self),
+            settingsAction,
+            ACTAReviewedSystemSettingsAction(model: self, languageSettings: self.interfaceLanguageSettings),
+            WallSettingsAction(kind: .fall, model: self),
+            WallSettingsAction(kind: .storage, model: self),
+            WallSettingsAction(kind: .crop, model: self),
+            WallSettingsAction(kind: .events, model: self),
+            WallSettingsAction(kind: .memory, model: self),
+            WallSettingsAction(kind: .schedules, model: self),
+            WallSettingsAction(kind: .saveRule, model: self),
+            WallSettingsAction(kind: .removeRule, model: self),
+            SettingsUpdateFeatureTogglesAction(featureProvider: featureProvider),
+            SettingsUpdatePermissionsAction(featureProvider: featureProvider),
+            WallAIConfigAction(model: self),
+            WallAIBudgetAction(model: self),
+            ACTASetAPIKeyAction(),
+            ACTAClearAPIKeyAction(),
+            ACTAToggleShowcaseAction(model: self),
+            ACTAUpdateModelsAction(model: self),
+            ACTAReloadModelsAction(model: self),
+            ACTARunHealthCheckAction(model: self),
+            ACTARetryModelLoadingAction(model: self),
+            analyticsSettingsAction,
+            watchAction,
+            WallOperationalAction(specification: WatchCreateAction(), model: self),
+            WallOperationalAction(specification: WatchCancelAction(), model: self),
+            alertListAction,
+            ACTAAlertMutationAction(kind: .acknowledge, provider: alertMutationProvider),
+            ACTAAlertMutationAction(kind: .review, provider: alertMutationProvider),
+            ACTAReviewedClearVLMAlertsAction(model: self),
+            isapiAction,
+            ACTAReviewedClearISAPIEventsAction(model: self),
+            missionAction, missionHistoryAction, missionRunAction,
+            WallMissionAction(kind: .create, model: self),
+            WallMissionAction(kind: .edit, model: self),
+            WallMissionAction(kind: .delete, model: self),
+            WallMissionAction(kind: .consult, model: self),
+            WallMissionAction(kind: .clearConsult, model: self),
+            WallOperationalAction(specification: MemoryDeleteFrameAction(), model: self),
+            ACTACameraMemoryClearAction(backend: ACTAWallCameraMemoryClearBackend(model: self)),
+            ACTACameraMemoryRecoveryAction(backend: ACTAWallCameraMemoryRecoveryBackend(model: self)),
+            WallNarrativeAction(pin: false, model: self),
+            ACTAMemoryCloseChapterAction(model: self),
+            ACTAMemoryRebuildKnowledgeAction(model: self),
+            ACTAInspectDescriptionJobsAction(service: descriptionJobService),
+            ACTARetryDescriptionJobAction(service: descriptionJobService),
+            ACTAIdentityGalleryMutationAction(kind: .rename, model: self),
+            ACTAIdentityGalleryMutationAction(kind: .merge, model: self),
+            ACTAIdentityGalleryMutationAction(kind: .split, model: self),
+            ACTAIdentityReviewProposalAction(model: self),
+            ACTAIdentityUndoMergeAction(model: self),
+            ACTAIdentityDeleteTrackedObjectAction(model: self),
+            ACTAIdentityReadVehiclePlateAction(model: self),
+            ACTAIdentityClearVehiclePlateAction(model: self),
+            ACTAIdentityTrackGroupAction(mode: .group, model: self),
+            ACTAIdentityTrackGroupAction(mode: .detach, model: self),
+            ACTAChatThreadAction(mode: .select, model: self),
+            ACTAChatThreadAction(mode: .create, model: self),
+            ACTAChatThreadAction(mode: .cancel, model: self),
+            ACTAVoiceControlAction(mode: .startListening, model: self),
+            ACTAVoiceControlAction(mode: .stopListening, model: self),
+            ACTAVoiceControlAction(mode: .cancelListening, model: self),
+            ACTAVoiceControlAction(mode: .speakText, model: self),
+            ACTAVoiceControlAction(mode: .stopSpeaking, model: self),
+            ACTAVoiceSetDictationLanguageAction(model: self),
+            ACTAAppSelectSectionAction(model: self),
+            ACTASettingsSelectSectionAction(model: self),
+            ACTACameraDiscoverLocalAction(),
+            ACTACameraDiscoverScreensAction(),
+            ACTAIdentityDescribeTrackAction(model: self),
+            ACTAIdentityFindSimilarTracksAction(model: self),
+            ACTAAlertListReviewHistoryAction(model: self),
+            ACTAAlertListClipsAction(model: self),
+            ACTAIncidentGetEvidenceMetadataAction(model: self),
+            calibrationAction, calibrationUpdate
+        ]
+        actions.append(contentsOf: analyticsMutations)
+        if let pinAction = self.makeNarrativePinAction() { actions.append(pinAction) }
+        if let domain = self.identityFollowUpDomain, domain.canStart {
+            actions.append(ACTAPreparedIdentityFollowUpAction(domain: domain))
+        }
+        actions.append(ACTAAgentFrameExportAction(frames: ACTAWallSnapshotFrameProvider(model: self)))
+        actions.append(ACTAOperationalExports.diagnostics(model: self))
+        if (try? self.missionDocumentChecked()) != nil {
+            actions.append(ACTAMissionHTMLExport.make(runs: self.cameraMissionRuns))
+            actions.append(ACTAOperationalExports.missionPDF(model: self))
+        }
+        return actions
+    }
+
     @discardableResult
     func askACTAAgent(question: String, focusedIdentityID: String? = nil,
-                      input: ACTABrokerLocalInput = .chat) -> Bool {
+                      input: ACTABrokerLocalInput = .chat, voiceAnswerOwner: UUID? = nil) -> Bool {
         let text = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return false }
         guard text.count <= 2000 else {
@@ -3952,6 +4646,9 @@ final class WallModel: ObservableObject {
         } catch { actaAgentStatus = "Agent memory storage failed"; notice = error.localizedDescription; return false }
         let generation = UUID()
         actaAgentGeneration = generation
+        actaPreviewGeneration = generation
+        actaPreviewRevision = 0
+        actaAnswerPreview = nil
         actaAgentBusy = true
         // Return the GPU to the operator; automatic jobs resume on the next scheduler tick.
         vlmTask?.cancel()
@@ -3966,26 +4663,21 @@ final class WallModel: ObservableObject {
             guard let self else { return }
             defer {
                 if self.actaAgentGeneration == generation {
+                    self.actaPreviewGeneration = nil
+                    self.actaAnswerPreview = nil
                     self.actaAgentBusy = false; self.actaAgentTask = nil
                     self.actaAgentWatchdog?.cancel(); self.actaAgentWatchdog = nil
                 }
             }
-            let presentationAction = ACTACanvasSetPresentationAction(bridge: self.canvasFilterBridge)
-            let filterAction = ACTACanvasSetFilterAction(bridge: self.canvasFilterBridge,
-                locationGroups: { [weak self] in
-                    self.map { model in
-                        Set(model.config.cameras.filter(\.enabled).map {
-                            ACTACanvasFilterState.locationGroup($0.location)
-                        })
-                    }
-                })
-            let arrangeAction = ACTACanvasSetArrangeModeAction(bridge: self.canvasFilterBridge)
-            let selectionAction = ACTACanvasSelectCamerasAction(bridge: self.canvasFilterBridge,
-                enabledCameraIDs: { [weak self] in self.map { $0.config.cameras.filter(\.enabled).map(\.id) } })
-            let analysisAction = ACTAAnalysisSetSectionAction(bridge: self.canvasFilterBridge)
-            let cameraListAction = ACTAScopedCameraListAction(model: self)
-            let actionIDs: Set<String> = [presentationAction.id, filterAction.id, arrangeAction.id, selectionAction.id, analysisAction.id, cameraListAction.id]
-            let host = await ACTALocalActionBroker.make(actions: [presentationAction, filterAction, arrangeAction, selectionAction, analysisAction, cameraListAction],
+            let actions = self.buildProductionBrokerActions()
+            let actionIDs = Self.modelFacingActionIDs(actions)
+            let historyCameraScope: Set<UUID> = {
+                if let selected = self.canvasFilterBridge.activeState?.selectedCameraIDs, !selected.isEmpty {
+                    return selected
+                }
+                return Set(self.config.cameras.map(\.id))
+            }()
+            let host = await ACTALocalActionBroker.make(actions: actions,
                 allowedActionIDs: actionIDs, allowedInspectionIDs: ACTAAnalyticsCoordinator.localInspectionIDs,
                 audit: { event in
                     let phase: String
@@ -3996,7 +4688,7 @@ final class WallModel: ObservableObject {
                     case .result: phase = event.outcome ?? "failed"
                     }
                     try store.recordDurableACTAToolCallAudit(ACTAToolCallAuditRecord(
-                        threadID: event.threadID, toolName: event.actionID, argsJSON: "{}",
+                        threadID: event.threadID, toolName: event.actionID, argsJSON: event.auditMetadataJSON,
                         resultRows: phase == "success" ? 1 : 0, durationMs: 0,
                         ok: phase == "success", error: "BROKER_\(phase)"))
                 })
@@ -4004,7 +4696,8 @@ final class WallModel: ObservableObject {
                   self.actaAgentGeneration == generation, let host,
                   let session = await host.broker.openSession(operatorKey: host.operatorKey,
                     input: input, threadID: threadID, actionIDs: actionIDs,
-                    inspectionIDs: ACTAAnalyticsCoordinator.localInspectionIDs) else { return }
+                    inspectionIDs: ACTAAnalyticsCoordinator.localInspectionIDs,
+                    historyCameraIDs: historyCameraScope) else { return }
             guard !Task.isCancelled, self.activeACTAThreadID == threadID,
                   self.actaAgentGeneration == generation else {
                 await host.broker.closeSession(session, operatorKey: host.operatorKey)
@@ -4031,10 +4724,25 @@ final class WallModel: ObservableObject {
                         if let store = self.trackingStore { self.actaChatMessages = (try? store.loadACTAChatMessages(threadID: threadID)) ?? self.actaChatMessages }
                     }
                 },
+                onAnswerPreview: { [weak self] preview, revision in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.activeACTAThreadID == threadID,
+                              self.actaAgentGeneration == generation,
+                              self.actaPreviewGeneration == generation,
+                              self.actaReviewSession?.session === session,
+                              session.permitsInspection(ACTAAnalyticsCoordinator.historyBootstrapInspection, threadID: threadID),
+                              session.permitsInspection(ACTAAnalyticsCoordinator.historyOverviewInspection, threadID: threadID),
+                              revision > self.actaPreviewRevision else { return }
+                        self.actaPreviewRevision = revision
+                        self.actaAnswerPreview = preview.isEmpty ? nil : preview
+                    }
+                },
                 broker: host.broker,
                 brokerSession: session
             )
             guard !Task.isCancelled, self.activeACTAThreadID == threadID, self.actaAgentGeneration == generation else { return }
+            self.actaPreviewGeneration = nil
+            self.actaAnswerPreview = nil
             let reviews = await host.broker.reviews(operatorKey: host.operatorKey, session: session)
             guard !Task.isCancelled, self.activeACTAThreadID == threadID, self.actaAgentGeneration == generation,
                   self.actaReviewSession?.session === session else { return }
@@ -4057,6 +4765,12 @@ final class WallModel: ObservableObject {
                 self.actaAgentStatus = answer.confidence >= 0.4
                     ? "ACTA Agent answer received (\(Int((answer.confidence * 100).rounded()))% confidence)"
                     : "ACTA Agent answer received"
+                if let voiceAnswerOwner, self.actaBrokerReviews.isEmpty,
+                   let last = self.actaChatMessages.last, last.role == "assistant",
+                   last.text == answer.answerMarkdown {
+                    self.actaVoiceAnswer = ACTAVoiceAnswer(id: generation, owner: voiceAnswerOwner,
+                        threadID: threadID, text: answer.answerMarkdown)
+                }
             }
         }
         return true
@@ -4316,10 +5030,12 @@ final class WallModel: ObservableObject {
             let generation = detectionGeneration
             if workerMode {
                 guard let poseDetector else { continue }
+                guard let ticket = cameraNetworkLifecycle.begin() else { return }
                 // Low floor so occluded FALLING/FALLEN people stay tracked; FallDetector gates new tracks.
                 let poseThreshold = runtimePreferences.fall.lowConfidenceFloor
                 let accepted = poseDetector.submit(pixel: pixel, threshold: poseThreshold) { [weak self] result in
                     Task { @MainActor [weak self] in
+                        defer { ticket.finish() }
                         guard let self, self.detectionGeneration == generation,
                               self.config.cameras.contains(where: { $0.id == camera.id && $0.enabled && $0.yoloEnabled }),
                               let tile = self.tiles[camera.id], tile.session === session,
@@ -4335,7 +5051,8 @@ final class WallModel: ObservableObject {
                             self.workerDetectionCount &+= 1
                             self.workerDetectedPersonCount &+= UInt64(pose.people.filter { $0.confidence >= 0.25 }.count)
                             self.processFallDetection(pose.people, camera: camera, frameWidth: frame.width,
-                                                      frameHeight: frame.height, timestamp: frame.receivedAt)
+                                                      frameHeight: frame.height, timestamp: frame.receivedAt,
+                                                      workTicket: ticket)
                         case .failure:
                             self.workerDetectionErrorCount &+= 1
                         }
@@ -4346,11 +5063,14 @@ final class WallModel: ObservableObject {
                     detectionCursor = (index + 1) % candidates.count
                     return
                 }
+                ticket.finish()
                 continue
             }
+            guard let ticket = cameraNetworkLifecycle.begin() else { return }
             let pixelBuffer = IdentityPixelBuffer(value: pixel)
             let accepted = detector.submit(pixel: pixel, threshold: ObjectTrackAssigner.lowConfidenceThreshold) { [weak self, weak session] result in
                 Task { @MainActor [weak self, weak session] in
+                      defer { ticket.finish() }
                       guard let self, let session, self.detectionGeneration == generation,
                           self.config.cameras.contains(where: { $0.id == camera.id && $0.enabled && $0.yoloEnabled }),
                           let tile = self.tiles[camera.id], tile.session === session,
@@ -4392,7 +5112,9 @@ final class WallModel: ObservableObject {
                                 || self.featurePreferences.enabledFeatures.contains(.crossCameraIdentity)
                                 || self.featurePreferences.enabledFeatures.contains(.knowledgeSearch)
                             let historyObjects = trackedObjects.filter { $0.confidence >= self.detectionThreshold }
+                            let historyTicket = ticket.makeChild()
                             historyQueue.async { [weak self] in
+                                defer { historyTicket.finish() }
                                 for object in historyObjects {
                                     do {
                                         guard let trackID = object.trackID else { continue }
@@ -4465,18 +5187,28 @@ final class WallModel: ObservableObject {
                                                     payloadJSON: String(data: payload, encoding: .utf8)
                                                 )
                                             } catch {
+                                                let deliveryTicket = historyTicket.makeChild()
                                                 Task { @MainActor [weak self] in
+                                                    defer { deliveryTicket.finish() }
                                                     self?.notice = "A track was saved, but its local description was not queued"
                                                 }
                                             }
                                         }
                                     } catch {
-                                        Task { @MainActor [weak self] in self?.notice = "Local track history could not be saved" }
+                                        let deliveryTicket = historyTicket.makeChild()
+                                        Task { @MainActor [weak self] in
+                                            defer { deliveryTicket.finish() }
+                                            self?.notice = "Local track history could not be saved"
+                                        }
                                         break
                                     }
                                 }
                                 if let tracks = try? store.recentTracks() {
-                                    Task { @MainActor [weak self] in self?.recentTracks = tracks }
+                                    let deliveryTicket = historyTicket.makeChild()
+                                    Task { @MainActor [weak self] in
+                                        defer { deliveryTicket.finish() }
+                                        self?.recentTracks = tracks
+                                    }
                                 }
                             }
                         }
@@ -4492,15 +5224,21 @@ final class WallModel: ObservableObject {
                 lastDetectionSubmission = now
                 detectionCursor = (index + 1) % candidates.count
                 detectionStatus = "YOLO26n analyzing"
+            } else {
+                ticket.finish()
             }
             return
         }
     }
 
-    private func rebuildTiles() { tiles = Dictionary(uniqueKeysWithValues: config.cameras.map { ($0.id, TileState(id: $0.id)) }) }
+    private func rebuildTiles() {
+        for tile in tiles.values { tile.stop(tracking: tileSessionDrain) }
+        tiles = Dictionary(uniqueKeysWithValues: config.cameras.map { ($0.id, TileState(id: $0.id)) })
+    }
 
     private func safeMessage(_ error: Error) -> String {
-        if error is ConfigurationError { return error.localizedDescription }
+        if error is ConfigurationError || error is ACTAGUISettingsWriter.Failure
+            || error is ACTACameraWriterGate.GateError { return error.localizedDescription }
         return "Operation failed. Check network connectivity, local ports and file permissions."
     }
 }

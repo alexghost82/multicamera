@@ -62,6 +62,63 @@ final class ACTAWallISAPIReadProvider: ACTAISAPIReadProvider {
     }
 }
 
+struct ACTAScopedISAPIReadAction: ACTAActionProtocol {
+    let id = "monitor.get_isapi_events"
+    let title = "List ISAPI Event Metadata"
+    let description = "List up to 50 locally retained ISAPI event IDs and received times; no camera IDs or event text."
+    let classification = ACTAActionClassification.inspect
+    let parameters = [
+        ACTAActionParameterSchema(name: "limit", type: "integer",
+                                  description: "Maximum results, from 1 through 50")
+    ]
+    let provider: any ACTAISAPIReadProvider
+
+    func validate(parameters: [String: String]) throws {
+        guard Set(parameters.keys).isSubset(of: ["limit"]),
+              parameters["limit"].map({ Int($0).map { (1...50).contains($0) } ?? false }) ?? true else {
+            throw ConfigurationError.invalid("INVALID_ARGUMENT: Invalid event list parameters.")
+        }
+    }
+
+    func execute(parameters: [String: String], context: ACTAActionContext) async throws -> ACTAActionResult {
+        do { try validate(parameters: parameters) }
+        catch { return .failed(actionID: id, error: "INVALID_ARGUMENT: Invalid event list parameters.") }
+        do {
+            try Task.checkCancellation()
+            let snapshot = try await provider.snapshot(now: context.now)
+            try Task.checkCancellation()
+            guard snapshot.records.count <= ISAPIEventStore.maximumRecords,
+                  snapshot.status != .verifiedFirstLaunch || snapshot.records.isEmpty,
+                  Set(snapshot.records.map(\.id)).count == snapshot.records.count,
+                  snapshot.records.allSatisfy({ $0.receivedAt.timeIntervalSince1970.isFinite }) else {
+                return .failed(actionID: id, error: "INVALID_DATA: ISAPI history is invalid.")
+            }
+            let events = snapshot.records.sorted {
+                if $0.receivedAt != $1.receivedAt { return $0.receivedAt > $1.receivedAt }
+                return $0.id.uuidString < $1.id.uuidString
+            }.prefix(parameters["limit"].flatMap(Int.init) ?? 20).map {
+                Metadata(id: $0.id, received_at: $0.receivedAt)
+            }
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            return ACTAActionResult(actionID: id, success: true, summary: "ISAPI event metadata retrieved.",
+                                    outputJSON: String(decoding: try encoder.encode(Output(events: events)), as: UTF8.self))
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch ACTAISAPIProviderError.invalidData {
+            return .failed(actionID: id, error: "INVALID_DATA: ISAPI history is invalid.")
+        } catch {
+            return .failed(actionID: id, error: "UNAVAILABLE: ISAPI history is unavailable.")
+        }
+    }
+
+    private struct Output: Encodable { let events: [Metadata] }
+    private struct Metadata: Encodable {
+        let id: UUID
+        let received_at: Date
+    }
+}
+
 struct ACTAISAPIReadAction: ACTAActionProtocol {
     let provider: any ACTAISAPIReadProvider
     let id = "monitor.get_isapi_events"

@@ -3,6 +3,17 @@ import Foundation
 import XCTest
 @testable import CameraWall
 
+private actor ScopedISAPIScript {
+    private(set) var prompts: [String] = []
+    func reply(_ prompt: String) -> String {
+        prompts.append(prompt)
+        if prompts.count == 1 {
+            return #"{"tool_calls":[{"name":"acta__monitor__get_isapi_events","arguments":{"limit":1}}]}"#
+        }
+        return #"{"answerMarkdown":"Reviewed events.","confidence":0.5}"#
+    }
+}
+
 final class ACTAISAPIReadActionsTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 2_000_000_000)
 
@@ -43,6 +54,72 @@ final class ACTAISAPIReadActionsTests: XCTestCase {
 
     private func object(_ result: ACTAActionResult) throws -> [String: Any] {
         try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.outputJSON.utf8)) as? [String: Any])
+    }
+
+    @MainActor
+    func testScopedBrokerChatOnlyReleasesAuditedEventMetadata() async throws {
+        let camera = UUID()
+        let item = record(camera: camera, receivedAt: now)
+        let other = record(camera: UUID(), receivedAt: now.addingTimeInterval(-1))
+        let action = ACTAScopedISAPIReadAction(provider: FixtureProvider(records: [other, item]))
+        let scopes = ACTAAnalyticsCoordinator.localInspectionIDs
+        let made = await ACTALocalActionBroker.make(actions: [action], allowedActionIDs: [action.id],
+                                                     allowedInspectionIDs: scopes, audit: { _ in })
+        let host = try XCTUnwrap(made)
+        let issued = await host.broker.openSession(operatorKey: host.operatorKey, input: .chat,
+            threadID: "fixture", actionIDs: [action.id], inspectionIDs: scopes)
+        let session = try XCTUnwrap(issued)
+        let direct = await host.broker.request(session: session, actionID: action.id, argumentsJSON: #"{"limit":1}"#)
+        XCTAssertTrue(direct.success)
+        let events = try XCTUnwrap(try object(direct)["events"] as? [[String: Any]])
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(Set(events[0].keys), ["id", "received_at"])
+        XCTAssertEqual(events[0]["id"] as? String, item.id.uuidString)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("acta-isapi-chat-\(UUID().uuidString)")
+        let store = try LocalTrackingStore(url: root.appendingPathComponent("tracking.sqlite"))
+        defer { try? FileManager.default.removeItem(at: root) }
+        let script = ScopedISAPIScript()
+        let client = ACTAAIClient(config: ACTAAIConfiguration(mode: .mlxInProcess), transport: { _ in
+            XCTFail("Unexpected network request")
+            throw URLError(.notConnectedToInternet)
+        }, keyProvider: { _ in XCTFail("Unexpected Keychain access"); return nil },
+            localAgentInference: { prompt, _ in await script.reply(prompt) })
+        let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store)
+        _ = await coordinator.askACTAChatAgent(question: "List ISAPI events", threadID: "fixture",
+                                              broker: host.broker, brokerSession: session)
+        let prompts = await script.prompts
+        XCTAssertTrue(prompts.first?.contains("acta__monitor__get_isapi_events") == true)
+        XCTAssertTrue(prompts.dropFirst().contains { $0.contains("action_output") && $0.contains(item.id.uuidString) })
+        XCTAssertTrue(prompts.allSatisfy {
+            !$0.contains("private-") && !$0.contains(camera.uuidString) && !$0.contains(other.id.uuidString)
+        })
+        await host.broker.closeSession(session, operatorKey: host.operatorKey)
+    }
+
+    func testScopedReadRejectsInvalidInputAndWithholdsUnauditedData() async throws {
+        let item = record(camera: UUID(), receivedAt: now)
+        let action = ACTAScopedISAPIReadAction(provider: FixtureProvider(records: [item]))
+        let made = await ACTALocalActionBroker.make(actions: [action], allowedActionIDs: [action.id], audit: { event in
+            if event.phase == .result && event.outcome == "success" { throw CocoaError(.fileWriteUnknown) }
+        })
+        let host = try XCTUnwrap(made)
+        let issued = await host.broker.openSession(operatorKey: host.operatorKey, input: .chat,
+                                                   threadID: "fixture", actionIDs: [action.id])
+        let session = try XCTUnwrap(issued)
+        for args in [#"{"limit":0}"#, #"{"limit":51}"#, #"{"camera_id":"private"}"#] {
+            let result = await host.broker.request(session: session, actionID: action.id, argumentsJSON: args)
+            XCTAssertFalse(result.success)
+        }
+        let result = await host.broker.request(session: session, actionID: action.id, argumentsJSON: "{}")
+        XCTAssertTrue(result.error?.hasPrefix("AUDIT_FAILED:") == true)
+        XCTAssertFalse(result.outputJSON.contains(item.id.uuidString))
+        let invalid = ACTAScopedISAPIReadAction(provider: FixtureProvider(records: [item, item]))
+        let duplicate = try await invalid.execute(parameters: [:], context: ACTAActionContext())
+        XCTAssertFalse(duplicate.success)
+        let unavailable = ACTAScopedISAPIReadAction(provider: FailingProvider(error: .unavailable))
+        let failure = try await unavailable.execute(parameters: [:], context: ACTAActionContext())
+        XCTAssertFalse(failure.success)
+        await host.broker.closeSession(session, operatorKey: host.operatorKey)
     }
 
     func testFilterOrderingLimitAndMinimalOutput() async throws {

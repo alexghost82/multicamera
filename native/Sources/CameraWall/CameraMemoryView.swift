@@ -4,6 +4,7 @@ import CameraCore
 
 struct CameraMemoryView: View {
     @ObservedObject var model: WallModel
+    var narrativePresentation: ACTANarrativePresentationState? = nil
     @Environment(\.locale) private var locale
     @State private var selectedFrame: CameraMemoryFrame?
     @State private var selectedImage: NSImage?
@@ -17,10 +18,6 @@ struct CameraMemoryView: View {
 
     private var memoryEnabled: Bool {
         model.featurePreferences.enabledFeatures.contains(.chronologicalMemory)
-    }
-
-    private var filteredChapters: [ACTANarrativeChapterRecord] {
-        showPinnedOnly ? model.actaNarrativeChapters.filter(\.pinned) : model.actaNarrativeChapters
     }
 
     var body: some View {
@@ -120,8 +117,17 @@ struct CameraMemoryView: View {
                     refreshFrames()
                 }
             } catch {
-                loadError = error.localizedDescription
+                                                       loadError = error.localizedDescription
             }
+            if let narrativePresentation {
+                do { try narrativePresentation.refresh() }
+                catch { loadError = ACTANarrativePresentationState.Failure.unavailable.localizedDescription }
+            }
+        }
+        .onChange(of: model.actaNarrativeChapters) { _, _ in
+            guard let narrativePresentation else { return }
+            do { try narrativePresentation.refresh() }
+            catch { loadError = ACTANarrativePresentationState.Failure.unavailable.localizedDescription }
         }
         .sheet(item: $selectedFrame) { frame in
             VStack(alignment: .leading, spacing: 12) {
@@ -152,6 +158,7 @@ struct CameraMemoryView: View {
                 HStack {
                     Button("Restore AI Summary") {
                         model.saveACTANarrativeOperatorText(chapter, text: nil)
+                        refreshNarrativeAfterTextEdit()
                         editingChapter = nil
                     }
                     Spacer()
@@ -160,6 +167,7 @@ struct CameraMemoryView: View {
                     }
                     Button("Save Operator Text") {
                         model.saveACTANarrativeOperatorText(chapter, text: operatorTextDraft)
+                        refreshNarrativeAfterTextEdit()
                         editingChapter = nil
                     }
                     .buttonStyle(.borderedProminent).tint(ACTATheme.actionFill)
@@ -189,14 +197,32 @@ struct CameraMemoryView: View {
 
     @ViewBuilder
     private var actaMemorySection: some View {
+        if let narrativePresentation {
+            NarrativePresentationObserver(state: narrativePresentation) { presentation in
+                narrativeSection(presentation)
+            }
+        } else {
+            narrativeSection(nil)
+        }
+    }
+
+    @ViewBuilder
+    private func narrativeSection(_ presentation: ACTANarrativePresentationState?) -> some View {
+        let rows = (presentation?.rows ?? []).filter { !showPinnedOnly || $0.chapter.pinned }
+        let legacy = model.actaNarrativeChapters.filter { !showPinnedOnly || $0.pinned }
+        let count = presentation == nil ? legacy.count : rows.count
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Label("ACTA Memory · Narrative Chapters (\(filteredChapters.count))", systemImage: "book.pages")
+                Label("ACTA Memory · Narrative Chapters (\(count))", systemImage: "book.pages")
                     .font(.system(size: ACTAType.body, weight: .semibold))
                 Spacer()
                 Toggle("Pinned only", isOn: $showPinnedOnly)
                     .toggleStyle(.checkbox)
                     .font(.system(size: ACTAType.metadata))
+                if let presentation {
+                    Button("Refresh chapters") { refreshNarrative(presentation) }
+                        .font(.system(size: ACTAType.metadata))
+                }
                 if let firstCam = model.config.cameras.first(where: \.enabled) {
                     Button("Close chapter now") {
                         model.forceCloseACTANarrativeChapter(cameraID: firstCam.id)
@@ -209,11 +235,30 @@ struct CameraMemoryView: View {
                 .font(.system(size: ACTAType.metadata))
             }
 
-            if !filteredChapters.isEmpty {
+            if presentation == nil {
+                Text("Narrative pin controls are unavailable.")
+                    .font(.system(size: ACTAType.caption))
+                    .foregroundStyle(ACTATheme.textSecondary)
+            }
+            if count > 0 {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
-                        ForEach(Array(filteredChapters.prefix(15))) { chapter in
-                            actaChapterRow(chapter)
+                        if let presentation {
+                            ForEach(Array(rows.prefix(15))) { row in
+                                actaChapterRow(row.chapter, canToggle: presentation.canToggle
+                                    && (row.chapter.pinned || row.chapter.operatorMarked)) {
+                                    do {
+                                        try presentation.toggle(row)
+                                        loadError = ""
+                                    } catch {
+                                        loadError = error.localizedDescription
+                                    }
+                                }
+                            }
+                        } else {
+                            ForEach(Array(legacy.prefix(15))) { chapter in
+                                actaChapterRow(chapter, canToggle: false) {}
+                            }
                         }
                     }
                 }
@@ -223,7 +268,8 @@ struct CameraMemoryView: View {
     }
 
     @ViewBuilder
-    private func actaChapterRow(_ chapter: ACTANarrativeChapterRecord) -> some View {
+    private func actaChapterRow(_ chapter: ACTANarrativeChapterRecord,
+                                canToggle: Bool, toggle: @escaping () -> Void) -> some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
@@ -254,12 +300,12 @@ struct CameraMemoryView: View {
                 }
             }
             Spacer()
-            Button {
-                model.toggleACTANarrativePin(chapter)
-            } label: {
+            Button(action: toggle) {
                 Image(systemName: chapter.pinned ? "pin.fill" : "pin")
             }
-            .help(chapter.pinned ? "Unpin chapter" : "Pin chapter")
+            .help(chapter.pinned ? "Unpin chapter" :
+                chapter.operatorMarked ? "Pin chapter" : "Pinning an unmarked chapter is unavailable because it would also mark it.")
+            .disabled(!canToggle)
 
             Button {
                 operatorTextDraft = chapter.operatorText ?? chapter.effectiveSummary
@@ -272,6 +318,23 @@ struct CameraMemoryView: View {
         .padding(8)
         .background(ACTATheme.surfaceElevated.opacity(0.5))
         .cornerRadius(6)
+    }
+
+    private func refreshNarrativeAfterTextEdit() {
+        guard let narrativePresentation else { return }
+        do { try narrativePresentation.refresh() }
+        catch { loadError = ACTANarrativePresentationState.Failure.unavailable.localizedDescription }
+    }
+
+    private func refreshNarrative(_ presentation: ACTANarrativePresentationState) {
+        do {
+            try presentation.refresh()
+            if let id = presentation.reconciliationChapterID {
+                try presentation.reconcile(chapterID: id)
+            }
+            guard presentation.canToggle else { throw ACTANarrativePresentationState.Failure.unavailable }
+            loadError = ""
+        } catch { loadError = ACTANarrativePresentationState.Failure.unavailable.localizedDescription }
     }
 
     private func show(_ frame: CameraMemoryFrame) {
@@ -339,5 +402,11 @@ struct CameraMemoryView: View {
         } catch {
             loadError = error.localizedDescription
         }
+    }
+
+    private struct NarrativePresentationObserver<Content: View>: View {
+        @ObservedObject var state: ACTANarrativePresentationState
+        let content: (ACTANarrativePresentationState) -> Content
+        var body: some View { content(state) }
     }
 }

@@ -39,14 +39,24 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
     @Published private(set) var modelDescriptors: [AnalyticsModelID: AnalyticsModelDescriptor] = [:]
     @Published private(set) var auditEntries: [OperatorAuditEntry] = []
     @Published private(set) var activeBannerIncident: SafetyIncident?
+    @Published private(set) var evidenceDeletionError: (incidentID: UUID, message: String)?
 
+    let settingsWriteGate = ACTAAnalyticsSettingsWriteGate()
     let settingsURL: URL
+    private var settingsStoreSnapshot: VideoAnalyticsSettingsStore.Snapshot?
+    private let settingsLoadError: String?
     let incidentManager: UnifiedIncidentManager
     let evidenceStore: SafetyEvidenceStore
     let auditLog: OperatorAuditLog
 
     private let scheduler = AnalyticsFrameScheduler<IdentityPixelBuffer>()
     private let analyticsQueue = DispatchQueue(label: "CameraWall.LocalVideoAnalyticsEngine", qos: .userInitiated)
+    private let workTracker = AnalyticsWorkTracker()
+    private var drainTask: Task<Void, Never>?
+    private var drainCompleted = false
+    private var drainRevision = UUID()
+    private var startsFenced = false
+    private var deferredStartCameraCount: Int?
     private let stateLock = NSLock()
     private nonisolated(unsafe) var baseFallConfiguration = FallDetectorConfiguration()
     private nonisolated(unsafe) var fallDetectorsByCamera: [UUID: FallDetector] = [:]
@@ -78,10 +88,21 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         self.incidentManager = UnifiedIncidentManager(storageURL: incidentsURL, auditLog: audit)
         self.evidenceStore = SafetyEvidenceStore(baseDirectoryURL: evidenceDirectoryURL)
         self.customPoseModelURL = poseModelURL
-        self.settings = (try? VideoAnalyticsSettingsStore.load(from: settingsURL)) ?? .safeDefaults
+        let settingsSnapshot: VideoAnalyticsSettingsStore.Snapshot?
+        let settingsError: String?
+        do {
+            settingsSnapshot = try VideoAnalyticsSettingsStore.snapshot(from: settingsURL)
+            settingsError = nil
+        } catch {
+            settingsSnapshot = nil
+            settingsError = "Analytics settings could not be loaded: \(error.localizedDescription)"
+        }
+        self.settingsStoreSnapshot = settingsSnapshot
+        self.settingsLoadError = settingsError
+        self.settings = settingsSnapshot?.settings ?? .safeDefaults
         self.incidents = incidentManager.allIncidents()
         self.auditEntries = audit.recentEntries(limit: 200)
-        self.persistenceError = incidentManager.lastPersistenceError ?? audit.lastPersistenceError
+        self.persistenceError = settingsError ?? incidentManager.lastPersistenceError ?? audit.lastPersistenceError
         refreshModelDescriptors()
     }
 
@@ -99,6 +120,14 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
     // MARK: - Lifecycle Management
 
     func startIfEnabled(activeCameraCount: Int) {
+        guard !startsFenced else {
+            deferredStartCameraCount = activeCameraCount
+            return
+        }
+        guard settingsStoreSnapshot != nil else {
+            transitionState(to: .error, reason: "Video analytics settings are unavailable")
+            return
+        }
         guard settings.globalEnabled, ModelSelectionRegistry.isEnabled(.pose) else {
             transitionState(to: .disabled, reason: "Video analytics disabled in settings")
             return
@@ -109,8 +138,10 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         }
 
         if engineState != .disabled { stopEngine() }
+        guard !startsFenced else { return }
         let generation = sessionGeneration
         transitionState(to: .initializing, reason: "Initializing local Core ML analytics models…")
+        guard !startsFenced, sessionGeneration == generation else { return }
         let resolvedURL = customPoseModelURL ?? YOLO26PoseDetector.defaultModelURL
         guard let resolvedURL else {
             updateModelDescriptor(
@@ -126,8 +157,11 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         let detector = poseDetector ?? YOLO26PoseDetector(modelURL: resolvedURL)
         self.poseDetector = detector
         updateModelDescriptor(.yoloPose, status: .loading, filePath: resolvedURL.path, reason: "Loading Core ML Pose model…")
+        guard !startsFenced, sessionGeneration == generation else { return }
 
+        let loadTicket = workTracker.begin()
         modelLoadTask = Task.detached(priority: .userInitiated) { [weak self] in
+            defer { loadTicket.finish() }
             let loadStarted = ProcessInfo.processInfo.systemUptime
             let integrity = try? ModelIntegrityVerifier.computeSHA256(at: resolvedURL)
             do {
@@ -172,6 +206,7 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
     }
 
     func updateRunningState(activeCameraCount: Int) {
+        guard !startsFenced else { return }
         refreshPersistenceStatus()
         guard settings.globalEnabled, ModelSelectionRegistry.isEnabled(.pose) else {
             if engineState != .disabled {
@@ -228,6 +263,42 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         transitionState(to: .disabled, reason: "Analytics engine disabled")
     }
 
+    /// Call synchronously before scheduling a drain so no new work can start.
+    func fenceForDrain() {
+        guard !startsFenced else { return }
+        startsFenced = true
+        drainRevision = UUID()
+        stopEngine()
+    }
+
+    /// Concurrent callers share the same drain; cancellation does not cancel it.
+    func stopAndDrain() async throws {
+        fenceForDrain()
+        let revision = drainRevision
+        if drainTask == nil {
+            drainCompleted = false
+            let tracker = workTracker
+            drainTask = Task { @MainActor [weak self] in
+                await tracker.wait()
+                guard let self, self.startsFenced, self.drainRevision == revision else { return }
+                self.drainCompleted = true
+            }
+        }
+        await drainTask?.value
+        try Task.checkCancellation()
+        guard startsFenced, drainRevision == revision, drainCompleted else { throw CancellationError() }
+    }
+
+    func resumeAfterDrain() throws {
+        guard !startsFenced || (drainTask != nil && drainCompleted) else { throw CancellationError() }
+        startsFenced = false
+        drainTask = nil
+        drainCompleted = false
+        let deferredStart = deferredStartCameraCount
+        deferredStartCameraCount = nil
+        if let deferredStart { startIfEnabled(activeCameraCount: deferredStart) }
+    }
+
     func removeCamera(_ cameraID: UUID) {
         cameraNamesByID.removeValue(forKey: cameraID)
         stateLock.lock()
@@ -268,23 +339,40 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         stateLock.lock(); baseFallConfiguration = configuration; stateLock.unlock()
     }
 
-    func updateSettings(_ newSettings: VideoAnalyticsSettings) throws {
-        let validated = newSettings.clamped()
-        try validated.validate()
-        try VideoAnalyticsSettingsStore.save(validated, to: settingsURL)
-        let activeCameraCount = trackedPosesByCamera.count
-        stopEngine()
-        settings = validated
-        auditLog.record(
-            action: .settingsUpdated,
-            summary: "Updated video analytics settings (profile: \(validated.sensitivityProfile.rawValue), globalEnabled: \(validated.globalEnabled))"
-        )
-        auditEntries = auditLog.recentEntries(limit: 200)
-        if !validated.globalEnabled {
+    func updateSettings(_ newSettings: VideoAnalyticsSettings, expectedRevision: UUID? = nil) throws {
+        try settingsWriteGate.perform(expectedRevision: expectedRevision) {
+            let validated = newSettings.clamped()
+            try validated.validate()
+            guard let before = settingsStoreSnapshot, before.settings == settings,
+                  let saved = try VideoAnalyticsSettingsStore.compareAndSave(validated, expected: before, to: settingsURL) else {
+                throw ConfigurationError.invalid("Analytics settings changed on disk; reload before saving.")
+            }
+            settingsStoreSnapshot = saved
+            let activeCameraCount = trackedPosesByCamera.count
             stopEngine()
-        } else {
-            startIfEnabled(activeCameraCount: activeCameraCount)
+            settings = validated
+            auditLog.record(
+                action: .settingsUpdated,
+                summary: "Updated video analytics settings (profile: \(validated.sensitivityProfile.rawValue), globalEnabled: \(validated.globalEnabled))"
+            )
+            auditEntries = auditLog.recentEntries(limit: 200)
+            if !validated.globalEnabled {
+                stopEngine()
+            } else {
+                startIfEnabled(activeCameraCount: activeCameraCount)
+            }
+
         }
+    }
+
+    func reviewedSettingsSnapshot() throws -> ACTAAnalyticsSettingsObservation {
+        let revision = try settingsWriteGate.captureRevision()
+        guard let stored = settingsStoreSnapshot,
+              try VideoAnalyticsSettingsStore.snapshot(from: settingsURL) == stored,
+              stored.settings == settings, try settingsWriteGate.captureRevision() == revision else {
+            throw ConfigurationError.invalid("Analytics settings changed on disk; reload before saving.")
+        }
+        return ACTAAnalyticsSettingsObservation(revision: revision, memory: settings, persisted: stored.settings)
     }
 
     func resetSettingsToSafeDefaults() throws {
@@ -300,7 +388,7 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         pixelBuffer: CVPixelBuffer,
         monotonicTimestamp: TimeInterval
     ) {
-        guard settings.globalEnabled, ModelSelectionRegistry.isEnabled(.pose) else { return }
+        guard !startsFenced, settings.globalEnabled, ModelSelectionRegistry.isEnabled(.pose) else { return }
         cameraNamesByID[camera.id] = camera.name
         if engineState == .disabled {
             startIfEnabled(activeCameraCount: 1)
@@ -319,7 +407,9 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         if settings.enableEvidenceRecording && evidenceStore.shouldSampleFrame(cameraID: camera.id, monotonicNow: monotonicTimestamp) {
             let generation = workGeneration(for: camera.id)
             let capturedAt = Date()
+            let evidenceTicket = workTracker.begin()
             Task.detached(priority: .utility) { [weak self] in
+                defer { evidenceTicket.finish() }
                 if let jpeg = try? await VLMFrameEncoder.jpegData(from: wrapped.value, maxDimension: 640, quality: 0.45) {
                     await MainActor.run { [weak self] in
                         guard let self, self.isCurrent(generation, cameraID: camera.id), self.settings.globalEnabled else { return }
@@ -343,7 +433,7 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
     }
 
     func drainSchedulerIfNeeded(camerasByID: [UUID: Camera]) {
-        guard settings.globalEnabled, ModelSelectionRegistry.isEnabled(.pose), modelDescriptors[.yoloPose]?.status == .ready,
+        guard !startsFenced, settings.globalEnabled, ModelSelectionRegistry.isEnabled(.pose), modelDescriptors[.yoloPose]?.status == .ready,
               let poseDetector else { return }
         let now = ProcessInfo.processInfo.systemUptime
         let currentSettings = settings
@@ -361,7 +451,10 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
             let soundEnabled = currentSettings.enableSoundAlert
             let bannerEnabled = currentSettings.enableVisualAlertBanner
 
+            let workTicket = workTracker.begin()
+            let tracker = workTracker
             analyticsQueue.async { [weak self] in
+                defer { workTicket.finish() }
                 guard let self, self.isCurrent(generation, cameraID: workItem.cameraID) else { return }
                 let started = ProcessInfo.processInfo.systemUptime
                 let threshold = workItem.effectiveConfig.personConfidenceThreshold
@@ -448,7 +541,9 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
                         triggerJPEG = try? Self.encodeTriggerSnapshotJPEG(from: workItem.payload.value)
                     }
 
+                    let deliveryTicket = tracker.begin()
                     Task { @MainActor [weak self] in
+                        defer { deliveryTicket.finish() }
                         guard let self, self.isCurrent(generation, cameraID: workItem.cameraID),
                               self.settings.globalEnabled else { return }
                         self.trackedPosesByCamera[workItem.cameraID] = behaviorResult.trackedPeople
@@ -482,6 +577,7 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         frameHeight: Int,
         monotonicTimestamp: TimeInterval
     ) -> [FallEvent] {
+        guard !startsFenced else { return [] }
         let config = settings.effectiveConfiguration(for: camera.id, cameraYOLOEnabled: camera.yoloEnabled)
         guard config.analyticsEnabled, config.poseEstimationEnabled else { return [] }
         let observations = people.map { person in
@@ -556,7 +652,9 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
                 if candidate.requiresSecondaryVLMVerification, incident.secondaryVLMStatus == .pending,
                    verificationTasks[incident.id] == nil, let verifier = secondaryVLMVerifier {
                     let generation = workGeneration(for: candidate.cameraID)
+                    let verificationTicket = workTracker.begin()
                     verificationTasks[incident.id] = Task { @MainActor [weak self] in
+                        defer { verificationTicket.finish() }
                         let verdict = await verifier(incident, triggerJPEG)
                         guard let self, !Task.isCancelled,
                               self.isCurrent(generation, cameraID: candidate.cameraID) else { return }
@@ -592,13 +690,13 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         note: String? = nil,
         suppressDurationSeconds: TimeInterval? = nil
     ) {
-        _ = incidentManager.transitionStatus(
+        let transitioned = incidentManager.transitionStatus(
             incidentID: incidentID,
             to: status,
             operatorNote: note,
             suppressDurationSeconds: suppressDurationSeconds
         )
-        if activeBannerIncident?.id == incidentID && !status.isOpen {
+        if let transitioned, activeBannerIncident?.id == transitioned.id && !transitioned.status.isOpen {
             activeBannerIncident = nil
         }
         refreshIncidentsAndAudit()
@@ -614,8 +712,12 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
     }
 
     func deleteIncidentEvidence(_ incidentID: UUID) {
-        do { try deleteIncidentEvidenceChecked(incidentID) }
-        catch { /* Persistence diagnostics remain visible; no successful result is fabricated. */ }
+        do {
+            try deleteIncidentEvidenceChecked(incidentID)
+            evidenceDeletionError = nil
+        } catch {
+            evidenceDeletionError = (incidentID, "Evidence deletion failed: \(error.localizedDescription)")
+        }
     }
 
     func deleteIncidentEvidenceChecked(_ incidentID: UUID) throws {
@@ -625,20 +727,27 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
         if let error = persistenceError { throw ConfigurationError.invalid(error) }
         let bundleID = incident.clipID ?? incidentID
         defer { refreshIncidentsAndAudit() }
-        try evidenceStore.deleteEvidence(for: bundleID)
-        incidentManager.clearEvidenceReferences(incidentID: incidentID)
-        auditLog.record(action: .evidenceDeleted, incidentID: incidentID,
-            summary: "Operator deleted stored evidence bundle for incident \(incidentID.uuidString.prefix(8))")
-        if let error = incidentManager.lastPersistenceError ?? auditLog.lastPersistenceError {
-            throw ConfigurationError.invalid(error)
-        }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let saved = try decoder.decode([SafetyIncident].self, from: Data(contentsOf: incidentManager.storageURL))
-        guard let persisted = saved.first(where: { $0.id == incidentID }),
-              persisted.clipID == nil, persisted.snapshotRelativePath == nil,
-              !evidenceStore.hasEvidenceBundle(for: bundleID) else {
-            throw ConfigurationError.invalid("Evidence deletion verification failed.")
+        do {
+            try evidenceStore.deleteEvidence(for: bundleID)
+            guard try !evidenceStore.hasEvidenceBundleChecked(for: bundleID) else {
+                throw ConfigurationError.invalid("Deletion verification failed.")
+            }
+            guard incidentManager.clearEvidenceReferencesAndAudit(incidentID: incidentID) else {
+                throw ConfigurationError.invalid("Incident references and audit could not be saved: \(incidentManager.lastPersistenceError ?? "Incident does not exist.")")
+            }
+            if let error = auditLog.lastPersistenceError {
+                throw ConfigurationError.invalid("Audit record could not be saved: \(error)")
+            }
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let saved = try decoder.decode([SafetyIncident].self, from: Data(contentsOf: incidentManager.storageURL))
+            guard let persisted = saved.first(where: { $0.id == incidentID }),
+                  persisted.clipID == nil, persisted.snapshotRelativePath == nil,
+                  try !evidenceStore.hasEvidenceBundleChecked(for: bundleID) else {
+                throw ConfigurationError.invalid("Deletion verification failed.")
+            }
+        } catch {
+            throw ConfigurationError.invalid("Evidence may have been deleted; check the bundle, incident and audit before retrying: \(error.localizedDescription)")
         }
     }
 
@@ -663,7 +772,7 @@ final class LocalVideoAnalyticsEngine: ObservableObject {
     }
 
     private func refreshPersistenceStatus() {
-        let next = incidentManager.lastPersistenceError ?? auditLog.lastPersistenceError ?? evidenceStore.lastPersistenceError
+        let next = settingsLoadError ?? incidentManager.lastPersistenceError ?? auditLog.lastPersistenceError ?? evidenceStore.lastPersistenceError
         if persistenceError != next { persistenceError = next }
     }
 

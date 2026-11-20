@@ -254,7 +254,9 @@ final class ESpeakVoiceOutputProcess: LocalVoiceOutputProcess {
 
     init(text: String, voice: String, renderWithoutPlayback: Bool = false, audioLease: LocalVoiceAudioLease? = nil,
          completion: @escaping @MainActor (String?) -> Void) throws {
-        let candidates = ["/opt/homebrew/bin/espeak-ng", "/usr/local/bin/espeak-ng"]
+        let bundledExecutable = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Helpers/espeak-ng").path
+        let candidates = [bundledExecutable, "/opt/homebrew/bin/espeak-ng", "/usr/local/bin/espeak-ng"]
         guard let executable = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
             throw VoiceOutputError.engineUnavailable
         }
@@ -263,9 +265,14 @@ final class ESpeakVoiceOutputProcess: LocalVoiceOutputProcess {
         guard fcntl(input.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) != -1 else {
             throw VoiceOutputError.pipeUnavailable
         }
+        var args = ["-p", Self.sandboxProfile, executable]
+        if let resourceURL = Bundle.main.resourceURL,
+           FileManager.default.fileExists(atPath: resourceURL.appendingPathComponent("espeak-ng-data").path) {
+            args.append("--path=\(resourceURL.path)")
+        }
+        args += ["-v", voice, "--stdin"] + (renderWithoutPlayback ? ["--stdout"] : [])
         process.executableURL = URL(fileURLWithPath: "/usr/bin/sandbox-exec")
-        process.arguments = ["-p", Self.sandboxProfile,
-                             executable, "-v", voice, "--stdin"] + (renderWithoutPlayback ? ["--stdout"] : [])
+        process.arguments = args
         process.environment = ["PATH": "/usr/bin:/bin", "LANG": "en_US.UTF-8"]
         process.standardInput = input
         process.standardOutput = FileHandle.nullDevice

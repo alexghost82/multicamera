@@ -222,6 +222,16 @@ final class LocalVLMClientTests: XCTestCase {
     }
 
     func testMissingNativeModelReportsItsPath() async {
+        let previousModels = await MainActor.run {
+            ModelSelectionPreferences(
+                enabled: Set(LocalModelService.allCases.filter { ModelSelectionRegistry.isEnabled($0) }),
+                paths: Dictionary(uniqueKeysWithValues: LocalModelService.allCases.compactMap { service in
+                    ModelSelectionRegistry.path(service).map { (service, $0.path) }
+                }))
+        }
+        defer { ModelSelectionRegistry.update(previousModels) }
+        ModelSelectionRegistry.update(ModelSelectionPreferences(enabled: [.qwen]))
+
         let missingPath = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true).path
         let client = LocalVLMClient(model: missingPath)
@@ -230,7 +240,7 @@ final class LocalVLMClientTests: XCTestCase {
             _ = try await client.analyze(text: "Describe the scene")
             XCTFail("Expected a missing native model error")
         } catch {
-            XCTAssertTrue(error.localizedDescription.contains(missingPath))
+            XCTAssertTrue(error.localizedDescription.contains(missingPath), error.localizedDescription)
         }
     }
 

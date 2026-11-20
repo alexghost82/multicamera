@@ -114,11 +114,29 @@ struct UnifiedHistoryEvidence {
         ]
         let markerIndices = words.indices.filter { markers.contains(String(words[$0])) }
         guard !markerIndices.isEmpty else { return requestedIDs.first ?? matched.first?.key }
+        let managementNouns: Set<String> = [
+            "settings", "config", "configuration", "list", "status", "grid", "layout", "wall", "columns",
+            "настройки", "настроек", "конфигурация", "список", "статус"
+        ]
+        let ordinals: Set<String> = [
+            "first", "second", "third", "fourth",
+            "первой", "второй", "третьей", "четвертой", "четвёртой",
+            "первая", "вторая", "третья", "четвертая", "четвёртая"
+        ]
         var selected: Set<UUID> = []
         for marker in markerIndices {
             let nameIndex = words.index(after: marker)
-            guard nameIndex < words.endIndex else { throw ACTACameraSelectionError.unresolved }
+            guard nameIndex < words.endIndex else {
+                if directory.isEmpty && marker > words.startIndex {
+                    let prevWord = String(words[words.index(before: marker)])
+                    if ordinals.contains(prevWord) { continue }
+                }
+                throw ACTACameraSelectionError.unresolved
+            }
             let name = String(words[nameIndex])
+            if managementNouns.contains(name) && directory.values.allSatisfy({ !$0.localizedCaseInsensitiveContains(name) }) {
+                continue
+            }
             if let uuid = UUID(uuidString: name) {
                 guard directory[uuid] != nil else { throw ACTACameraSelectionError.unresolved }
                 selected.insert(uuid)
@@ -147,8 +165,10 @@ struct UnifiedHistoryEvidence {
 
     static func requestsAllCameras(_ question: String) -> Bool {
         let text = cameraWords(question)
-        return ["всех камер", "все камеры", "всем камерам", "all cameras", "all the cameras"]
-            .contains { text.contains(" \($0) ") }
+        return [
+            "всех камер", "всех камерах", "все камеры", "всем камерам", "всеми камерами",
+            "список камер", "all cameras", "all the cameras", "list cameras"
+        ].contains { text.contains(" \($0) ") }
     }
 
     private static func restrictsAllCameras(_ question: String) -> Bool {

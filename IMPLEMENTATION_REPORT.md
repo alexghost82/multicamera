@@ -1770,6 +1770,41 @@ swift test --package-path native --disable-automatic-resolution --jobs 2 --filte
 4. **Проверка diff (`git diff --check`):**
    - **Exit code:** `0`.
 
+## 2026-11-20 — Phase 4: Reliability & Release Gates (Волны 4A–4D завершены)
+
+Полный отчёт по надёжности, E2E-бенчмаркам, безопасности, упаковке и решению GO / NO-GO сохранён в `docs/PHASE4_RELIABILITY_AND_RELEASE_REPORT.md`.
+
+### Выполненные волны Phase 4
+
+1. **Волна 4A — Полная регрессия всех 1 499 тестов и устранение всех дефектов:**
+   - Исправлен парсер области камер в `native/Sources/CameraWall/UnifiedHistoryEvidence.swift` (добавлены `"всех камерах"`, `"всеми камерами"`, `"list cameras"`, `"список камер"`, исключение служебных существительных после `camera` вроде `"camera settings"` и порядковых числительных при пустом каталоге — устранены 6 падений в `UnifiedAgentHistoryTests`, `ACTACameraListBrokerTests`, `ACTAScopedCameraGetActionTests`, `ACTAAnalyticsTests` при сохранении всех строгих проверок `ACTAScopedInspectionTests`).
+   - Актуализирован `ACTAServiceAdapterTests.swift` под обязательную брокерную сессию (`ACTALocalActionBroker`), изолирован `ModelSelectionRegistry` в `LocalVLMClientTests.swift`, `ACTAPhase3VLLMServingTests.swift` и `ACTAPhase4ReliabilityGateTests.swift` (устранена протечка состояния в `VisionFeatureMatcherTests`), внедрён синтетический `LocalVoiceInput` в `ACTAWave1FFullClosureTests.testVoiceListeningLifecycleThroughBroker` (устранён асинхронный TCC `SIGABRT` в headless `xctest`).
+   - Создан `native/Tests/CameraWallTests/ACTAPhase4ReliabilityGateTests.swift` (4 XCTest: совместимость legacy `ghost*` JSON и SQLite-миграций при повторном открытии, `local_only` + восстановление после перезапуска + 0 секретов на диске, отмена и отбрасывание stale inference с дренажом limiter, Pose/FSM `FallDetector` + персистенция `VideoAnalyticsSettings`).
+   - **Полный нативный прогон всего репозитория:**
+     `swift test --package-path native --build-system native --disable-automatic-resolution --jobs 2`
+     - **Exit code:** `0` — **1 386 XCTest (67 opt-in skipped, 0 failures) + 113 Swift Testing (113 passed, 0 failures) = 1 432 passed, 0 failures** (`47.52s`).
+
+2. **Волна 4B — Живые opt-in аппаратные, модельные и 64-поточные E2E-проверки на Apple M5:**
+   - `LocalShowcaseServerTests` (loopback HTTP + bearer): **4/4 passed** (`0.052s`).
+   - `WorkerControlTests` (mTLS/протокол): **6/6 passed** (`0.003s`).
+   - `ONNXReIDEncoderTests` (реальные `yolo26m-reid.onnx` + `osnet_ain_x1_0_vehicle_reid.onnx`): **2/2 passed** (`0.331s`).
+   - `ONNXSegmentationTests` (реальный `yolo26n-seg.onnx`): **1/1 passed** (`0.768s`).
+   - `YOLO26PoseDetectorTests` (реальный CoreML `yolo26s-pose.mlpackage` на `bus.jpg`): **2/2 passed** (`1.154s`).
+   - `YOLO26Tests` (реальный CoreML `yolo26n.mlmodelc` на `bus.jpg`): **4/4 passed** (`YOLO26n reference: 5 objects, 5 ms`).
+   - `StreamingTests/testWallStreamingRecoveryAndLayout` (`CAMERAWALL_GO2RTC=... CAMERAWALL_RUN_STREAMING_INTEGRATION=1 CAMERAWALL_RUN_STREAMING_KEYCHAIN_INTEGRATION=1 CAMERAWALL_RUN_STREAMING_YOLO=1 CAMERAWALL_TEST_STREAMS=64`): **Exit code 0** (`16.409s`), **`Concurrent VideoToolbox sessions with >=5 frames: 64/64`** (честная область: 64 локальных loopback RTSP H.264 `640×360@15fps` потока через `go2rtc` + VideoToolbox + YOLO26 recovery; не 64 физические 4K WAN-камеры с одновременным многочасовым Pose+VLM soak).
+
+3. **Волна 4C — Release-сборка, entitlements, локализация и упаковка `.app`:**
+   - `swift build --package-path native --build-system native -c release --disable-sandbox --disable-automatic-resolution --cache-path /tmp/acta-swiftpm-cache --jobs 2` → **Exit code `0`** (`121.03s`, `native/.build/release/CameraWall`, `101 MB`).
+   - Добавлен шаблон Hardened Runtime `native/CameraWall.entitlements` (с явной документацией по 3 dylibs Homebrew FFmpeg из `otool -L`).
+   - `plutil -lint native/Info.plist native/CameraWall.entitlements native/Resources/en.lproj/Localizable.strings native/Resources/ru.lproj/Localizable.strings` → **Exit code `0` (`OK`)**.
+   - `make -C native localization-audit` → **Exit code `0`** (`2110` UI-строк, `0` непереведённых).
+   - Обновлён `native/dist/CameraWall.app`, подписан локально с `native/CameraWall.entitlements` и проверен `codesign --verify --deep --strict --verbose=2 native/dist/CameraWall.app` → **Exit code `0`** (`valid on disk`, `satisfies its Designated Requirement`).
+
+4. **Волна 4D — Итоговое решение GO / NO-GO и откат:**
+   - **Локальное использование на Mac (разработчик / одиночный хост):** **GO** (все фазы 1–4 реализованы и подтверждены зелёными тестами и живыми замерами на Apple M5).
+   - **Внешняя дистрибуция macOS (Gatekeeper / Notarization):** **NO-GO до выполнения внешних предпосылок** — на этом Mac `security find-identity -v -p codesigning` показывает `0 valid identities found` (нет сертификата Apple Developer ID Application и профиля `notarytool`), а 3 динамических библиотеки FFmpeg из `/opt/homebrew/opt/ffmpeg/lib/` должны быть упакованы и переподписаны внутри `Contents/Frameworks` перед удалением `disable-library-validation`.
+   - **Миграции и откат:** разрушительных миграций SQLite, изменений Keychain и переименований `ghost*` нет; откат сводится к возврату файлов Phase 4 без затрагивания пользовательских данных.
+
 ## 2026-11-20 — Phase 4: частичная регрессия и release gate
 
 **Статус: NO-GO.** Проводились только синтетические проверки, без живых камер,

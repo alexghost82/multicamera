@@ -58,23 +58,59 @@ final class ACTAServiceAdapterTests: XCTestCase {
                 return nil
             }, localAgentInference: { prompt, _ in await script.reply(to: prompt) })
         let coordinator = ACTAAnalyticsCoordinator(aiClient: client, trackingStore: store)
-        _ = await coordinator.askACTAChatAgent(question: "Установи семь колонок", maxSteps: 3)
-        XCTAssertEqual(model.config.columns, 7)
+        let brokerActions: [any ACTAActionProtocol] = [
+            CanvasSetColumnsAction(model: model),
+            SettingsUpdatePermissionsAction(featureProvider: WallFeaturePreferencesProvider(model: model))
+        ]
+        let allowedIDs = Set(brokerActions.map(\.id))
+        let scopes = ACTAAnalyticsCoordinator.localInspectionIDs
+        let madeHost = await ACTALocalActionBroker.make(
+            actions: brokerActions,
+            allowedActionIDs: allowedIDs,
+            allowedInspectionIDs: scopes,
+            audit: { _ in }
+        )
+        let host = try XCTUnwrap(madeHost)
+        let openedSession = await host.broker.openSession(
+            operatorKey: host.operatorKey,
+            input: .chat,
+            threadID: "default",
+            actionIDs: allowedIDs,
+            inspectionIDs: scopes
+        )
+        let session = try XCTUnwrap(openedSession)
+        defer {
+            Task { await host.broker.closeSession(session, operatorKey: host.operatorKey) }
+        }
+        _ = await coordinator.askACTAChatAgent(
+            question: "Установи семь колонок",
+            maxSteps: 3,
+            broker: host.broker,
+            brokerSession: session
+        )
         let requests = await script.requests
         XCTAssertEqual(requests.count, 2)
         XCTAssertTrue(requests.first?.contains("acta__canvas__set_columns") == true)
-        XCTAssertTrue(requests.last?.contains("action_verified") == true)
+        XCTAssertTrue(requests.last?.contains("approval_required") == true)
+        // Broker requires operator review before mutating canvas columns
+        let columnReviews = await host.broker.reviews(operatorKey: host.operatorKey, session: session)
+        let columnRev = try XCTUnwrap(columnReviews.first(where: { $0.actionID == "canvas.set_columns" }))
+        let approvedColumns = await host.broker.resolve(operatorKey: host.operatorKey, session: session, reviewed: columnRev, approved: true)
+        XCTAssertTrue(approvedColumns.success, approvedColumns.error ?? "expected approved columns")
+        XCTAssertEqual(model.config.columns, 7)
 
         let tools = try await ACTAAnalyticsCoordinator.registryTools()
         XCTAssertFalse(tools.contains { $0.name == "acta__memory__clear_all_frames" }, "Disconnected adapters must not be advertised")
         XCTAssertTrue(tools.allSatisfy { !$0.name.contains(".") })
 
-        let pending = await coordinator.executeAgentTool(toolName: "acta__settings__update_permissions",
-            arguments: ["allow_voice_input": "true"])
-        XCTAssertTrue(pending.outputJSON.contains("confirmation_required"))
-        let proposals = try store.listACTAChatActions(threadID: "default", status: "proposed")
-        XCTAssertEqual(proposals.count, 1)
-        XCTAssertTrue(proposals.first?.actionID.hasPrefix("CONFIRM-") == true)
+        let pending = await host.broker.request(
+            session: session,
+            actionID: "settings.update_permissions",
+            argumentsJSON: #"{"allow_voice_input":true}"#
+        )
+        XCTAssertTrue(pending.requiresOperatorConfirmation, pending.error ?? "expected confirmation")
+        let permReviews = await host.broker.reviews(operatorKey: host.operatorKey, session: session)
+        XCTAssertTrue(permReviews.contains { $0.actionID == "settings.update_permissions" })
         XCTAssertFalse(model.featurePreferences.allowVoiceInput)
     }
 

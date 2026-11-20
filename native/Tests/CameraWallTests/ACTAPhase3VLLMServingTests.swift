@@ -397,6 +397,8 @@ final class ACTAPhase3VLLMServingTests: XCTestCase {
         serverManager: ACTALocalVLLMServerManager,
         agentClient: ACTAAIClient? = nil
     ) throws -> WallModel {
+        let previousModels = IsolatedWallFixtureSupport.modelPreferences()
+        addTeardownBlock { ModelSelectionRegistry.update(previousModels) }
         let cam = Camera(name: "Lobby", substream: "rtsp://127.0.0.1:8554/lobby", enabled: false)
         var config = WallConfiguration()
         config.cameras = [cam]

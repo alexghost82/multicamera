@@ -383,7 +383,9 @@ final class SystemACTALocalVLLMProcess: ACTALocalVLLMManagedProcess, @unchecked 
     ]
 
     static func installedExecutablePath() -> String? {
-        candidatePaths.first { FileManager.default.isExecutableFile(atPath: $0) }
+        let bundled = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/vllm").path
+        let allCandidates = [bundled] + candidatePaths
+        return allCandidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
     private let process: Process

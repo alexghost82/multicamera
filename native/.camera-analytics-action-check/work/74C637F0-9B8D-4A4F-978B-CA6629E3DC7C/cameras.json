@@ -1,0 +1,23 @@
+{
+  "apiPort" : 11984,
+  "cameras" : [
+    {
+      "aiChatEnabled" : true,
+      "enabled" : true,
+      "id" : "DAD1D106-1DCF-4845-9F5C-8A48D83D66E7",
+      "isapiEventsEnabled" : false,
+      "isapiHTTPS" : false,
+      "isapiPort" : 80,
+      "localDeviceID" : "synthetic",
+      "name" : "Synthetic",
+      "substream" : "",
+      "yoloEnabled" : false
+    }
+  ],
+  "columns" : 4,
+  "detectionFPS" : 2,
+  "detectionThreshold" : 0.35,
+  "go2rtcPath" : "/opt/homebrew/bin/go2rtc",
+  "rtspPort" : 18554,
+  "staleAfterMilliseconds" : 1000
+}

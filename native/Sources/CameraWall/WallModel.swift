@@ -1834,7 +1834,11 @@ final class WallModel: ObservableObject {
 
     @discardableResult
     func startManagedLocalVLLMAndWait() async throws -> ACTALocalVLLMTelemetrySnapshot {
-        let modelPath = ModelSelectionRegistry.path(.qwen)?.path ?? vlmPreferences.model
+        let bundledQwen = Bundle.main.resourceURL?
+            .appendingPathComponent("qwen3.5-9b", isDirectory: true)
+            .path
+        let resolvedBundledQwen = bundledQwen.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil }
+        let modelPath = ModelSelectionRegistry.path(.qwen)?.path ?? resolvedBundledQwen ?? vlmPreferences.model
         let parsedPort = URLComponents(string: vlmPreferences.actaVLLMBaseURL)?.port ?? 8000
         let launch = ACTALocalVLLMLaunchConfig(
             modelPath: modelPath,

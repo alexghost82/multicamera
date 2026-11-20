@@ -455,8 +455,17 @@ final class ACTAWave1FFullClosureTests: XCTestCase {
         let dir = try tempDir()
         let (model, _) = try await makeIsolatedModel(dir: dir, allowVoiceInput: true)
 
+        final class SyntheticVoiceCapture: LocalVoiceCapture {
+            func finish() {}
+            func cancel() {}
+        }
         let filterState = await MainActor.run { () -> ACTACanvasFilterState in
-            let state = ACTACanvasFilterState()
+            let voice = LocalVoiceInput(
+                speechPermission: { true },
+                microphonePermission: { true },
+                makeCapture: { _, _ in SyntheticVoiceCapture() }
+            )
+            let state = ACTACanvasFilterState(analysisVoiceInput: voice)
             model.canvasFilterBridge.attach(state)
             return state
         }
